@@ -1,0 +1,6 @@
+@NDTPrintApi_HostAddress = http://localhost:5276
+
+GET {{NDTPrintApi_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

@@ -1,0 +1,6 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/NDTPrintApi.Core/NDTPrintApi.Core.csproj" />
+    <Project Path="src/NDTPrintApi/NDTPrintApi.csproj" />
+  </Folder>
+</Solution>
