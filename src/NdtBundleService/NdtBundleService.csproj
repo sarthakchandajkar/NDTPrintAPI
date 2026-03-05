@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Allows hosting as a Windows Service when deployed -->
+    <WindowsService>true</WindowsService>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Swagger UI for testing the flow and simulating PO end -->
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="10.1.4" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.0" />
+  </ItemGroup>
+
+  <!-- To use Telerik NDT tag design: uncomment below, add Telerik NuGet feed (see docs/TELERIK-NDT-TAG.md), and register TelerikNdtLabelPrinter in Program.cs -->
+  <!-- <ItemGroup>
+    <ProjectReference Include="..\NdtBundleService.Reports\NdtBundleService.Reports.csproj" />
+  </ItemGroup> -->
+
+</Project>
+

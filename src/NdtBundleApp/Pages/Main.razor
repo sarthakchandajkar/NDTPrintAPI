@@ -1,0 +1,271 @@
+@page "/"
+@inject HttpClient Http
+
+<div class="container">
+    <h1>NDT Bundle Service – Test UI</h1>
+
+    <div class="card">
+        <div class="form-group">
+            <label for="baseUrl">Service URL</label>
+            <input id="baseUrl" type="text" @bind="baseUrl" placeholder="http://localhost:5000" />
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label for="poNumber">PO Number</label>
+                <input id="poNumber" type="text" @bind="poNumber" placeholder="e.g. 1000055673" />
+            </div>
+            <div class="form-group">
+                <label for="millNo">Mill No</label>
+                <select id="millNo" @bind="millNo">
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="3">3</option>
+                    <option value="4">4</option>
+                </select>
+            </div>
+        </div>
+        <button class="btn btn-primary" @onclick="SimulatePoEnd" disabled="@isBusy">
+            Simulate PO End
+        </button>
+        <div class="status @(isError ? "error" : "")">@statusText</div>
+    </div>
+
+    <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+            <strong>WIP data and NDT pipe count</strong>
+            <button class="btn btn-secondary" @onclick="RefreshStatus" disabled="@isBusy">Refresh</button>
+        </div>
+
+        @if (wip is null)
+        {
+            <p>No WIP data loaded yet.</p>
+        }
+        else
+        {
+            <table class="table">
+                <tbody>
+                    <tr><th>PO Number</th><td>@wip.PoNumber</td></tr>
+                    <tr><th>Mill Number</th><td>@wip.MillNumber</td></tr>
+                    <tr><th>Planned Month</th><td>@wip.PlannedMonth</td></tr>
+                    <tr><th>Pipe Grade</th><td>@wip.PipeGrade</td></tr>
+                    <tr><th>Pipe Size</th><td>@wip.PipeSize</td></tr>
+                    <tr><th>Pipe Thickness</th><td>@wip.PipeThickness</td></tr>
+                    <tr><th>Pipe Length</th><td>@wip.PipeLength</td></tr>
+                    <tr><th>Pieces Per Bundle</th><td>@wip.PiecesPerBundle</td></tr>
+                    <tr><th>Total Pieces</th><td>@wip.TotalPieces</td></tr>
+                </tbody>
+            </table>
+        }
+
+        <div style="margin-top: 0.75rem;">
+            <strong>Current NDT pipes produced for this PO / mill:</strong>
+            @if (summary is null)
+            {
+                <span> not loaded.</span>
+            }
+            else
+            {
+                <span> @summary.TotalNdtPipes</span>
+            }
+        </div>
+    </div>
+
+    <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+            <strong>Generated bundle CSV files</strong>
+            <button class="btn btn-secondary" @onclick="RefreshBundles" disabled="@isBusy">Refresh list</button>
+        </div>
+        @if (bundles.Count == 0)
+        {
+            <ul class="bundle-list empty">
+                <li>No bundle files yet. Ensure NdtBundleService is running and Simulate PO End has been used.</li>
+            </ul>
+        }
+        else
+        {
+            <ul class="bundle-list">
+                @foreach (var b in bundles)
+                {
+                    <li>@b.FileName</li>
+                }
+            </ul>
+        }
+    </div>
+
+    <p class="footer">Ensure NdtBundleService is running (dotnet run --project src\\NdtBundleService\\NdtBundleService.csproj).</p>
+</div>
+
+@code {
+    private string baseUrl = "http://localhost:5000";
+    private string poNumber = "";
+    private int millNo = 1;
+    private string statusText = "";
+    private bool isBusy;
+    private bool isError;
+    private List<BundleFileInfo> bundles = new();
+    private WipInfo? wip;
+    private NdtSummary? summary;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RefreshStatus();
+        await RefreshBundles();
+    }
+
+    private async Task SimulatePoEnd()
+    {
+        var po = poNumber?.Trim() ?? "";
+        if (string.IsNullOrEmpty(po))
+        {
+            statusText = "Please enter a PO Number.";
+            isError = true;
+            return;
+        }
+
+        isBusy = true;
+        isError = false;
+            statusText = "Calling Simulate PO End...";
+
+        try
+        {
+            var url = baseUrl.TrimEnd('/') + "/api/Test/po-end";
+            var body = new { PoNumber = po, MillNo = millNo };
+            var response = await Http.PostAsJsonAsync(url, body);
+
+            if (response.IsSuccessStatusCode)
+            {
+                var result = await response.Content.ReadFromJsonAsync<PoEndResult>();
+                statusText = result?.Message ?? "PO end simulated successfully.";
+                await RefreshStatus();
+                await RefreshBundles();
+            }
+            else
+            {
+                var bodyText = await response.Content.ReadAsStringAsync();
+                statusText = $"Error {(int)response.StatusCode}: {bodyText}";
+                isError = true;
+            }
+        }
+        catch (HttpRequestException ex)
+        {
+            statusText = $"Cannot reach service at {baseUrl}. Is NdtBundleService running? {ex.Message}";
+            isError = true;
+        }
+        catch (Exception ex)
+        {
+            statusText = "Error: " + ex.Message;
+            isError = true;
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task RefreshBundles()
+    {
+        isBusy = true;
+        try
+        {
+            var url = baseUrl.TrimEnd('/') + "/api/Test/bundles";
+            var options = new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var list = await Http.GetFromJsonAsync<List<BundleFileInfo>>(url, options);
+            bundles = list ?? new List<BundleFileInfo>();
+            if (!isError)
+                statusText = bundles.Count > 0 ? $"Found {bundles.Count} bundle file(s)." : "No bundle files yet.";
+        }
+        catch
+        {
+            if (bundles.Count == 0)
+                statusText = $"Cannot reach service at {baseUrl}. Start NdtBundleService first.";
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private async Task RefreshStatus()
+    {
+        isBusy = true;
+        try
+        {
+            var root = baseUrl.TrimEnd('/');
+
+            // Load WIP info (from WIP CSV)
+            try
+            {
+                var wipUrl = root + "/api/Test/wip-info";
+                var options = new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+                wip = await Http.GetFromJsonAsync<WipInfo>(wipUrl, options);
+                if (wip is not null && string.IsNullOrWhiteSpace(poNumber))
+                {
+                    // Default PO text box from WIP file if empty
+                    poNumber = wip.PoNumber ?? "";
+                }
+            }
+            catch
+            {
+                // Ignore; UI will just show "not loaded"
+            }
+
+            // Load current NDT pipe count summary for the entered PO/mill
+            try
+            {
+                var po = (poNumber ?? string.Empty).Trim();
+                if (!string.IsNullOrEmpty(po))
+                {
+                    var summaryUrl = root + $"/api/Test/ndt-summary?poNumber={Uri.EscapeDataString(po)}&millNo={millNo}";
+                    var options = new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+                    summary = await Http.GetFromJsonAsync<NdtSummary>(summaryUrl, options);
+                }
+            }
+            catch
+            {
+                // Ignore; UI will just show "not loaded"
+            }
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private sealed class PoEndResult
+    {
+        public string? Message { get; set; }
+    }
+
+    private sealed class BundleFileInfo
+    {
+        public string? FileName { get; set; }
+        public string? FullPath { get; set; }
+    }
+
+    private sealed class WipInfo
+    {
+        public string? PoNumber { get; set; }
+        public string? MillNumber { get; set; }
+        public string? PlannedMonth { get; set; }
+        public string? PipeGrade { get; set; }
+        public string? PipeSize { get; set; }
+        public string? PipeThickness { get; set; }
+        public string? PipeLength { get; set; }
+        public string? PipeWeightPerMeter { get; set; }
+        public string? PipeType { get; set; }
+        public string? OutputItemcode { get; set; }
+        public string? ItemDescription { get; set; }
+        public string? TotalPieces { get; set; }
+        public string? PiecesPerBundle { get; set; }
+        public string? ProductType { get; set; }
+        public string? POSpecification { get; set; }
+        public string? InputWipItemcode { get; set; }
+    }
+
+    private sealed class NdtSummary
+    {
+        public string? PoNumber { get; set; }
+        public int MillNo { get; set; }
+        public int TotalNdtPipes { get; set; }
+    }
+}

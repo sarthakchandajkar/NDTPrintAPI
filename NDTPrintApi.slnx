@@ -2,5 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/NDTPrintApi.Core/NDTPrintApi.Core.csproj" />
     <Project Path="src/NDTPrintApi/NDTPrintApi.csproj" />
+    <Project Path="src/NdtBundleService/NdtBundleService.csproj" />
+    <Project Path="src/NdtBundleApp/NdtBundleApp.csproj" />
   </Folder>
 </Solution>
