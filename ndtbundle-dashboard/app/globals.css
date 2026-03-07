@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #f9fafb;
+  --foreground: #111827;
+  --card: #ffffff;
+  --primary: #22c55e;
+  --primary-hover: #16a34a;
+  --primary-light: #f0fdf4;
+  --border: #e5e7eb;
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}

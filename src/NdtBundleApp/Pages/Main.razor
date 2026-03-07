@@ -92,6 +92,31 @@
         }
     </div>
 
+    <div class="card">
+        <h3>Reconcile Bundle</h3>
+        <p class="text-muted">When the actual NDT pipe count in the plant does not match the application, select the NDT Batch No. and enter the correct count. This will update the value in the UI, reprint the tag with the new count, update the CSV file(s), and update the database (if configured).</p>
+        <div class="form-row">
+            <div class="form-group">
+                <label for="reconcileBatchNo">NDT Batch No.</label>
+                <select id="reconcileBatchNo" @bind="reconcileBatchNo" @bind:after="OnReconcileBatchNoChanged" class="form-control">
+                    <option value="">-- Select bundle --</option>
+                    @foreach (var b in reconcileBundles)
+                    {
+                        <option value="@b.BundleNo">@b.BundleNo (PO: @b.PoNumber, Mill: @b.MillNo, current: @b.TotalNdtPcs pcs)</option>
+                    }
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="newNdtPipes">New NDT Pipes (correct count)</label>
+                <input id="newNdtPipes" type="number" min="0" @bind="newNdtPipes" class="form-control" placeholder="e.g. 10" />
+            </div>
+        </div>
+        <button class="btn btn-primary" @onclick="ReconcileBundle" disabled="@(isBusy || string.IsNullOrEmpty(reconcileBatchNo) || newNdtPipes < 0)">
+            Reconcile Bundle
+        </button>
+        <div class="status @(reconcileError ? "error" : "")" style="margin-top: 0.5rem;">@reconcileStatus</div>
+    </div>
+
     <p class="footer">Ensure NdtBundleService is running (dotnet run --project src\\NdtBundleService\\NdtBundleService.csproj).</p>
 </div>
 
@@ -106,10 +131,84 @@
     private WipInfo? wip;
     private NdtSummary? summary;
 
+    private List<ReconcileBundleItem> reconcileBundles = new();
+    private string reconcileBatchNo = "";
+    private int newNdtPipes;
+    private string reconcileStatus = "";
+    private bool reconcileError;
+
     protected override async Task OnInitializedAsync()
     {
         await RefreshStatus();
         await RefreshBundles();
+        await RefreshReconcileBundles();
+    }
+
+    private void OnReconcileBatchNoChanged()
+    {
+        var b = reconcileBundles.FirstOrDefault(x => x.BundleNo == reconcileBatchNo);
+        if (b != null)
+            newNdtPipes = b.TotalNdtPcs;
+    }
+
+    private async Task RefreshReconcileBundles()
+    {
+        try
+        {
+            var url = baseUrl.TrimEnd('/') + "/api/Reconcile/bundles";
+            var options = new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var list = await Http.GetFromJsonAsync<List<ReconcileBundleItem>>(url, options);
+            reconcileBundles = list ?? new List<ReconcileBundleItem>();
+        }
+        catch
+        {
+            reconcileBundles = new List<ReconcileBundleItem>();
+        }
+    }
+
+    private async Task ReconcileBundle()
+    {
+        if (string.IsNullOrWhiteSpace(reconcileBatchNo))
+        {
+            reconcileStatus = "Please select an NDT Batch No.";
+            reconcileError = true;
+            return;
+        }
+
+        isBusy = true;
+        reconcileError = false;
+        reconcileStatus = "Reconciling...";
+
+        try
+        {
+            var url = baseUrl.TrimEnd('/') + "/api/Reconcile/reconcile";
+            var body = new { NdtBatchNo = reconcileBatchNo, NewNdtPipes = newNdtPipes };
+            var response = await Http.PostAsJsonAsync(url, body);
+
+            if (response.IsSuccessStatusCode)
+            {
+                var result = await response.Content.ReadFromJsonAsync<ReconcileResult>(new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                reconcileStatus = result?.Message ?? "Bundle reconciled.";
+                await RefreshReconcileBundles();
+                await RefreshBundles();
+                await RefreshStatus();
+            }
+            else
+            {
+                var bodyText = await response.Content.ReadAsStringAsync();
+                reconcileStatus = $"Error {(int)response.StatusCode}: {bodyText}";
+                reconcileError = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            reconcileStatus = "Error: " + ex.Message;
+            reconcileError = true;
+        }
+        finally
+        {
+            isBusy = false;
+        }
     }
 
     private async Task SimulatePoEnd()
@@ -267,5 +366,19 @@
         public string? PoNumber { get; set; }
         public int MillNo { get; set; }
         public int TotalNdtPipes { get; set; }
+    }
+
+    private sealed class ReconcileBundleItem
+    {
+        public string? BundleNo { get; set; }
+        public string? PoNumber { get; set; }
+        public int MillNo { get; set; }
+        public int TotalNdtPcs { get; set; }
+        public string? SlitNo { get; set; }
+    }
+
+    private sealed class ReconcileResult
+    {
+        public string? Message { get; set; }
     }
 }

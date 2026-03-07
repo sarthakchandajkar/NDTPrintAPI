@@ -5,23 +5,34 @@ using NdtBundleService.Configuration;
 namespace NdtBundleService.Services;
 
 /// <summary>
-/// Loads PO Number -> Pipe Size from a CSV file in a separate folder.
-/// Expected columns: PO Number, Pipe Size. Rows are linked to Input Slit data by PO Number.
+/// Loads PO Number -> Pipe Size from a CSV file. When PoPlanFolder is set, uses the current PO plan file (one file at a time; advance on PO End). Otherwise uses PipeSizeCsvPath.
+/// Expected columns: PO Number (or PO_No), Pipe Size.
 /// </summary>
 public sealed class PipeSizeCsvProvider : IPipeSizeProvider
 {
     private readonly NdtBundleOptions _options;
+    private readonly ICurrentPoPlanService? _currentPoPlanService;
     private readonly ILogger<PipeSizeCsvProvider> _logger;
 
-    public PipeSizeCsvProvider(IOptions<NdtBundleOptions> options, ILogger<PipeSizeCsvProvider> logger)
+    public PipeSizeCsvProvider(IOptions<NdtBundleOptions> options, ICurrentPoPlanService? currentPoPlanService, ILogger<PipeSizeCsvProvider> logger)
     {
         _options = options.Value;
+        _currentPoPlanService = currentPoPlanService;
         _logger = logger;
     }
 
     public async Task<IReadOnlyDictionary<string, string>> GetPipeSizeByPoAsync(CancellationToken cancellationToken)
     {
-        var path = _options.PipeSizeCsvPath;
+        string? path;
+        if (!string.IsNullOrWhiteSpace(_options.PoPlanFolder) && _currentPoPlanService != null)
+        {
+            path = await _currentPoPlanService.GetCurrentPoPlanPathAsync(cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            path = _options.PipeSizeCsvPath;
+        }
+
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
         {
             _logger.LogWarning("Pipe size CSV path not configured or file not found: {Path}. Size-based bundle logic will use Default formation only.", path);

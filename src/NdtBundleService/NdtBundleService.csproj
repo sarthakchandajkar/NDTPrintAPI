@@ -12,12 +12,16 @@
     <!-- Swagger UI for testing the flow and simulating PO end -->
     <PackageReference Include="Swashbuckle.AspNetCore" Version="10.1.4" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.2" />
+    <!-- Free PDF label: no Telerik required -->
+    <PackageReference Include="QuestPDF" Version="2024.10.2" />
+    <PackageReference Include="ZXing.Net" Version="0.16.11" />
+    <PackageReference Include="ZXing.Net.Bindings.Windows.Compatibility" Version="0.16.14" />
+    <PackageReference Include="System.Drawing.Common" Version="9.0.10" />
   </ItemGroup>
-
-  <!-- To use Telerik NDT tag design: uncomment below, add Telerik NuGet feed (see docs/TELERIK-NDT-TAG.md), and register TelerikNdtLabelPrinter in Program.cs -->
-  <!-- <ItemGroup>
-    <ProjectReference Include="..\NdtBundleService.Reports\NdtBundleService.Reports.csproj" />
-  </ItemGroup> -->
+  <ItemGroup>
+    <Compile Remove="Services\TelerikNdtLabelPrinter.cs" />
+  </ItemGroup>
 
 </Project>
 

@@ -18,9 +18,15 @@ public sealed class StubNdtLabelPrinter : INdtLabelPrinter
         _logger = logger;
     }
 
-    public Task PrintLabelAsync(InputSlitRecord contextRecord, string ndtBatchNoFormatted, int totalNdtPcs, bool isReprint, CancellationToken cancellationToken)
+    public Task<bool> PrintLabelAsync(InputSlitRecord contextRecord, string ndtBatchNoFormatted, int totalNdtPcs, bool isReprint, CancellationToken cancellationToken)
     {
         _logger.LogDebug("NDT tag print skipped (stub). Bundle {BundleNo} Pcs {Pcs}. Configure Telerik and BundleLabelCsvPath to enable.", ndtBatchNoFormatted, totalNdtPcs);
-        return Task.CompletedTask;
+        return Task.FromResult(false);
+    }
+
+    public Task<bool> PrintLabelFromDataAsync(NDTBundlePrintData printData, CancellationToken cancellationToken)
+    {
+        _logger.LogDebug("NDT tag print from data skipped (stub). Bundle {BundleNo}.", printData.BundleNo);
+        return Task.FromResult(false);
     }
 }

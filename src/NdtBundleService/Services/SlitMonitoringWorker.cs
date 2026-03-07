@@ -16,12 +16,10 @@ public sealed class SlitMonitoringWorker : BackgroundService
     private readonly NdtBundleOptions _options;
     private readonly IBundleEngine _bundleEngine;
     private readonly IBundleOutputWriter _outputWriter;
+    private readonly INdtBatchStateService _batchState;
+    private readonly ICurrentPoPlanService? _currentPoPlanService;
     private readonly IPlcClient _plcClient;
     private readonly ILogger<SlitMonitoringWorker> _logger;
-
-    // Per (PO, Mill) running NDT pipe totals and batch numbers for demo batching logic.
-    private readonly Dictionary<(string Po, int Mill), int> _totalNdtByKey = new();
-    private readonly Dictionary<(string Po, int Mill), int> _currentBatchByKey = new();
 
     // Simple in-memory set to avoid reprocessing files during one runtime.
     private readonly HashSet<string> _processedFiles = new(StringComparer.OrdinalIgnoreCase);
@@ -30,12 +28,25 @@ public sealed class SlitMonitoringWorker : BackgroundService
         IOptions<NdtBundleOptions> options,
         IBundleEngine bundleEngine,
         IBundleOutputWriter outputWriter,
+        INdtBatchStateService batchState,
+        IPlcClient plcClient,
+        ILogger<SlitMonitoringWorker> logger)
+        : this(options, bundleEngine, outputWriter, batchState, null, plcClient, logger) { }
+
+    public SlitMonitoringWorker(
+        IOptions<NdtBundleOptions> options,
+        IBundleEngine bundleEngine,
+        IBundleOutputWriter outputWriter,
+        INdtBatchStateService batchState,
+        ICurrentPoPlanService? currentPoPlanService,
         IPlcClient plcClient,
         ILogger<SlitMonitoringWorker> logger)
     {
         _options = options.Value;
         _bundleEngine = bundleEngine;
         _outputWriter = outputWriter;
+        _batchState = batchState;
+        _currentPoPlanService = currentPoPlanService;
         _plcClient = plcClient;
         _logger = logger;
     }
@@ -58,8 +69,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
             {
                 await ProcessNewSlitFilesAsync(stoppingToken).ConfigureAwait(false);
 
-                // Poll PO-end signal; for now we do not know PO context for the bit, so this is a placeholder.
-                // A real implementation would read current PO/mill context and call HandlePoEndAsync accordingly.
+                // Poll PO-end signal. When PLC is connected: if GetPoEndAsync returns true, call the same logic as Simulate PO End
+                // (current PO/mill from ICurrentPoPlanService or context, then IncrementBatchOnPoEndAsync + AdvanceToNextPoAsync).
                 _ = await _plcClient.GetPoEndAsync(stoppingToken).ConfigureAwait(false);
             }
             catch (Exception ex)
@@ -85,18 +96,74 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
             try
             {
-                var records = await ReadSlitFileAsync(file, cancellationToken).ConfigureAwait(false);
+                var (headerLine, rows) = await ReadSlitFileWithRawLinesAsync(file, cancellationToken).ConfigureAwait(false);
 
-                foreach (var record in records)
+                if (rows.Count == 0)
                 {
-                    // Let the engine maintain its own internal state (for PO-end etc.),
-                    // but do not rely on its callbacks for CSV output in this demo.
-                    await _bundleEngine.ProcessSlitRecordAsync(
-                        record,
-                        (_, _, _) => Task.CompletedTask,
-                        cancellationToken).ConfigureAwait(false);
+                    _logger.LogWarning("Input Slit CSV file {File} has no valid data rows (or PO Number empty). Skipping output.", file);
+                    _processedFiles.Add(file);
+                    continue;
+                }
 
-                    await HandlePerRecordOutputAsync(record, cancellationToken).ConfigureAwait(false);
+                // When PoPlanFolder is set: only process records for the current PO. Leave file unprocessed if no match so we retry when that PO becomes current.
+                List<(string RawLine, InputSlitRecord Record)> rowsToProcess = rows;
+                if (!string.IsNullOrWhiteSpace(_options.PoPlanFolder) && _currentPoPlanService != null)
+                {
+                    var currentPo = await _currentPoPlanService.GetCurrentPoNumberAsync(cancellationToken).ConfigureAwait(false);
+                    if (string.IsNullOrEmpty(currentPo))
+                    {
+                        _logger.LogDebug("No current PO from PoPlanFolder; skipping slit file {File}.", file);
+                        continue;
+                    }
+                    rowsToProcess = rows.Where(r => r.Record.PoNumber.Equals(currentPo.Trim(), StringComparison.OrdinalIgnoreCase)).ToList();
+                    if (rowsToProcess.Count == 0)
+                    {
+                        _logger.LogDebug("Slit file {File} has no rows for current PO {PO}; leaving unprocessed until that PO is current.", file, currentPo);
+                        continue;
+                    }
+                }
+
+                // Build output content: same format as input with one extra column "NDT Batch No".
+                var outputLines = new List<string> { headerLine.TrimEnd() + ",NDT Batch No" };
+
+                foreach (var (rawLine, record) in rowsToProcess)
+                {
+                    var (batchNumber, totalSoFar, threshold) = await _batchState.GetBatchForRecordAsync(record.PoNumber, record.MillNo, record.NdtPipes, cancellationToken).ConfigureAwait(false);
+                    var ndtBatchNoFormatted = FormatNdtBatchNo(batchNumber, _options.ShopId);
+                    outputLines.Add(rawLine.TrimEnd() + "," + ndtBatchNoFormatted);
+
+                    // When count reaches a multiple of threshold, trigger tag print.
+                    if (threshold > 0 && totalSoFar % threshold == 0)
+                    {
+                        try
+                        {
+                            await _outputWriter.WriteBundleAsync(record, batchNumber, totalSoFar, cancellationToken).ConfigureAwait(false);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Tag print failed for bundle {BatchNo}.", ndtBatchNoFormatted);
+                        }
+                    }
+
+                    try
+                    {
+                        await _bundleEngine.ProcessSlitRecordAsync(record, (_, _, _) => Task.CompletedTask, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Bundle engine failed for record in {File}; output CSV was already written.", file);
+                    }
+                }
+
+                // Write one output file with the same name as the input file.
+                var outputFolder = _options.OutputBundleFolder;
+                if (!string.IsNullOrWhiteSpace(outputFolder))
+                {
+                    Directory.CreateDirectory(outputFolder);
+                    var outputFileName = Path.GetFileName(file);
+                    var outputPath = Path.Combine(outputFolder, outputFileName);
+                    await File.WriteAllLinesAsync(outputPath, outputLines, cancellationToken).ConfigureAwait(false);
+                    _logger.LogInformation("Wrote bundle CSV: {Path}", outputPath);
                 }
 
                 _processedFiles.Add(file);
@@ -105,39 +172,6 @@ public sealed class SlitMonitoringWorker : BackgroundService
             {
                 _logger.LogError(ex, "Failed to process Input Slit CSV file {File}", file);
             }
-        }
-    }
-
-    private async Task HandlePerRecordOutputAsync(InputSlitRecord record, CancellationToken cancellationToken)
-    {
-        const int threshold = 10; // NDTPcsPerBundle for Pipe Size 2.5 in this demo
-
-        var key = (record.PoNumber, record.MillNo);
-
-        if (!_currentBatchByKey.TryGetValue(key, out var currentBatch))
-        {
-            currentBatch = 1;
-            _currentBatchByKey[key] = currentBatch;
-            _totalNdtByKey[key] = 0;
-        }
-
-        // Update running NDT count for this PO/mill.
-        _totalNdtByKey[key] = _totalNdtByKey[key] + record.NdtPipes;
-        var totalSoFar = _totalNdtByKey[key];
-
-        // Compute batch number so it only increments when total NDT pipes crosses multiples of the threshold.
-        var sequence = Math.Max(1, ((totalSoFar - 1) / threshold) + 1);
-        _currentBatchByKey[key] = sequence;
-
-        // Always write one CSV per incoming slit file, mirroring the input format with an extra NDT Batch No column.
-        await WritePerRecordCsvAsync(record, sequence, cancellationToken).ConfigureAwait(false);
-
-        // When we reach an exact multiple of the threshold, this represents a full bundle and a tag print.
-        if (totalSoFar % threshold == 0)
-        {
-            var ndtBatchNoFormatted = FormatNdtBatchNo(sequence, _options.ShopId);
-            // Use the existing output writer to trigger the (stub) label printer for the tag.
-            await _outputWriter.WriteBundleAsync(record, sequence, totalSoFar, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -150,71 +184,19 @@ public sealed class SlitMonitoringWorker : BackgroundService
         return "0" + yy + shopId + seq;
     }
 
-    private async Task WritePerRecordCsvAsync(InputSlitRecord record, int ndtBatchNo, CancellationToken cancellationToken)
+    /// <summary>
+    /// Reads slit CSV and returns the header line and a list of (raw data line, parsed record) for each valid row.
+    /// </summary>
+    private static async Task<(string HeaderLine, List<(string RawLine, InputSlitRecord Record)> Rows)> ReadSlitFileWithRawLinesAsync(string path, CancellationToken cancellationToken)
     {
-        var folder = _options.OutputBundleFolder;
-        if (string.IsNullOrWhiteSpace(folder))
-        {
-            _logger.LogWarning("OutputBundleFolder is not configured; per-record CSV will not be written.");
-            return;
-        }
-
-        Directory.CreateDirectory(folder);
-
-        var date = record.SlitStartTime?.Date ?? DateTime.Now.Date;
-        var datePart = date.ToString("yyMMdd", CultureInfo.InvariantCulture);
-        var slitPart = string.IsNullOrWhiteSpace(record.SlitNo) ? "POEnd" : record.SlitNo;
-        var fileName = $"{slitPart}_{datePart}_{record.PoNumber}.csv";
-        var path = Path.Combine(folder, fileName);
-
-        var ndtBatchNoFormatted = FormatNdtBatchNo(ndtBatchNo, _options.ShopId);
-
-        var lines = new List<string>
-        {
-            "PO Number,Slit No,NDT Pipes,Rejected P,Slit Start Time,Slit Finish Time,Mill No,NDT Short Length Pipe,Rejected Short Length Pipe,NDT Batch No"
-        };
-
-        string FormatDate(DateTime? dt)
-        {
-            if (dt is null) return string.Empty;
-            return dt.Value.ToString("dd.MM.yyyy HH:mm:ss", CultureInfo.InvariantCulture);
-        }
-
-        var line = string.Join(",",
-            Escape(record.PoNumber),
-            Escape(record.SlitNo),
-            record.NdtPipes.ToString(CultureInfo.InvariantCulture),
-            record.RejectedPipes.ToString(CultureInfo.InvariantCulture),
-            Escape(FormatDate(record.SlitStartTime)),
-            Escape(FormatDate(record.SlitFinishTime)),
-            record.MillNo.ToString(CultureInfo.InvariantCulture),
-            Escape(record.NdtShortLengthPipe),
-            Escape(record.RejectedShortLengthPipe),
-            ndtBatchNoFormatted);
-
-        lines.Add(line);
-
-        await File.WriteAllLinesAsync(path, lines, cancellationToken).ConfigureAwait(false);
-        _logger.LogInformation("Wrote per-record bundle CSV: {Path}", path);
-    }
-
-    private static string Escape(string value)
-    {
-        if (value.IndexOfAny(new[] { ',', '"', '\r', '\n' }) >= 0)
-            return "\"" + value.Replace("\"", "\"\"") + "\"";
-        return value;
-    }
-
-    private static async Task<IReadOnlyList<InputSlitRecord>> ReadSlitFileAsync(string path, CancellationToken cancellationToken)
-    {
-        var result = new List<InputSlitRecord>();
+        var rows = new List<(string RawLine, InputSlitRecord Record)>();
 
         await using var stream = File.OpenRead(path);
         using var reader = new StreamReader(stream);
 
         var headerLine = await reader.ReadLineAsync();
         if (headerLine is null)
-            return result;
+            return (string.Empty, rows);
 
         var headers = headerLine.Split(',');
 
@@ -254,10 +236,10 @@ public sealed class SlitMonitoringWorker : BackgroundService
             };
 
             if (!string.IsNullOrWhiteSpace(record.PoNumber))
-                result.Add(record);
+                rows.Add((line, record));
         }
 
-        return result;
+        return (headerLine, rows);
     }
 
     private static int GetIndex(IReadOnlyList<string> headers, string name)

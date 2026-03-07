@@ -14,12 +14,14 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
 {
     private readonly NdtBundleOptions _options;
     private readonly INdtLabelPrinter _labelPrinter;
+    private readonly INdtBundleRepository _bundleRepository;
     private readonly ILogger<CsvBundleOutputWriter> _logger;
 
-    public CsvBundleOutputWriter(IOptions<NdtBundleOptions> options, INdtLabelPrinter labelPrinter, ILogger<CsvBundleOutputWriter> logger)
+    public CsvBundleOutputWriter(IOptions<NdtBundleOptions> options, INdtLabelPrinter labelPrinter, INdtBundleRepository bundleRepository, ILogger<CsvBundleOutputWriter> logger)
     {
         _options = options.Value;
         _labelPrinter = labelPrinter;
+        _bundleRepository = bundleRepository;
         _logger = logger;
     }
 
@@ -76,6 +78,21 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
         {
             _logger.LogError(ex, "NDT tag render/print failed for bundle {BundleNo}; CSV was written.", ndtBatchNoFormatted);
         }
+
+        var record = new NdtBundleRecord
+        {
+            BundleNo = ndtBatchNoFormatted,
+            PoNumber = contextRecord.PoNumber,
+            MillNo = contextRecord.MillNo,
+            TotalNdtPcs = totalNdtPcs,
+            SlitNo = contextRecord.SlitNo,
+            SlitStartTime = contextRecord.SlitStartTime,
+            SlitFinishTime = contextRecord.SlitFinishTime,
+            RejectedPipes = contextRecord.RejectedPipes,
+            NdtShortLengthPipe = contextRecord.NdtShortLengthPipe,
+            RejectedShortLengthPipe = contextRecord.RejectedShortLengthPipe
+        };
+        await _bundleRepository.RecordBundleAsync(record, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

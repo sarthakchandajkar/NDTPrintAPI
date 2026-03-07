@@ -2,6 +2,19 @@ using NdtBundleService.Models;
 
 namespace NdtBundleService.Services;
 
+/// <summary>
+/// Persists and queries NDT bundles for listing and reconciliation. When ConnectionString is set, uses SQL Server; otherwise uses output CSV folder.
+/// </summary>
+public interface INdtBundleRepository
+{
+    Task RecordBundleAsync(NdtBundleRecord record, CancellationToken cancellationToken);
+    Task<IReadOnlyList<NdtBundleRecord>> GetBundlesAsync(CancellationToken cancellationToken);
+    Task<NdtBundleRecord?> GetByBatchNoAsync(string batchNo, CancellationToken cancellationToken);
+    Task UpdateBundlePipesAsync(string batchNo, int newPipes, CancellationToken cancellationToken);
+    /// <summary>Finds all output CSVs containing the given NDT Batch No, updates the NDT Pipes column to newPipes, and overwrites the files. Returns the number of files updated.</summary>
+    Task<int> UpdateOutputCsvFilesForBundleAsync(string batchNo, int newPipes, CancellationToken cancellationToken);
+}
+
 public interface IPoPlanProvider
 {
     Task<IReadOnlyDictionary<string, PoPlanEntry>> GetPoPlansAsync(CancellationToken cancellationToken);
@@ -36,11 +49,24 @@ public interface IBundleOutputWriter
 }
 
 /// <summary>
-/// Renders and optionally prints the NDT bundle tag using the Telerik report design. Data comes from context + bundle label file.
+/// Renders and optionally prints the NDT bundle tag. Data comes from context + bundle label file or from NDTBundlePrintData.
 /// </summary>
 public interface INdtLabelPrinter
 {
-    Task PrintLabelAsync(InputSlitRecord contextRecord, string ndtBatchNoFormatted, int totalNdtPcs, bool isReprint, CancellationToken cancellationToken);
+    /// <summary>Renders and sends the NDT tag. Returns true if sent to printer (TCP or Windows), false if only saved to folder or send failed.</summary>
+    Task<bool> PrintLabelAsync(InputSlitRecord contextRecord, string ndtBatchNoFormatted, int totalNdtPcs, bool isReprint, CancellationToken cancellationToken);
+
+    /// <summary>Print tag from POC-style print data (layout matches Rpt_NDTLabel / NDT_Bundle_Printing_POC). Returns true if sent to printer.</summary>
+    Task<bool> PrintLabelFromDataAsync(NDTBundlePrintData printData, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Single entry point for printing an NDT bundle tag from print data (POC flow). Returns true if print/send succeeded.
+/// </summary>
+public interface INdtBundleTagPrinter
+{
+    /// <summary>Renders the tag from printData (layout as per Rpt_NDTLabel), sends to configured printer or saves to file. Returns true on success.</summary>
+    Task<bool> PrintNDTBundleTagAsync(NDTBundlePrintData printData, CancellationToken cancellationToken = default);
 }
 
 public interface IBundleEngine
@@ -69,7 +95,43 @@ public interface IPlcClient
 {
     /// <summary>
     /// Returns true when the PO-end signal from the PLC is active.
+    /// When true, the host should perform the same logic as Simulate PO End: call INdtBatchStateService.IncrementBatchOnPoEndAsync
+    /// for the current PO/mill, then ICurrentPoPlanService.AdvanceToNextPoAsync so the next file from the TM folder is used.
     /// </summary>
     Task<bool> GetPoEndAsync(CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Shared state for NDT batch number and running total per (PO, Mill).
+/// Batch increments when count reaches formation chart threshold or on PO End.
+/// </summary>
+public interface INdtBatchStateService
+{
+    /// <summary>
+    /// Updates running total for (poNumber, millNo) by ndtPipes and returns the batch number for this record,
+    /// the new total so far, and the threshold used (from formation chart by pipe size).
+    /// </summary>
+    Task<(int BatchNumber, int TotalSoFar, int Threshold)> GetBatchForRecordAsync(string poNumber, int millNo, int ndtPipes, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Call when PO End is triggered (e.g. Simulate PO End). Resets total and advances batch for the next bundle.
+    /// </summary>
+    Task IncrementBatchOnPoEndAsync(string poNumber, int millNo, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// When using PoPlanFolder: tracks the "current" PO plan file (one file at a time). Advance to next file only on PO End.
+/// PO End can be triggered by Simulate PO End button or eventually by PLC signal.
+/// </summary>
+public interface ICurrentPoPlanService
+{
+    /// <summary>Full path to the current PO plan CSV file, or null if folder is empty or not configured.</summary>
+    Task<string?> GetCurrentPoPlanPathAsync(CancellationToken cancellationToken);
+
+    /// <summary>PO Number from the first data row of the current plan file, or null if none.</summary>
+    Task<string?> GetCurrentPoNumberAsync(CancellationToken cancellationToken);
+
+    /// <summary>Call when PO End is triggered. Advances to the next file in the folder so the next PO is used for the next batch.</summary>
+    Task AdvanceToNextPoAsync(CancellationToken cancellationToken);
 }
 
