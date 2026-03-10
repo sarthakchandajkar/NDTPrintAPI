@@ -9,8 +9,10 @@ export default function ReconcilePage() {
   const [newNdtPipes, setNewNdtPipes] = useState(0);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [printing, setPrinting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [printMessage, setPrintMessage] = useState<string | null>(null);
 
   const refresh = async () => {
     setLoading(true);
@@ -54,13 +56,32 @@ export default function ReconcilePage() {
     }
   };
 
+  const handlePrintBundle = async () => {
+    if (!selectedBatchNo.trim()) {
+      setError("Select a bundle to print.");
+      return;
+    }
+    setPrinting(true);
+    setError(null);
+    setPrintMessage(null);
+    try {
+      const res = await api.printReconciledBundle(selectedBatchNo.trim());
+      setPrintMessage(res.message ?? "Bundle tag sent to printer.");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Print failed.";
+      setError(msg);
+    } finally {
+      setPrinting(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold text-gray-900">Reconcile Bundle</h1>
       <p className="text-gray-600 text-sm">
         When the actual NDT pipe count in the plant does not match the application, select the NDT Batch No. and enter
-        the correct count. This updates the value in the UI, reprints the tag, updates the CSV file(s), and the
-        database (if configured).
+        the correct count, then click Reconcile Bundle. Use &quot;Print bundle&quot; to print the selected bundle with its
+        current (reconciled) count.
       </p>
 
       {error && (
@@ -71,6 +92,11 @@ export default function ReconcilePage() {
       {success && (
         <div className="rounded-md bg-green-50 border border-green-200 p-4 text-green-800 text-sm">
           {success}
+        </div>
+      )}
+      {printMessage && (
+        <div className="rounded-md bg-green-50 border border-green-200 p-4 text-green-800 text-sm">
+          {printMessage}
         </div>
       )}
 
@@ -100,13 +126,23 @@ export default function ReconcilePage() {
             className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
           />
         </div>
-        <button
-          onClick={submit}
-          disabled={submitting || !selectedBatchNo.trim()}
-          className="px-4 py-2 bg-primary-500 text-white text-sm font-medium rounded-md hover:bg-primary-600 disabled:opacity-50 disabled:pointer-events-none"
-        >
-          {submitting ? "Reconciling…" : "Reconcile Bundle"}
-        </button>
+        <div className="flex flex-wrap gap-3">
+          <button
+            onClick={submit}
+            disabled={submitting || !selectedBatchNo.trim()}
+            className="px-4 py-2 bg-primary-500 text-white text-sm font-medium rounded-md hover:bg-primary-600 disabled:opacity-50 disabled:pointer-events-none"
+          >
+            {submitting ? "Reconciling…" : "Reconcile Bundle"}
+          </button>
+          <button
+            type="button"
+            onClick={handlePrintBundle}
+            disabled={printing || !selectedBatchNo.trim()}
+            className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:pointer-events-none"
+          >
+            {printing ? "Printing…" : "Print bundle"}
+          </button>
+        </div>
       </div>
 
       <button

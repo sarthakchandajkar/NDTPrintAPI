@@ -43,28 +43,27 @@ public sealed class NdtBundleEngine : IBundleEngine
         formation.TryGetValue(pipeSize, out var formationEntry);
         formationEntry ??= formation.TryGetValue("Default", out var defaultEntry) ? defaultEntry : null;
         var sizeThreshold = formationEntry?.RequiredNdtPcs ?? 0;
+        if (sizeThreshold <= 0)
+            sizeThreshold = 10;
 
         // Keep last record as context for bundle export
         state.LastRecord = record;
 
-        // Update size-based count using pipe size from external file (linked by PO Number)
-        if (!string.IsNullOrWhiteSpace(pipeSize))
-        {
-            if (!state.SizeCounts.TryGetValue(pipeSize, out var currentSizeCount))
-                currentSizeCount = 0;
+        // Use a consistent key for lookup so we always track count (enables PO End to close partial bundles)
+        var sizeKey = string.IsNullOrWhiteSpace(pipeSize) ? "Default" : pipeSize;
 
-            currentSizeCount += record.NdtPipes;
-            state.SizeCounts[pipeSize] = currentSizeCount;
-        }
+        if (!state.SizeCounts.TryGetValue(sizeKey, out var currentSizeCount))
+            currentSizeCount = 0;
+        currentSizeCount += record.NdtPipes;
+        state.SizeCounts[sizeKey] = currentSizeCount;
 
-        // Size-based scenario: if count for this size exceeds Formation Chart threshold, close a bundle
-        if (sizeThreshold > 0 && state.SizeCounts.TryGetValue(pipeSize, out var sizeCount) &&
-            sizeCount >= sizeThreshold)
+        // Size-based scenario: if count for this size reaches Formation Chart threshold, close a bundle
+        if (state.SizeCounts.TryGetValue(sizeKey, out var sizeCount) && sizeCount >= sizeThreshold)
         {
             state.CurrentBatchNo++;
             var totalForBatch = sizeCount;
-            state.SizeCounts[pipeSize] = 0;
-            _logger.LogInformation("Closing size-based bundle {BatchNo} for PO {PO} Mill {Mill} Size {Size} threshold={Threshold}", state.CurrentBatchNo, record.PoNumber, record.MillNo, pipeSize, sizeThreshold);
+            state.SizeCounts[sizeKey] = 0;
+            _logger.LogInformation("Closing size-based bundle {BatchNo} for PO {PO} Mill {Mill} Size {Size} threshold={Threshold}", state.CurrentBatchNo, record.PoNumber, record.MillNo, sizeKey, sizeThreshold);
             await onBundleClosedAsync(state.LastRecord!, state.CurrentBatchNo, totalForBatch).ConfigureAwait(false);
         }
     }

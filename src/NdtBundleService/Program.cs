@@ -27,6 +27,9 @@ builder.Services.AddSingleton<IBundleOutputWriter, CsvBundleOutputWriter>();
 builder.Services.AddSingleton<INdtBatchStateService, NdtBatchStateService>();
 builder.Services.AddSingleton<INdtLabelPrinter, PdfNdtLabelPrinter>();
 builder.Services.AddSingleton<INdtBundleTagPrinter, NdtBundleTagPrintService>();
+builder.Services.AddSingleton<INetworkPrinterSender, NetworkPrinterSender>();
+builder.Services.AddSingleton<IWipLabelProvider, WipLabelProvider>();
+builder.Services.AddSingleton<INdtTagPrinter, NdtZplTagPrinter>();
 builder.Services.AddSingleton<IPlcClient, StubPlcClient>();
 
 builder.Services.AddCors(options =>

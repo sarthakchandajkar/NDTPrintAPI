@@ -135,3 +135,27 @@ public interface ICurrentPoPlanService
     Task AdvanceToNextPoAsync(CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// Sends raw bytes to a network printer over TCP (e.g. port 9100 for ZPL). Used for ZPL-based label printers like Honeywell PD45S.
+/// </summary>
+public interface INetworkPrinterSender
+{
+    Task<bool> SendAsync(string host, int port, byte[] data, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Provides WIP label fields (Pipe Grade, Size, Thickness, Length, Weight, Type) from the current PO plan file for tag printing.
+/// </summary>
+public interface IWipLabelProvider
+{
+    Task<WipLabelInfo?> GetWipLabelAsync(string poNumber, int millNo, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Prints an NDT bundle tag (e.g. via ZPL to Honeywell PD45S). Used when a bundle is closed or reprinted after reconcile.
+/// </summary>
+public interface INdtTagPrinter
+{
+    Task<bool> PrintBundleTagAsync(InputSlitRecord record, int batchNumber, int totalNdtPcs, bool isReprint, CancellationToken cancellationToken = default);
+}
+

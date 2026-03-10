@@ -10,6 +10,7 @@ export default function InputSlitsPage() {
   const [loading, setLoading] = useState(true);
   const [contentLoading, setContentLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [secondsUntilRefresh, setSecondsUntilRefresh] = useState(30);
 
   const refresh = async () => {
     setLoading(true);
@@ -22,11 +23,25 @@ export default function InputSlitsPage() {
       setFiles([]);
     } finally {
       setLoading(false);
+      setSecondsUntilRefresh(30);
     }
   };
 
   useEffect(() => {
     refresh();
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setSecondsUntilRefresh((s) => {
+        if (s <= 1) {
+          refresh();
+          return 30;
+        }
+        return s - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
@@ -46,12 +61,15 @@ export default function InputSlitsPage() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-gray-900">Input Slit Files</h1>
-        <button
-          onClick={refresh}
-          className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
-        >
-          Refresh
-        </button>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-gray-500">Next refresh in {secondsUntilRefresh}s</span>
+          <button
+            onClick={refresh}
+            className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
+          >
+            Refresh
+          </button>
+        </div>
       </div>
 
       {error && (

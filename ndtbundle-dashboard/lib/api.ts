@@ -101,8 +101,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ ndtBatchNo, newNdtPipes }),
     }),
-  reprint: (ndtBatchNo: string) =>
-    fetchApi<{ message?: string }>("/api/Reconcile/reprint", {
+  printReconciledBundle: (ndtBatchNo: string) =>
+    fetchApi<{ message?: string; ndtBatchNo?: string; ndtPcs?: number }>("/api/Reconcile/print-bundle", {
       method: "POST",
       body: JSON.stringify({ ndtBatchNo }),
     }),
@@ -111,8 +111,7 @@ export const api = {
   plcStatus: () => fetchApi<PlcStatus>("/api/Status/plc"),
   printerStatus: () => fetchApi<PrinterStatus>("/api/Status/printer"),
   printDummyBundle: () =>
-    fetchApi<{ message?: string; batchNo?: string; printerAddress?: string; printerPort?: number; sentToPrinter?: boolean }>("/api/Test/print-dummy-bundle", {
+    fetchApi<{ message?: string; address?: string; port?: number }>("/api/Test/print-dummy-bundle", {
       method: "POST",
-      signal: AbortSignal.timeout(15000), // 15s so request doesn't stay "pending" if backend or printer hangs
     }),
 };

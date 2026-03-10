@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { api, type PlcStatus, type PrinterStatus } from "@/lib/api";
@@ -26,10 +27,20 @@ export default function Navbar() {
   return (
     <header className="bg-white border-b border-gray-200 sticky top-0 z-10 shadow-sm">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex justify-between items-center h-14">
+        <div className="flex justify-between items-center h-32">
           <div className="flex items-center gap-8">
-            <Link href="/" className="text-lg font-semibold text-gray-900">
-              NDT Bundle Dashboard
+            <Link href="/" className="flex items-center gap-3 shrink-0">
+              <Image
+                src="/ajspc_logo.png"
+                alt="AJSPC"
+                width={256}
+                height={256}
+                className="h-28 w-28 object-contain"
+                priority
+              />
+              <span className="text-lg font-semibold text-gray-900">
+                NDT Bundle Dashboard
+              </span>
             </Link>
             <nav className="hidden md:flex gap-1">
               {navItems.map(({ href, label }) => (

@@ -12,13 +12,12 @@ export default function SummaryPage() {
   const [error, setError] = useState<string | null>(null);
   const [poNumber, setPoNumber] = useState("");
   const [millNo, setMillNo] = useState(1);
-  const [dummyPrinting, setDummyPrinting] = useState(false);
-  const [dummyPrintMessage, setDummyPrintMessage] = useState<{ type: "ok" | "err"; text: string } | null>(null);
+  const [dummyPrintStatus, setDummyPrintStatus] = useState<{ success: boolean; message: string } | null>(null);
+  const [secondsUntilRefresh, setSecondsUntilRefresh] = useState(30);
 
   const refresh = async () => {
     setLoading(true);
     setError(null);
-    setDummyPrintMessage(null);
     try {
       const [wipRes, bundlesRes] = await Promise.all([
         api.wipInfo().catch(() => null),
@@ -38,34 +37,25 @@ export default function SummaryPage() {
       setError(e instanceof Error ? e.message : "Failed to load");
     } finally {
       setLoading(false);
-    }
-  };
-
-  const printDummyBundle = async () => {
-    setDummyPrintMessage(null);
-    setDummyPrinting(true);
-    try {
-      const res = await api.printDummyBundle();
-      const sent = res.sentToPrinter === true;
-      setDummyPrintMessage({
-        type: sent ? "ok" : "err",
-        text: res.message ?? (sent ? "Dummy tag sent to printer." : "PDF saved; not sent to printer."),
-      });
-    } catch (e) {
-      const isAbort = e instanceof Error && e.name === "AbortError";
-      setDummyPrintMessage({
-        type: "err",
-        text: isAbort
-          ? "Request timed out. PDF may have been saved to the output folder; printer may be unreachable."
-          : (e instanceof Error ? e.message : "Print failed."),
-      });
-    } finally {
-      setDummyPrinting(false);
+      setSecondsUntilRefresh(30);
     }
   };
 
   useEffect(() => {
     refresh();
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setSecondsUntilRefresh((s) => {
+        if (s <= 1) {
+          refresh();
+          return 30;
+        }
+        return s - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
@@ -75,6 +65,31 @@ export default function SummaryPage() {
       setSummary(null);
     }
   }, [poNumber, millNo]);
+
+  const handlePrintDummyBundle = async () => {
+    setDummyPrintStatus(null);
+    setError(null);
+    try {
+      const res = await api.printDummyBundle();
+      setDummyPrintStatus({
+        success: true,
+        message: res.message ?? "Dummy tag sent to printer.",
+      });
+    } catch (e) {
+      let msg = e instanceof Error ? e.message : "Print request failed.";
+      // If the error is "API 500: {...}", try to show the server's Message field
+      const match = msg.match(/^API 500: (.+)$/s);
+      if (match) {
+        try {
+          const body = JSON.parse(match[1]) as { message?: string };
+          if (body.message) msg = body.message;
+        } catch {
+          // keep msg as is
+        }
+      }
+      setDummyPrintStatus({ success: false, message: msg });
+    }
+  };
 
   if (loading && !wip && !summary)
     return (
@@ -87,12 +102,15 @@ export default function SummaryPage() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold text-gray-900">Summary</h1>
-        <button
-          onClick={refresh}
-          className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
-        >
-          Refresh
-        </button>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-gray-500">Next refresh in {secondsUntilRefresh}s</span>
+          <button
+            onClick={refresh}
+            className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
+          >
+            Refresh
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -100,18 +118,6 @@ export default function SummaryPage() {
           {error}
         </div>
       )}
-      {dummyPrintMessage && (
-        <div
-          className={`rounded-md p-4 text-sm ${
-            dummyPrintMessage.type === "ok"
-              ? "bg-green-50 text-green-800 border border-green-200"
-              : "bg-red-50 text-red-700 border border-red-200"
-          }`}
-        >
-          {dummyPrintMessage.text}
-        </div>
-      )}
-
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-5">
           <p className="text-sm font-medium text-gray-500">Current PO</p>
@@ -175,21 +181,32 @@ export default function SummaryPage() {
         )}
       </div>
 
+      {dummyPrintStatus && (
+        <div
+          className={`rounded-md border p-4 text-sm ${
+            dummyPrintStatus.success
+              ? "bg-green-50 border-green-200 text-green-800"
+              : "bg-red-50 border-red-200 text-red-700"
+          }`}
+        >
+          {dummyPrintStatus.message}
+        </div>
+      )}
+
       <div className="flex flex-wrap gap-3">
+        <button
+          type="button"
+          onClick={handlePrintDummyBundle}
+          className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
+        >
+          Print Dummy Bundle
+        </button>
         <Link
           href="/po-end"
           className="inline-flex items-center px-4 py-2 bg-primary-500 text-white text-sm font-medium rounded-md hover:bg-primary-600"
         >
           Simulate PO End
         </Link>
-        <button
-          type="button"
-          onClick={printDummyBundle}
-          disabled={dummyPrinting}
-          className="inline-flex items-center px-4 py-2 border border-primary-500 text-primary-700 bg-white text-sm font-medium rounded-md hover:bg-primary-50 disabled:opacity-50"
-        >
-          {dummyPrinting ? "Sending…" : "Print dummy bundle"}
-        </button>
       </div>
     </div>
   );

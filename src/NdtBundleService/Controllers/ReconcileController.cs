@@ -1,11 +1,13 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
+using NdtBundleService.Configuration;
 using NdtBundleService.Models;
 using NdtBundleService.Services;
 
 namespace NdtBundleService.Controllers;
 
 /// <summary>
-/// Reconcile Bundle: operators can change the NDT pipe count for a bundle and update DB, CSVs, and reprint the tag.
+/// Reconcile Bundle: operators can change the NDT pipe count for a bundle and update DB and CSVs.
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
@@ -13,13 +15,22 @@ namespace NdtBundleService.Controllers;
 public sealed class ReconcileController : ControllerBase
 {
     private readonly INdtBundleRepository _bundleRepository;
-    private readonly INdtLabelPrinter _labelPrinter;
+    private readonly IWipLabelProvider _wipLabelProvider;
+    private readonly INetworkPrinterSender _printerSender;
+    private readonly NdtBundleOptions _options;
     private readonly ILogger<ReconcileController> _logger;
 
-    public ReconcileController(INdtBundleRepository bundleRepository, INdtLabelPrinter labelPrinter, ILogger<ReconcileController> logger)
+    public ReconcileController(
+        INdtBundleRepository bundleRepository,
+        IWipLabelProvider wipLabelProvider,
+        INetworkPrinterSender printerSender,
+        IOptions<NdtBundleOptions> options,
+        ILogger<ReconcileController> logger)
     {
         _bundleRepository = bundleRepository;
-        _labelPrinter = labelPrinter;
+        _wipLabelProvider = wipLabelProvider;
+        _printerSender = printerSender;
+        _options = options.Value;
         _logger = logger;
     }
 
@@ -42,7 +53,7 @@ public sealed class ReconcileController : ControllerBase
 
     /// <summary>
     /// Reconcile a bundle: set the NDT pipe count to the operator-specified value.
-    /// Updates database (if configured), updates all output CSV files containing this NDT Batch No, and reprints the tag.
+    /// Updates database (if configured) and all output CSV files containing this NDT Batch No.
     /// </summary>
     [HttpPost("reconcile")]
     public async Task<IActionResult> Reconcile([FromBody] ReconcileRequest request, CancellationToken cancellationToken)
@@ -60,39 +71,10 @@ public sealed class ReconcileController : ControllerBase
         await _bundleRepository.UpdateBundlePipesAsync(batchNo, request.NewNdtPipes, cancellationToken).ConfigureAwait(false);
         var filesUpdated = await _bundleRepository.UpdateOutputCsvFilesForBundleAsync(batchNo, request.NewNdtPipes, cancellationToken).ConfigureAwait(false);
 
-        var contextRecord = new InputSlitRecord
-        {
-            PoNumber = bundle.PoNumber,
-            SlitNo = bundle.SlitNo,
-            MillNo = bundle.MillNo,
-            NdtPipes = request.NewNdtPipes,
-            RejectedPipes = bundle.RejectedPipes,
-            SlitStartTime = bundle.SlitStartTime,
-            SlitFinishTime = bundle.SlitFinishTime,
-            NdtShortLengthPipe = bundle.NdtShortLengthPipe,
-            RejectedShortLengthPipe = bundle.RejectedShortLengthPipe
-        };
-
-        try
-        {
-            await _labelPrinter.PrintLabelAsync(contextRecord, batchNo, request.NewNdtPipes, isReprint: true, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Reconcile: tag reprint failed for bundle {BatchNo}. DB and CSV were updated.", batchNo);
-            return Ok(new
-            {
-                Message = "Bundle reconciled and CSV(s) updated. Tag reprint failed.",
-                NdtBatchNo = batchNo,
-                NewNdtPipes = request.NewNdtPipes,
-                CsvFilesUpdated = filesUpdated
-            });
-        }
-
-        _logger.LogInformation("Reconciled bundle {BatchNo}: NewNdtPipes={NewPipes}, CsvFilesUpdated={Count}, tag reprinted.", batchNo, request.NewNdtPipes, filesUpdated);
+        _logger.LogInformation("Reconciled bundle {BatchNo}: NewNdtPipes={NewPipes}, CsvFilesUpdated={Count}.", batchNo, request.NewNdtPipes, filesUpdated);
         return Ok(new
         {
-            Message = "Bundle reconciled. CSV(s) updated and new tag printed.",
+            Message = "Bundle reconciled. CSV(s) updated.",
             NdtBatchNo = batchNo,
             NewNdtPipes = request.NewNdtPipes,
             CsvFilesUpdated = filesUpdated
@@ -100,10 +82,10 @@ public sealed class ReconcileController : ControllerBase
     }
 
     /// <summary>
-    /// Reprint the tag for an existing bundle (no count change). Uses current TotalNdtPcs for that bundle.
+    /// Print the selected bundle with its current (reconciled) NDT pipe count as a ZPL tag (with "Reprint" on the label).
     /// </summary>
-    [HttpPost("reprint")]
-    public async Task<IActionResult> Reprint([FromBody] ReprintRequest request, CancellationToken cancellationToken)
+    [HttpPost("print-bundle")]
+    public async Task<IActionResult> PrintBundle([FromBody] PrintBundleRequest request, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(request.NdtBatchNo))
             return BadRequest(new { Message = "NdtBatchNo is required." });
@@ -113,29 +95,46 @@ public sealed class ReconcileController : ControllerBase
         if (bundle is null)
             return NotFound(new { Message = $"Bundle {batchNo} not found." });
 
-        var contextRecord = new InputSlitRecord
-        {
-            PoNumber = bundle.PoNumber,
-            SlitNo = bundle.SlitNo,
-            MillNo = bundle.MillNo,
-            NdtPipes = bundle.TotalNdtPcs,
-            RejectedPipes = bundle.RejectedPipes,
-            SlitStartTime = bundle.SlitStartTime,
-            SlitFinishTime = bundle.SlitFinishTime,
-            NdtShortLengthPipe = bundle.NdtShortLengthPipe,
-            RejectedShortLengthPipe = bundle.RejectedShortLengthPipe
-        };
+        var address = (_options.NdtTagPrinterAddress ?? "").Trim();
+        var useAddress = !string.IsNullOrEmpty(address) && !address.Equals("0.0.0.0", StringComparison.OrdinalIgnoreCase);
+        if (!useAddress)
+            return BadRequest(new { Message = "Printer not configured (NdtTagPrinterAddress)." });
+
+        var wip = await _wipLabelProvider.GetWipLabelAsync(bundle.PoNumber, bundle.MillNo, cancellationToken).ConfigureAwait(false);
+        var pipeGrade = wip?.PipeGrade;
+        var pipeSize = wip?.PipeSize ?? "";
+        var pipeThickness = wip?.PipeThickness ?? "";
+        var pipeLength = wip?.PipeLength ?? "";
+        var pipeWeight = wip?.PipeWeightPerMeter ?? "";
+        var pipeType = wip?.PipeType ?? "";
+
+        var zplBytes = ZplNdtLabelBuilder.BuildNdtTagZpl(
+            bundle.BundleNo,
+            bundle.MillNo,
+            bundle.PoNumber,
+            pipeGrade,
+            pipeSize,
+            pipeThickness,
+            pipeLength,
+            pipeWeight,
+            pipeType,
+            DateTime.Now,
+            bundle.TotalNdtPcs,
+            isReprint: true);
+
+        _logger.LogInformation("Printing reconciled bundle {BatchNo} (Reprint) with {NdtPcs} pcs.", batchNo, bundle.TotalNdtPcs);
 
         try
         {
-            await _labelPrinter.PrintLabelAsync(contextRecord, batchNo, bundle.TotalNdtPcs, isReprint: true, cancellationToken).ConfigureAwait(false);
-            _logger.LogInformation("Reprinted tag for bundle {BatchNo}.", batchNo);
-            return Ok(new { Message = "Tag reprinted.", NdtBatchNo = batchNo });
+            var sent = await _printerSender.SendAsync(address, _options.NdtTagPrinterPort, zplBytes, cancellationToken).ConfigureAwait(false);
+            if (sent)
+                return Ok(new { Message = "Bundle tag (Reprint) sent to printer.", NdtBatchNo = batchNo, NdtPcs = bundle.TotalNdtPcs });
+            return StatusCode(500, new { Message = "Failed to send to printer. Check printer configuration (NdtTagPrinterAddress/Port)." });
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Reprint failed for bundle {BatchNo}.", batchNo);
-            return StatusCode(500, new { Message = "Reprint failed.", NdtBatchNo = batchNo });
+            _logger.LogError(ex, "Print bundle failed for {BatchNo}.", batchNo);
+            return StatusCode(500, new { Message = "Print failed: " + ex.Message });
         }
     }
 
@@ -145,7 +144,7 @@ public sealed class ReconcileController : ControllerBase
         public int NewNdtPipes { get; set; }
     }
 
-    public sealed class ReprintRequest
+    public sealed class PrintBundleRequest
     {
         public string NdtBatchNo { get; set; } = string.Empty;
     }

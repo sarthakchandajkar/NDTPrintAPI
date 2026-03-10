@@ -7,21 +7,24 @@ using NdtBundleService.Models;
 namespace NdtBundleService.Services;
 
 /// <summary>
-/// Writes one CSV file per completed bundle into the configured output folder and triggers the Telerik NDT tag (render/print).
-/// Format: same columns as Input Slit CSV plus NDT_Batch_No.
+/// Writes one CSV file per completed bundle and sends the tag to the printer (ZPL) when configured.
 /// </summary>
 public sealed class CsvBundleOutputWriter : IBundleOutputWriter
 {
     private readonly NdtBundleOptions _options;
-    private readonly INdtLabelPrinter _labelPrinter;
     private readonly INdtBundleRepository _bundleRepository;
+    private readonly INdtTagPrinter? _tagPrinter;
     private readonly ILogger<CsvBundleOutputWriter> _logger;
 
-    public CsvBundleOutputWriter(IOptions<NdtBundleOptions> options, INdtLabelPrinter labelPrinter, INdtBundleRepository bundleRepository, ILogger<CsvBundleOutputWriter> logger)
+    public CsvBundleOutputWriter(
+        IOptions<NdtBundleOptions> options,
+        INdtBundleRepository bundleRepository,
+        ILogger<CsvBundleOutputWriter> logger,
+        INdtTagPrinter? tagPrinter = null)
     {
         _options = options.Value;
-        _labelPrinter = labelPrinter;
         _bundleRepository = bundleRepository;
+        _tagPrinter = tagPrinter;
         _logger = logger;
     }
 
@@ -39,13 +42,9 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
         // NDT_Batch_No format: 10 chars = 0 (fixed) + YY (year) + ShopId (01-04) + Sequence (5 digits)
         var ndtBatchNoFormatted = FormatNdtBatchNo(ndtBatchNo);
 
-        // Output file name must follow the same pattern as the Mill-1 NDT input files:
-        // {SlitNo}_{yyMMdd}_{PONumber}.csv
-        // Example: 2511743_01_260228_1000055673.csv
-        var slitPart = string.IsNullOrWhiteSpace(contextRecord.SlitNo) ? "POEnd" : contextRecord.SlitNo;
-        var date = contextRecord.SlitStartTime?.Date ?? DateTime.Now.Date;
-        var datePart = date.ToString("yyMMdd", CultureInfo.InvariantCulture);
-        var fileName = $"{slitPart}_{datePart}_{contextRecord.PoNumber}.csv";
+        // Write bundle summary to a distinct file (actual total for this bundle, e.g. 11 pipes).
+        // Do not overwrite per-slit output files (SlitNo_date_PO.csv) which keep per-row NDT pipe counts.
+        var fileName = $"NDT_Bundle_{ndtBatchNoFormatted}.csv";
         var path = Path.Combine(folder, fileName);
 
         var lines = new List<string>
@@ -70,15 +69,6 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
         await File.WriteAllLinesAsync(path, lines, cancellationToken);
         _logger.LogInformation("Wrote bundle CSV: {Path}", path);
 
-        try
-        {
-            await _labelPrinter.PrintLabelAsync(contextRecord, ndtBatchNoFormatted, totalNdtPcs, isReprint: false, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "NDT tag render/print failed for bundle {BundleNo}; CSV was written.", ndtBatchNoFormatted);
-        }
-
         var record = new NdtBundleRecord
         {
             BundleNo = ndtBatchNoFormatted,
@@ -93,11 +83,23 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
             RejectedShortLengthPipe = contextRecord.RejectedShortLengthPipe
         };
         await _bundleRepository.RecordBundleAsync(record, cancellationToken).ConfigureAwait(false);
+
+        if (_tagPrinter != null)
+        {
+            try
+            {
+                await _tagPrinter.PrintBundleTagAsync(contextRecord, ndtBatchNo, totalNdtPcs, isReprint: false, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Auto-print failed for bundle {BatchNo}.", ndtBatchNoFormatted);
+            }
+        }
     }
 
     /// <summary>
     /// Formats NDT_Batch_No per spec: 10 characters.
-    /// Position 1: Fixed "0"
+    /// Position 1: Fixed "9"
     /// Position 2-3: YY (2-digit year)
     /// Position 4-5: Shop ID (01, 02, 03, 04)
     /// Position 6-10: Sequence number (5 digits, zero-padded)
@@ -108,7 +110,7 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
         var raw = (_options.ShopId ?? "01").Trim();
         var shopId = raw.Length >= 2 ? raw[..2].PadLeft(2, '0') : raw.PadLeft(2, '0');
         var seq = sequenceNumber.ToString("D5", CultureInfo.InvariantCulture);
-        return "0" + yy + shopId + seq;
+        return "9" + yy + shopId + seq;
     }
 
     private static string Escape(string value)

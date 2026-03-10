@@ -16,6 +16,8 @@ public sealed class CurrentPoPlanService : ICurrentPoPlanService
 
     private string[] _orderedPaths = Array.Empty<string>();
     private int _currentIndex = -1;
+    /// <summary>Path of the last PO plan we finished (when we advanced past end). Used so we don't re-select the same file until a new one appears.</summary>
+    private string? _lastFinishedPath;
 
     public CurrentPoPlanService(IOptions<NdtBundleOptions> options, ILogger<CurrentPoPlanService> logger)
     {
@@ -87,7 +89,8 @@ public sealed class CurrentPoPlanService : ICurrentPoPlanService
             if (_currentIndex >= _orderedPaths.Length)
             {
                 _currentIndex = -1;
-                _logger.LogInformation("PO End: advanced past last file in PoPlanFolder. Next poll will re-scan for new files.");
+                _lastFinishedPath = previousPath;
+                _logger.LogInformation("PO End: PO marked finished. Advanced past last file in PoPlanFolder. Next poll will load new PO when a new file appears. Last finished: {Path}", previousPath != null ? Path.GetFileName(previousPath) : "(none)");
                 return Task.CompletedTask;
             }
 
@@ -118,12 +121,27 @@ public sealed class CurrentPoPlanService : ICurrentPoPlanService
             return;
         }
 
-        // If we had no current or our current is no longer in list, set to first file.
+        // If we had no current: either first run (use oldest) or we just finished a PO (use newest only if it's a new file).
         if (_currentIndex < 0 || _currentIndex >= _orderedPaths.Length)
         {
             _orderedPaths = files;
-            _currentIndex = 0;
-            _logger.LogInformation("Current PO plan: {File} (first of {Count} in folder)", Path.GetFileName(_orderedPaths[0]), _orderedPaths.Length);
+            var newestPath = _orderedPaths[_orderedPaths.Length - 1];
+            if (_lastFinishedPath != null && string.Equals(newestPath, _lastFinishedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                // No new file yet; keep waiting. Do not re-select the same finished PO.
+                _currentIndex = -1;
+                _logger.LogDebug("PoPlanFolder: no new PO file yet (newest still is last finished). Waiting for new file.");
+                return;
+            }
+            // First run: use oldest so we process POs in order. After finishing all: use newest (the newly added file).
+            _currentIndex = _lastFinishedPath == null ? 0 : files.Length - 1;
+            if (_lastFinishedPath == null)
+                _logger.LogInformation("Current PO plan: {File} (oldest of {Count} in folder; will advance to next on PO End)", Path.GetFileName(_orderedPaths[_currentIndex]), _orderedPaths.Length);
+            else
+            {
+                _lastFinishedPath = null;
+                _logger.LogInformation("Current PO plan: {File} (new PO loaded; {Count} file(s) in folder)", Path.GetFileName(_orderedPaths[_currentIndex]), _orderedPaths.Length);
+            }
             return;
         }
 

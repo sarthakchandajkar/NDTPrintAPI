@@ -20,7 +20,8 @@ namespace NdtBundleService.Controllers;
     private readonly IBundleOutputWriter _outputWriter;
     private readonly INdtBatchStateService _batchState;
     private readonly ICurrentPoPlanService? _currentPoPlanService;
-    private readonly INdtLabelPrinter _labelPrinter;
+    private readonly INdtBundleTagPrinter _bundleTagPrinter;
+    private readonly INetworkPrinterSender _networkPrinterSender;
     private readonly ILogger<TestController> _logger;
     private readonly NdtBundleOptions _options;
 
@@ -30,14 +31,16 @@ namespace NdtBundleService.Controllers;
         INdtBatchStateService batchState,
         IOptions<NdtBundleOptions> options,
         ILogger<TestController> logger,
-        ICurrentPoPlanService? currentPoPlanService = null,
-        INdtLabelPrinter labelPrinter = null!)
+        INdtBundleTagPrinter bundleTagPrinter,
+        INetworkPrinterSender networkPrinterSender,
+        ICurrentPoPlanService? currentPoPlanService = null)
     {
         _bundleEngine = bundleEngine;
         _outputWriter = outputWriter;
         _batchState = batchState;
+        _bundleTagPrinter = bundleTagPrinter;
+        _networkPrinterSender = networkPrinterSender;
         _currentPoPlanService = currentPoPlanService;
-        _labelPrinter = labelPrinter;
         _logger = logger;
         _options = options.Value;
     }
@@ -77,7 +80,9 @@ namespace NdtBundleService.Controllers;
 
     /// <summary>
     /// Simulate PO-end for a given PO number and mill.
-    /// This will close any pending bundles in memory and log "SIMULATED PRINT" entries.
+    /// Closes any partial bundle (e.g. 3 pipes when threshold is 10): prints a tag with that count and the next NDT Batch No.,
+    /// writes NDT_Bundle_*.csv and output slit CSVs, advances batch state, then advances to the new PO from the TM folder (PoPlanFolder).
+    /// Eventually the same logic will be triggered by a PLC PO-end signal.
     /// </summary>
     [HttpPost("po-end")]
     public async Task<IActionResult> SimulatePoEnd([FromBody] PoEndRequest request, CancellationToken cancellationToken)
@@ -110,55 +115,6 @@ namespace NdtBundleService.Controllers;
             await _currentPoPlanService.AdvanceToNextPoAsync(cancellationToken).ConfigureAwait(false);
 
         return Ok(new { Message = "PO end simulated.", request.PoNumber, request.MillNo });
-    }
-
-    /// <summary>
-    /// Handle CORS preflight for print-dummy-bundle so the browser can send POST from another origin.
-    /// </summary>
-    [HttpOptions("print-dummy-bundle")]
-    public IActionResult PrintDummyBundleOptions() => NoContent();
-
-    /// <summary>
-    /// Print a dummy NDT bundle tag to test printer connection and view the tag design.
-    /// Uses configured NdtTagPrinterAddress (e.g. 192.168.0.125) and NdtTagPrinterPort. When using StubNdtLabelPrinter, only logs; use TelerikNdtLabelPrinter to actually render and send.
-    /// </summary>
-    [HttpPost("print-dummy-bundle")]
-    public async Task<IActionResult> PrintDummyBundle(CancellationToken cancellationToken)
-    {
-        var dummyRecord = new InputSlitRecord
-        {
-            PoNumber = "1000055673",
-            SlitNo = "DUMMY_01",
-            NdtPipes = 10,
-            RejectedPipes = 0,
-            MillNo = 1,
-            SlitStartTime = DateTime.Now.AddMinutes(-5),
-            SlitFinishTime = DateTime.Now,
-            NdtShortLengthPipe = "",
-            RejectedShortLengthPipe = ""
-        };
-        const string dummyBatchNo = "0260100999";
-
-        try
-        {
-            var sentToPrinter = await _labelPrinter.PrintLabelAsync(dummyRecord, dummyBatchNo, 10, isReprint: true, cancellationToken).ConfigureAwait(false);
-            _logger.LogInformation("Dummy bundle tag: Batch {BatchNo}, Printer {Address}:{Port}, SentToPrinter={Sent}.", dummyBatchNo, _options.NdtTagPrinterAddress, _options.NdtTagPrinterPort, sentToPrinter);
-            return Ok(new
-            {
-                Message = sentToPrinter
-                    ? "Dummy bundle tag sent to printer. Check the printer and tag design."
-                    : "PDF saved to output folder; could not send to printer (check logs and that printer supports PDF on port 9100).",
-                BatchNo = dummyBatchNo,
-                PrinterAddress = _options.NdtTagPrinterAddress,
-                PrinterPort = _options.NdtTagPrinterPort,
-                SentToPrinter = sentToPrinter
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Dummy bundle print failed.");
-            return StatusCode(500, new { Message = "Dummy print failed.", Error = ex.Message });
-        }
     }
 
     /// <summary>
@@ -353,6 +309,44 @@ namespace NdtBundleService.Controllers;
             .ToList();
 
         return Ok(files);
+    }
+
+    /// <summary>
+    /// Prints a dummy NDT tag to the configured printer using ZPL (Zebra Programming Language).
+    /// The Honeywell PD45S and similar label printers expect ZPL on port 9100, not PDF, so this sends a ZPL label to test the connection.
+    /// </summary>
+    [HttpPost("print-dummy-bundle")]
+    public async Task<IActionResult> PrintDummyBundle(CancellationToken cancellationToken)
+    {
+        var address = (_options.NdtTagPrinterAddress ?? "").Trim();
+        var useAddress = !string.IsNullOrEmpty(address) && !address.Equals("0.0.0.0", StringComparison.OrdinalIgnoreCase);
+        if (!useAddress)
+            return BadRequest(new { Message = "Printer not configured. Set NdtBundle:NdtTagPrinterAddress (e.g. 192.168.0.125) in appsettings.json." });
+
+        _logger.LogInformation("Printing dummy ZPL tag to {Address}:{Port} (Honeywell PD45S expects ZPL, not PDF).", address, _options.NdtTagPrinterPort);
+
+        try
+        {
+            var zplBytes = ZplDummyLabelBuilder.BuildDummyLabelZpl(
+                bundleNo: "DUMMY-001",
+                specification: "SPEC-DUMMY",
+                pipeType: "TypeA",
+                pipeSize: "6",
+                pipeLen: "40",
+                pcsPerBundle: 10,
+                slitNo: "SLIT-01");
+
+            var sent = await _networkPrinterSender.SendAsync(address, _options.NdtTagPrinterPort, zplBytes, cancellationToken).ConfigureAwait(false);
+
+            if (sent)
+                return Ok(new { Message = "Dummy ZPL tag sent to printer. The physical label should print now (Honeywell PD45S uses ZPL).", Address = address, Port = _options.NdtTagPrinterPort });
+            return StatusCode(500, new { Message = "Failed to send ZPL to printer. Check that the printer is on, reachable, and port " + _options.NdtTagPrinterPort + " is open." });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Print dummy bundle failed.");
+            return StatusCode(500, new { Message = "Print failed: " + ex.Message, Error = ex.ToString() });
+        }
     }
 }
 

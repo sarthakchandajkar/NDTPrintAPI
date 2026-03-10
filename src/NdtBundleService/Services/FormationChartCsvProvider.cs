@@ -23,7 +23,6 @@ public sealed class FormationChartCsvProvider : IFormationChartProvider
             { "1.5", new FormationChartEntry { PipeSize = "1.5", RequiredNdtPcs = 120 } },
             { "2", new FormationChartEntry { PipeSize = "2", RequiredNdtPcs = 80 } },
             { "2.4", new FormationChartEntry { PipeSize = "2.4", RequiredNdtPcs = 60 } },
-            // For demo: make 2.5\" size bundles much smaller so more tags are generated.
             { "2.5", new FormationChartEntry { PipeSize = "2.5", RequiredNdtPcs = 10 } },
             { "3", new FormationChartEntry { PipeSize = "3", RequiredNdtPcs = 45 } },
             { "3.5", new FormationChartEntry { PipeSize = "3.5", RequiredNdtPcs = 40 } },

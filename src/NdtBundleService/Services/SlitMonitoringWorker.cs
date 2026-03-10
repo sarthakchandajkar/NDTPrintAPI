@@ -132,22 +132,21 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     var ndtBatchNoFormatted = FormatNdtBatchNo(batchNumber, _options.ShopId);
                     outputLines.Add(rawLine.TrimEnd() + "," + ndtBatchNoFormatted);
 
-                    // When count reaches a multiple of threshold, trigger tag print.
-                    if (threshold > 0 && totalSoFar % threshold == 0)
-                    {
-                        try
-                        {
-                            await _outputWriter.WriteBundleAsync(record, batchNumber, totalSoFar, cancellationToken).ConfigureAwait(false);
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogError(ex, "Tag print failed for bundle {BatchNo}.", ndtBatchNoFormatted);
-                        }
-                    }
-
+                    // Let the bundle engine decide when a bundle is full; it calls the callback to write CSV and print tag.
                     try
                     {
-                        await _bundleEngine.ProcessSlitRecordAsync(record, (_, _, _) => Task.CompletedTask, cancellationToken).ConfigureAwait(false);
+                        await _bundleEngine.ProcessSlitRecordAsync(record, async (contextRecord, batchNo, totalNdtPcs) =>
+                        {
+                            try
+                            {
+                                await _outputWriter.WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken).ConfigureAwait(false);
+                                _logger.LogInformation("Auto-print triggered for bundle {BatchNo} ({Pcs} pcs).", FormatNdtBatchNo(batchNo, _options.ShopId), totalNdtPcs);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogError(ex, "Tag print failed for bundle {BatchNo}.", FormatNdtBatchNo(batchNo, _options.ShopId));
+                            }
+                        }, cancellationToken).ConfigureAwait(false);
                     }
                     catch (Exception ex)
                     {
@@ -181,7 +180,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         var raw = (shopIdRaw ?? "01").Trim();
         var shopId = raw.Length >= 2 ? raw[..2].PadLeft(2, '0') : raw.PadLeft(2, '0');
         var seq = sequenceNumber.ToString("D5", CultureInfo.InvariantCulture);
-        return "0" + yy + shopId + seq;
+        return "9" + yy + shopId + seq;
     }
 
     /// <summary>

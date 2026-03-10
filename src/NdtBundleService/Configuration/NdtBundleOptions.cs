@@ -14,10 +14,10 @@ public class NdtBundleOptions
     /// <summary>Path to the PO_Plan CSV file that includes NDTPcsPerBundle per PO. Used when PoPlanFolder is not set.</summary>
     public string PoPlanCsvPath { get; set; } = string.Empty;
 
-    /// <summary>Path to the NDT Bundle Formation Chart CSV.</summary>
+    /// <summary>Path to the NDT Bundle Formation Chart CSV. When empty, built-in chart is used. Chart defines RequiredNdtPcs (pieces per bundle) per Pipe Size.</summary>
     public string FormationChartCsvPath { get; set; } = string.Empty;
 
-    /// <summary>Path to the CSV file that contains PO Number and Pipe Size (linked by PO Number to Input Slit data). Used for Formation Chart and size-based bundle logic; NDT Short Length Pipe from input is not used.</summary>
+    /// <summary>Path to the CSV that contains PO Number and Pipe Size. When PoPlanFolder is set, the current file from that folder (e.g. D:\NDT\From SAP\TM) is used instead. Pipe Size from here is looked up in the NDT Bundle Formation Chart to determine pieces per bundle.</summary>
     public string PipeSizeCsvPath { get; set; } = string.Empty;
 
     /// <summary>Polling interval in seconds for scanning input folders and PLC signals.</summary>

@@ -147,42 +147,93 @@ public sealed class NdtBundleRepository : INdtBundleRepository
             return 0;
 
         var batchNoTrimmed = batchNo.Trim();
-        var filesUpdated = 0;
+        var filesOrdered = Directory.EnumerateFiles(folder, "*.csv").OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
 
-        foreach (var path in Directory.EnumerateFiles(folder, "*.csv"))
+        // Find the last file (by name order) that contains this NDT Batch No
+        string? lastFileWithBatch = null;
+        foreach (var path in filesOrdered)
         {
             try
             {
                 var lines = await File.ReadAllLinesAsync(path, cancellationToken).ConfigureAwait(false);
-                if (lines.Length < 2)
-                    continue;
-
-                var modified = false;
                 for (var i = 1; i < lines.Length; i++)
                 {
                     var cols = SplitCsvLine(lines[i]);
                     if (cols.Count >= MinColumns && cols[ColNdtBatchNo].Trim().Equals(batchNoTrimmed, StringComparison.OrdinalIgnoreCase))
                     {
-                        cols[ColNdtPipes] = newPipes.ToString();
-                        lines[i] = string.Join(",", cols);
-                        modified = true;
+                        lastFileWithBatch = path;
+                        break;
                     }
-                }
-
-                if (modified)
-                {
-                    await File.WriteAllLinesAsync(path, lines, cancellationToken).ConfigureAwait(false);
-                    filesUpdated++;
-                    _logger.LogInformation("Updated NDT Pipes to {NewPipes} for bundle {BatchNo} in {Path}.", newPipes, batchNo, path);
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to update file {Path} for bundle {BatchNo}.", path, batchNo);
+                _logger.LogDebug(ex, "Skip scan for {Path}.", path);
             }
         }
 
-        return filesUpdated;
+        if (string.IsNullOrEmpty(lastFileWithBatch))
+        {
+            _logger.LogWarning("No CSV file found containing bundle {BatchNo}.", batchNo);
+            return 0;
+        }
+
+        // Sum NDT Pipes for this batch from all files except the last file (so we only change the last file)
+        int sumFromOtherRows = 0;
+        foreach (var path in filesOrdered)
+        {
+            if (path.Equals(lastFileWithBatch, StringComparison.OrdinalIgnoreCase))
+                break;
+            try
+            {
+                var lines = await File.ReadAllLinesAsync(path, cancellationToken).ConfigureAwait(false);
+                for (var i = 1; i < lines.Length; i++)
+                {
+                    var cols = SplitCsvLine(lines[i]);
+                    if (cols.Count >= MinColumns && cols[ColNdtBatchNo].Trim().Equals(batchNoTrimmed, StringComparison.OrdinalIgnoreCase))
+                        sumFromOtherRows += int.TryParse(cols[ColNdtPipes].Trim(), out var p) ? p : 0;
+                }
+            }
+            catch { /* ignore */ }
+        }
+
+        // In the last file, set the last row for this batch so that grand total = newPipes
+        try
+        {
+            var lines = await File.ReadAllLinesAsync(lastFileWithBatch, cancellationToken).ConfigureAwait(false);
+            var lastRowIndex = -1;
+            var currentLastFileSum = 0;
+            for (var i = 1; i < lines.Length; i++)
+            {
+                var cols = SplitCsvLine(lines[i]);
+                if (cols.Count >= MinColumns && cols[ColNdtBatchNo].Trim().Equals(batchNoTrimmed, StringComparison.OrdinalIgnoreCase))
+                {
+                    lastRowIndex = i;
+                    currentLastFileSum += int.TryParse(cols[ColNdtPipes].Trim(), out var p) ? p : 0;
+                }
+            }
+            if (lastRowIndex < 0)
+                return 0;
+
+            var lastRowCols = SplitCsvLine(lines[lastRowIndex]);
+            var lastRowCurrentValue = int.TryParse(lastRowCols[ColNdtPipes].Trim(), out var v) ? v : 0;
+            var otherRowsInLastFileSum = currentLastFileSum - lastRowCurrentValue;
+            var newLastRowValue = newPipes - sumFromOtherRows - otherRowsInLastFileSum;
+            if (newLastRowValue < 0)
+                newLastRowValue = 0;
+
+            lastRowCols[ColNdtPipes] = newLastRowValue.ToString();
+            lines[lastRowIndex] = string.Join(",", lastRowCols);
+            await File.WriteAllLinesAsync(lastFileWithBatch, lines, cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation("Updated NDT Pipes for bundle {BatchNo} in last file {Path}: last row set to {NewRowValue} so total = {NewPipes}.", batchNo, lastFileWithBatch, newLastRowValue, newPipes);
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to update file {Path} for bundle {BatchNo}.", lastFileWithBatch, batchNo);
+        }
+
+        return 0;
     }
 
     private static NdtBundleRecord ReadBundleFromReader(Microsoft.Data.SqlClient.SqlDataReader reader)
@@ -204,8 +255,7 @@ public sealed class NdtBundleRepository : INdtBundleRepository
 
     /// <summary>
     /// Scans output CSVs and builds one record per unique NDT Batch No.
-    /// TotalNdtPcs is the sum of NDT Pipes across all rows in that bundle (accurate bundle total).
-    /// SlitNo is taken from the last row for that bundle (closing slit).
+    /// Prefers NDT_Bundle_*.csv files (one row per bundle with actual total); otherwise aggregates per-slit rows.
     /// </summary>
     private async Task<List<NdtBundleRecord>> GetBundlesFromCsvAsync(CancellationToken cancellationToken)
     {
@@ -213,36 +263,63 @@ public sealed class NdtBundleRepository : INdtBundleRepository
         if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
             return new List<NdtBundleRecord>();
 
-        // Aggregate by bundle: sum NDT Pipes, keep last row's Slit No and PO/Mill for display
         var byBundle = new Dictionary<string, (int TotalNdtPcs, string SlitNo, string PoNumber, int MillNo, string NdtShortLengthPipe, string RejectedShortLengthPipe)>(StringComparer.OrdinalIgnoreCase);
 
-        var files = Directory.EnumerateFiles(folder, "*.csv").OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
-        foreach (var path in files)
+        var allFiles = Directory.EnumerateFiles(folder, "*.csv").OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
+        var bundleFiles = allFiles.Where(p => Path.GetFileName(p).StartsWith("NDT_Bundle_", StringComparison.OrdinalIgnoreCase)).ToList();
+        var otherFiles = allFiles.Except(bundleFiles).ToList();
+
+        // First pass: NDT_Bundle_*.csv = one row per bundle with actual total (e.g. 11 pipes)
+        foreach (var path in bundleFiles)
         {
             try
             {
                 await using var stream = File.OpenRead(path);
                 using var reader = new StreamReader(stream);
                 var headerLine = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
-                if (headerLine is null)
+                if (headerLine is null) continue;
+                if (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is not { } line)
                     continue;
+                var cols = SplitCsvLine(line);
+                if (cols.Count < MinColumns) continue;
+                var bundleNo = cols[ColNdtBatchNo].Trim();
+                if (string.IsNullOrEmpty(bundleNo)) continue;
+                if (!int.TryParse(cols[ColNdtPipes].Trim(), out var ndtPipes)) ndtPipes = 0;
+                var po = cols[0].Trim();
+                var slitNo = cols[1].Trim();
+                if (!int.TryParse(cols[6].Trim(), out var millNo)) millNo = 0;
+                var ndtShort = cols.Count > 7 ? cols[7].Trim() : "";
+                var rejShort = cols.Count > 8 ? cols[8].Trim() : "";
+                byBundle[bundleNo] = (ndtPipes, slitNo, po, millNo, ndtShort, rejShort);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Skip bundle file {Path}.", path);
+            }
+        }
+
+        // Second pass: per-slit files; only add/sum if this bundle not already from NDT_Bundle_ (avoid double-count)
+        foreach (var path in otherFiles)
+        {
+            try
+            {
+                await using var stream = File.OpenRead(path);
+                using var reader = new StreamReader(stream);
+                var headerLine = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+                if (headerLine is null) continue;
 
                 while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
                 {
-                    if (string.IsNullOrWhiteSpace(line))
-                        continue;
+                    if (string.IsNullOrWhiteSpace(line)) continue;
                     var cols = SplitCsvLine(line);
-                    if (cols.Count < MinColumns)
-                        continue;
+                    if (cols.Count < MinColumns) continue;
                     var bundleNo = cols[ColNdtBatchNo].Trim();
-                    if (string.IsNullOrEmpty(bundleNo))
-                        continue;
-                    if (!int.TryParse(cols[ColNdtPipes].Trim(), out var ndtPipes))
-                        ndtPipes = 0;
+                    if (string.IsNullOrEmpty(bundleNo)) continue;
+                    if (byBundle.ContainsKey(bundleNo)) continue; // already have authoritative total from NDT_Bundle_*.csv
+                    if (!int.TryParse(cols[ColNdtPipes].Trim(), out var ndtPipes)) ndtPipes = 0;
                     var po = cols[0].Trim();
                     var slitNo = cols[1].Trim();
-                    if (!int.TryParse(cols[6].Trim(), out var millNo))
-                        millNo = 0;
+                    if (!int.TryParse(cols[6].Trim(), out var millNo)) millNo = 0;
                     var ndtShort = cols.Count > 7 ? cols[7].Trim() : "";
                     var rejShort = cols.Count > 8 ? cols[8].Trim() : "";
 
