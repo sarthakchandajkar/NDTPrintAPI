@@ -82,6 +82,83 @@ public sealed class ReconcileController : ControllerBase
     }
 
     /// <summary>
+    /// Returns slit details for a bundle (per-slit totals) from per-slit output CSVs.
+    /// </summary>
+    [HttpGet("bundles/{ndtBatchNo}/slits")]
+    public async Task<IActionResult> GetBundleSlits(string ndtBatchNo, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(ndtBatchNo))
+            return BadRequest(new { Message = "NdtBatchNo is required." });
+
+        var batchNo = ndtBatchNo.Trim();
+        var bundle = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
+        if (bundle is null)
+            return NotFound(new { Message = $"Bundle {batchNo} not found." });
+
+        var slits = await _bundleRepository.GetSlitsForBatchAsync(batchNo, cancellationToken).ConfigureAwait(false);
+        return Ok(new
+        {
+            Bundle = new
+            {
+                bundle.BundleNo,
+                bundle.PoNumber,
+                bundle.MillNo,
+                bundle.TotalNdtPcs,
+                bundle.SlitNo
+            },
+            Slits = slits.Select(s => new { SlitNo = s.SlitNo, NdtPipes = s.NdtPipes }).ToList()
+        });
+    }
+
+    /// <summary>
+    /// Reconcile a single slit within a bundle: overwrite the per-slit output CSV row(s) for that slit and batch,
+    /// then recompute and persist the bundle total (DB + NDT_Bundle_*.csv if present).
+    /// </summary>
+    [HttpPost("reconcile-slit")]
+    public async Task<IActionResult> ReconcileSlit([FromBody] ReconcileSlitRequest request, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.NdtBatchNo))
+            return BadRequest(new { Message = "NdtBatchNo is required." });
+        if (string.IsNullOrWhiteSpace(request.SlitNo))
+            return BadRequest(new { Message = "SlitNo is required." });
+        if (request.NewNdtPipes < 0)
+            return BadRequest(new { Message = "NewNdtPipes must be non-negative." });
+
+        var batchNo = request.NdtBatchNo.Trim();
+        var slitNo = request.SlitNo.Trim();
+
+        var bundle = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
+        if (bundle is null)
+            return NotFound(new { Message = $"Bundle {batchNo} not found." });
+
+        var filesUpdated = await _bundleRepository.UpdateOutputCsvFilesForSlitAsync(batchNo, slitNo, request.NewNdtPipes, cancellationToken).ConfigureAwait(false);
+        if (filesUpdated == 0)
+            return NotFound(new { Message = $"No output CSV row found for bundle {batchNo} and slit {slitNo}." });
+
+        var slits = await _bundleRepository.GetSlitsForBatchAsync(batchNo, cancellationToken).ConfigureAwait(false);
+        var newTotal = slits.Sum(s => s.NdtPipes);
+
+        await _bundleRepository.UpdateBundleTotalInDatabaseAsync(batchNo, newTotal, cancellationToken).ConfigureAwait(false);
+        var summaryUpdated = await _bundleRepository.UpdateBundleSummaryCsvAsync(batchNo, newTotal, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation(
+            "Reconciled slit {SlitNo} for bundle {BatchNo}: NewNdtPipes={NewPipes}, FilesUpdated={FilesUpdated}, NewTotal={NewTotal}, SummaryUpdated={SummaryUpdated}.",
+            slitNo, batchNo, request.NewNdtPipes, filesUpdated, newTotal, summaryUpdated);
+
+        return Ok(new
+        {
+            Message = "Slit reconciled. Output CSV updated and bundle total recomputed.",
+            NdtBatchNo = batchNo,
+            SlitNo = slitNo,
+            NewNdtPipes = request.NewNdtPipes,
+            FilesUpdated = filesUpdated,
+            NewBundleTotalNdtPcs = newTotal,
+            BundleSummaryUpdated = summaryUpdated,
+            Slits = slits.Select(s => new { SlitNo = s.SlitNo, NdtPipes = s.NdtPipes }).ToList()
+        });
+    }
+
+    /// <summary>
     /// Print the selected bundle with its current (reconciled) NDT pipe count as a ZPL tag (with "Reprint" on the label).
     /// </summary>
     [HttpPost("print-bundle")]
@@ -147,5 +224,12 @@ public sealed class ReconcileController : ControllerBase
     public sealed class PrintBundleRequest
     {
         public string NdtBatchNo { get; set; } = string.Empty;
+    }
+
+    public sealed class ReconcileSlitRequest
+    {
+        public string NdtBatchNo { get; set; } = string.Empty;
+        public string SlitNo { get; set; } = string.Empty;
+        public int NewNdtPipes { get; set; }
     }
 }

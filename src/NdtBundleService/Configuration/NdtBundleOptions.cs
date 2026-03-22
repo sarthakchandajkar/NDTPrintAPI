@@ -8,6 +8,15 @@ public class NdtBundleOptions
     /// <summary>Folder where output bundle CSV files (with NDT_Batch_No) are written.</summary>
     public string OutputBundleFolder { get; set; } = string.Empty;
 
+    /// <summary>Folder where operator-printed Visual NDT output CSV files are written.</summary>
+    public string VisualNdtOutputFolder { get; set; } = @"D:\NDT\To SAP\Visual NDT Output";
+
+    /// <summary>Folder where operator-printed Hydrotesting NDT output CSV files are written.</summary>
+    public string HydrotestingNdtOutputFolder { get; set; } = @"D:\NDT\To SAP\Hydrotesting NDT Output";
+
+    /// <summary>Folder where operator-printed Revisual NDT output CSV files are written.</summary>
+    public string RevisualNdtOutputFolder { get; set; } = @"D:\NDT\To SAP\Revisual NDT Output";
+
     /// <summary>Folder where PO Plan (WIP) CSV files are dropped from SAP (e.g. D:\NDT\From SAP\TM). When set, one file is used as current PO plan; advance to next file only on PO End. If empty, single-file paths below are used.</summary>
     public string PoPlanFolder { get; set; } = string.Empty;
 

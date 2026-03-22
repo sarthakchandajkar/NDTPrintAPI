@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
@@ -13,6 +14,7 @@ public sealed class NdtBundleRepository : INdtBundleRepository
 {
     private const int ColNdtPipes = 2;
     private const int ColNdtBatchNo = 9;
+    private const int ColSlitNo = 1;
     private const int MinColumns = 10;
 
     private readonly NdtBundleOptions _options;
@@ -234,6 +236,163 @@ public sealed class NdtBundleRepository : INdtBundleRepository
         }
 
         return 0;
+    }
+
+    public async Task<IReadOnlyList<(string SlitNo, int NdtPipes)>> GetSlitsForBatchAsync(string batchNo, CancellationToken cancellationToken)
+    {
+        var folder = _options.OutputBundleFolder;
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder) || string.IsNullOrWhiteSpace(batchNo))
+            return Array.Empty<(string, int)>();
+
+        var batchNoTrimmed = batchNo.Trim();
+        var bySlit = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        // Use only per-slit output files (same name as input slit CSV). Exclude bundle summary files.
+        var files = Directory.EnumerateFiles(folder, "*.csv")
+            .Where(p => !Path.GetFileName(p).StartsWith("NDT_Bundle_", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (var path in files)
+        {
+            try
+            {
+                var lines = await File.ReadAllLinesAsync(path, cancellationToken).ConfigureAwait(false);
+                for (var i = 1; i < lines.Length; i++)
+                {
+                    var cols = SplitCsvLine(lines[i]);
+                    if (cols.Count < MinColumns)
+                        continue;
+                    if (!cols[ColNdtBatchNo].Trim().Equals(batchNoTrimmed, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var slit = cols[ColSlitNo].Trim();
+                    if (string.IsNullOrEmpty(slit))
+                        slit = "—";
+                    var pipes = int.TryParse(cols[ColNdtPipes].Trim(), out var p) ? p : 0;
+                    bySlit[slit] = bySlit.TryGetValue(slit, out var existing) ? existing + pipes : pipes;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Skip slit scan for {Path}.", path);
+            }
+        }
+
+        return bySlit
+            .OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(kv => (kv.Key, kv.Value))
+            .ToList();
+    }
+
+    public async Task<int> UpdateOutputCsvFilesForSlitAsync(string batchNo, string slitNo, int newPipes, CancellationToken cancellationToken)
+    {
+        var folder = _options.OutputBundleFolder;
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+            return 0;
+        if (string.IsNullOrWhiteSpace(batchNo) || string.IsNullOrWhiteSpace(slitNo))
+            return 0;
+
+        var batchNoTrimmed = batchNo.Trim();
+        var slitNoTrimmed = slitNo.Trim();
+
+        // Update per-slit output files only; do not touch NDT_Bundle_*.csv here.
+        var files = Directory.EnumerateFiles(folder, "*.csv")
+            .Where(p => !Path.GetFileName(p).StartsWith("NDT_Bundle_", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var filesUpdated = 0;
+        foreach (var path in files)
+        {
+            try
+            {
+                var lines = await File.ReadAllLinesAsync(path, cancellationToken).ConfigureAwait(false);
+                var changed = false;
+                for (var i = 1; i < lines.Length; i++)
+                {
+                    var cols = SplitCsvLine(lines[i]);
+                    if (cols.Count < MinColumns)
+                        continue;
+
+                    if (!cols[ColNdtBatchNo].Trim().Equals(batchNoTrimmed, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    if (!cols[ColSlitNo].Trim().Equals(slitNoTrimmed, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    cols[ColNdtPipes] = newPipes.ToString(CultureInfo.InvariantCulture);
+                    lines[i] = string.Join(",", cols);
+                    changed = true;
+                }
+
+                if (changed)
+                {
+                    await File.WriteAllLinesAsync(path, lines, cancellationToken).ConfigureAwait(false);
+                    filesUpdated++;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Failed slit update for file {Path}.", path);
+            }
+        }
+
+        return filesUpdated;
+    }
+
+    public async Task UpdateBundleTotalInDatabaseAsync(string batchNo, int newTotalPipes, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(batchNo) || string.IsNullOrWhiteSpace(_options.ConnectionString))
+            return;
+
+        try
+        {
+            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(_options.ConnectionString);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            const string sql = "UPDATE dbo.NDT_Bundle SET Total_NDT_Pcs = @NewPipes WHERE Bundle_No = @BatchNo";
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@NewPipes", newTotalPipes);
+            cmd.Parameters.AddWithValue("@BatchNo", batchNo.Trim());
+            await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to update bundle total in DB for {BatchNo}.", batchNo);
+            throw;
+        }
+    }
+
+    public async Task<bool> UpdateBundleSummaryCsvAsync(string batchNo, int newTotalPipes, CancellationToken cancellationToken)
+    {
+        var folder = _options.OutputBundleFolder;
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder) || string.IsNullOrWhiteSpace(batchNo))
+            return false;
+
+        var fileName = $"NDT_Bundle_{batchNo.Trim()}.csv";
+        var path = Path.Combine(folder, fileName);
+        if (!File.Exists(path))
+            return false;
+
+        try
+        {
+            var lines = await File.ReadAllLinesAsync(path, cancellationToken).ConfigureAwait(false);
+            if (lines.Length < 2)
+                return false;
+
+            var cols = SplitCsvLine(lines[1]);
+            if (cols.Count < MinColumns)
+                return false;
+
+            cols[ColNdtPipes] = newTotalPipes.ToString(CultureInfo.InvariantCulture);
+            lines[1] = string.Join(",", cols);
+            await File.WriteAllLinesAsync(path, lines, cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to update bundle summary CSV {Path}.", path);
+            return false;
+        }
     }
 
     private static NdtBundleRecord ReadBundleFromReader(Microsoft.Data.SqlClient.SqlDataReader reader)

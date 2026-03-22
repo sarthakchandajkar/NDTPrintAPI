@@ -63,6 +63,16 @@ export interface ReconcileBundle {
   slitNo?: string;
 }
 
+export interface ReconcileSlitItem {
+  slitNo?: string;
+  ndtPipes?: number;
+}
+
+export interface ReconcileBundleSlitsResponse {
+  bundle?: ReconcileBundle;
+  slits?: ReconcileSlitItem[];
+}
+
 export interface InputSlitFile {
   fileName?: string;
   lastModified?: string;
@@ -85,6 +95,18 @@ export interface PrinterStatus {
   message?: string;
 }
 
+export interface ManualTagPrintResponse {
+  message?: string;
+  station?: string;
+  ndtBatchNo?: string;
+  incomingPcs?: number;
+  okPcs?: number;
+  rejectedPcs?: number;
+  outgoingPcs?: number;
+  printed?: boolean;
+  csvPath?: string;
+}
+
 export const api = {
   wipInfo: () => fetchApi<WipInfo>("/api/Test/wip-info"),
   ndtSummary: (poNumber: string, millNo: number) =>
@@ -101,6 +123,20 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ ndtBatchNo, newNdtPipes }),
     }),
+  reconcileBundleSlits: (ndtBatchNo: string) =>
+    fetchApi<ReconcileBundleSlitsResponse>(`/api/Reconcile/bundles/${encodeURIComponent(ndtBatchNo)}/slits`),
+  reconcileSlit: (ndtBatchNo: string, slitNo: string, newNdtPipes: number) =>
+    fetchApi<{
+      message?: string;
+      ndtBatchNo?: string;
+      slitNo?: string;
+      newNdtPipes?: number;
+      newBundleTotalNdtPcs?: number;
+      slits?: ReconcileSlitItem[];
+    }>("/api/Reconcile/reconcile-slit", {
+      method: "POST",
+      body: JSON.stringify({ ndtBatchNo, slitNo, newNdtPipes }),
+    }),
   printReconciledBundle: (ndtBatchNo: string) =>
     fetchApi<{ message?: string; ndtBatchNo?: string; ndtPcs?: number }>("/api/Reconcile/print-bundle", {
       method: "POST",
@@ -113,5 +149,24 @@ export const api = {
   printDummyBundle: () =>
     fetchApi<{ message?: string; address?: string; port?: number }>("/api/Test/print-dummy-bundle", {
       method: "POST",
+    }),
+  manualStationContext: (station: "Visual" | "Hydrotesting" | "Revisual", ndtBatchNo: string) =>
+    fetchApi<{
+      station?: string;
+      ndtBatchNo?: string;
+      poNumber?: string;
+      millNo?: number;
+      incomingPcs?: number;
+      alreadyOkPcs?: number;
+      alreadyRejectedPcs?: number;
+      outgoingPcs?: number;
+    }>(`/api/ManualTags/${encodeURIComponent(station)}/${encodeURIComponent(ndtBatchNo)}/context`),
+  manualStationRecord: (
+    station: "Visual" | "Hydrotesting" | "Revisual",
+    args: { ndtBatchNo: string; okPcs: number; rejectedPcs: number; user: string; printTag: boolean }
+  ) =>
+    fetchApi<ManualTagPrintResponse>(`/api/ManualTags/${encodeURIComponent(station)}/record`, {
+      method: "POST",
+      body: JSON.stringify(args),
     }),
 };

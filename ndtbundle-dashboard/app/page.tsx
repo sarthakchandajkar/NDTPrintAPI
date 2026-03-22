@@ -78,7 +78,7 @@ export default function SummaryPage() {
     } catch (e) {
       let msg = e instanceof Error ? e.message : "Print request failed.";
       // If the error is "API 500: {...}", try to show the server's Message field
-      const match = msg.match(/^API 500: (.+)$/s);
+      const match = msg.match(/^API 500: ([\s\S]+)$/);
       if (match) {
         try {
           const body = JSON.parse(match[1]) as { message?: string };

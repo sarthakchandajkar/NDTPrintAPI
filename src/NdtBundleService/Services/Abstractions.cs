@@ -13,6 +13,14 @@ public interface INdtBundleRepository
     Task UpdateBundlePipesAsync(string batchNo, int newPipes, CancellationToken cancellationToken);
     /// <summary>Finds all output CSVs containing the given NDT Batch No, updates the NDT Pipes column to newPipes, and overwrites the files. Returns the number of files updated.</summary>
     Task<int> UpdateOutputCsvFilesForBundleAsync(string batchNo, int newPipes, CancellationToken cancellationToken);
+    /// <summary>Returns slit details (slitNo -> ndtPipes sum) for the given NDT Batch No from per-slit output CSVs (excludes NDT_Bundle_*.csv summary files).</summary>
+    Task<IReadOnlyList<(string SlitNo, int NdtPipes)>> GetSlitsForBatchAsync(string batchNo, CancellationToken cancellationToken);
+    /// <summary>Updates the NDT Pipes value for rows matching (batchNo, slitNo) in per-slit output CSVs and overwrites the affected files. Returns the number of files updated.</summary>
+    Task<int> UpdateOutputCsvFilesForSlitAsync(string batchNo, string slitNo, int newPipes, CancellationToken cancellationToken);
+    /// <summary>Updates the bundle total in the database only (no output CSV updates). No-op if DB not configured.</summary>
+    Task UpdateBundleTotalInDatabaseAsync(string batchNo, int newTotalPipes, CancellationToken cancellationToken);
+    /// <summary>Updates the bundle summary CSV (NDT_Bundle_{batchNo}.csv) if present. Returns true if updated.</summary>
+    Task<bool> UpdateBundleSummaryCsvAsync(string batchNo, int newTotalPipes, CancellationToken cancellationToken);
 }
 
 public interface IPoPlanProvider

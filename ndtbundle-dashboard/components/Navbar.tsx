@@ -8,6 +8,9 @@ import { api, type PlcStatus, type PrinterStatus } from "@/lib/api";
 
 const navItems = [
   { href: "/", label: "Summary" },
+  { href: "/visual", label: "Visual" },
+  { href: "/hydrotesting", label: "Hydrotesting" },
+  { href: "/revisual", label: "Revisual" },
   { href: "/input-slits", label: "Input Slit Files" },
   { href: "/printed-tags", label: "Printed Tags" },
   { href: "/reconcile", label: "Reconcile Bundle" },
