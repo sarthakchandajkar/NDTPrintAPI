@@ -31,6 +31,12 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
 
     public async Task<bool> PrintBundleTagAsync(InputSlitRecord record, int batchNumber, int totalNdtPcs, bool isReprint, CancellationToken cancellationToken = default)
     {
+        if (!_options.EnableNdtTagZplAndPrint)
+        {
+            _logger.LogDebug("NDT tag ZPL and network print are disabled (NdtBundle:EnableNdtTagZplAndPrint).");
+            return false;
+        }
+
         var address = (_options.NdtTagPrinterAddress ?? "").Trim();
         var useAddress = !string.IsNullOrEmpty(address) && !address.Equals("0.0.0.0", StringComparison.OrdinalIgnoreCase);
         if (!useAddress)

@@ -32,6 +32,7 @@ builder.Services.AddSingleton<IWipLabelProvider, WipLabelProvider>();
 builder.Services.AddSingleton<INdtTagPrinter, NdtZplTagPrinter>();
 builder.Services.AddSingleton<IPlcClient, StubPlcClient>();
 builder.Services.AddSingleton<IManualNdtTagService, ManualNdtTagService>();
+builder.Services.AddSingleton<IUploadNdtBundleFileService, UploadNdtBundleFileService>();
 
 builder.Services.AddCors(options =>
 {
@@ -50,6 +51,7 @@ builder.Services.AddSwaggerGen();
 
 // Background worker that orchestrates the flow
 builder.Services.AddHostedService<SlitMonitoringWorker>();
+builder.Services.AddHostedService<UploadNdtBundleSchedulerWorker>();
 
 var app = builder.Build();
 

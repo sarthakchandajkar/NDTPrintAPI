@@ -98,39 +98,22 @@ public sealed class SlitMonitoringWorker : BackgroundService
             {
                 var (headerLine, rows) = await ReadSlitFileWithRawLinesAsync(file, cancellationToken).ConfigureAwait(false);
 
-                if (rows.Count == 0)
-                {
-                    _logger.LogWarning("Input Slit CSV file {File} has no valid data rows (or PO Number empty). Skipping output.", file);
-                    _processedFiles.Add(file);
-                    continue;
-                }
-
-                // When PoPlanFolder is set: only process records for the current PO. Leave file unprocessed if no match so we retry when that PO becomes current.
-                List<(string RawLine, InputSlitRecord Record)> rowsToProcess = rows;
-                if (!string.IsNullOrWhiteSpace(_options.PoPlanFolder) && _currentPoPlanService != null)
-                {
-                    var currentPo = await _currentPoPlanService.GetCurrentPoNumberAsync(cancellationToken).ConfigureAwait(false);
-                    if (string.IsNullOrEmpty(currentPo))
-                    {
-                        _logger.LogDebug("No current PO from PoPlanFolder; skipping slit file {File}.", file);
-                        continue;
-                    }
-                    rowsToProcess = rows.Where(r => r.Record.PoNumber.Equals(currentPo.Trim(), StringComparison.OrdinalIgnoreCase)).ToList();
-                    if (rowsToProcess.Count == 0)
-                    {
-                        _logger.LogDebug("Slit file {File} has no rows for current PO {PO}; leaving unprocessed until that PO is current.", file, currentPo);
-                        continue;
-                    }
-                }
-
                 // Build output content: same format as input with one extra column "NDT Batch No".
                 var outputLines = new List<string> { headerLine.TrimEnd() + ",NDT Batch No" };
 
-                foreach (var (rawLine, record) in rowsToProcess)
+                foreach (var row in rows)
                 {
-                    var (batchNumber, totalSoFar, threshold) = await _batchState.GetBatchForRecordAsync(record.PoNumber, record.MillNo, record.NdtPipes, cancellationToken).ConfigureAwait(false);
+                    if (row.Record is null)
+                    {
+                        // Keep source content intact; append blank batch for non-parseable rows.
+                        outputLines.Add(row.RawLine.TrimEnd() + ",");
+                        continue;
+                    }
+
+                    var record = row.Record;
+                    var (batchNumber, _, _) = await _batchState.GetBatchForRecordAsync(record.PoNumber, record.MillNo, record.NdtPipes, cancellationToken).ConfigureAwait(false);
                     var ndtBatchNoFormatted = FormatNdtBatchNo(batchNumber, _options.ShopId);
-                    outputLines.Add(rawLine.TrimEnd() + "," + ndtBatchNoFormatted);
+                    outputLines.Add(row.RawLine.TrimEnd() + "," + ndtBatchNoFormatted);
 
                     // Let the bundle engine decide when a bundle is full; it calls the callback to write CSV and print tag.
                     try
@@ -140,7 +123,10 @@ public sealed class SlitMonitoringWorker : BackgroundService
                             try
                             {
                                 await _outputWriter.WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken).ConfigureAwait(false);
-                                _logger.LogInformation("Auto-print triggered for bundle {BatchNo} ({Pcs} pcs).", FormatNdtBatchNo(batchNo, _options.ShopId), totalNdtPcs);
+                                _logger.LogInformation(
+                                    "Bundle output completed for {BatchNo} ({Pcs} pcs).",
+                                    FormatNdtBatchNo(batchNo, _options.ShopId),
+                                    totalNdtPcs);
                             }
                             catch (Exception ex)
                             {
@@ -186,9 +172,9 @@ public sealed class SlitMonitoringWorker : BackgroundService
     /// <summary>
     /// Reads slit CSV and returns the header line and a list of (raw data line, parsed record) for each valid row.
     /// </summary>
-    private static async Task<(string HeaderLine, List<(string RawLine, InputSlitRecord Record)> Rows)> ReadSlitFileWithRawLinesAsync(string path, CancellationToken cancellationToken)
+    private static async Task<(string HeaderLine, List<(string RawLine, InputSlitRecord? Record)> Rows)> ReadSlitFileWithRawLinesAsync(string path, CancellationToken cancellationToken)
     {
-        var rows = new List<(string RawLine, InputSlitRecord Record)>();
+        var rows = new List<(string RawLine, InputSlitRecord? Record)>();
 
         await using var stream = File.OpenRead(path);
         using var reader = new StreamReader(stream);
@@ -234,8 +220,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 RejectedShortLengthPipe = GetString(cols, rejShortIndex)
             };
 
-            if (!string.IsNullOrWhiteSpace(record.PoNumber))
-                rows.Add((line, record));
+            // Preserve all input rows in output. Only rows with a PO can participate in batch computation.
+            rows.Add((line, string.IsNullOrWhiteSpace(record.PoNumber) ? null : record));
         }
 
         return (headerLine, rows);

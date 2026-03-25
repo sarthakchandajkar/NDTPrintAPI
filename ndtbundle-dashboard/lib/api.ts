@@ -107,6 +107,12 @@ export interface ManualTagPrintResponse {
   csvPath?: string;
 }
 
+export interface UploadBundleGenerationResponse {
+  message?: string;
+  filePath?: string;
+  rowCount?: number;
+}
+
 export const api = {
   wipInfo: () => fetchApi<WipInfo>("/api/Test/wip-info"),
   ndtSummary: (poNumber: string, millNo: number) =>
@@ -150,7 +156,10 @@ export const api = {
     fetchApi<{ message?: string; address?: string; port?: number }>("/api/Test/print-dummy-bundle", {
       method: "POST",
     }),
-  manualStationContext: (station: "Visual" | "Hydrotesting" | "Revisual", ndtBatchNo: string) =>
+  manualStationContext: (
+    station: "Visual" | "Hydrotesting" | "FourHeadHydrotesting" | "BigHydrotesting" | "Revisual",
+    ndtBatchNo: string
+  ) =>
     fetchApi<{
       station?: string;
       ndtBatchNo?: string;
@@ -162,11 +171,15 @@ export const api = {
       outgoingPcs?: number;
     }>(`/api/ManualTags/${encodeURIComponent(station)}/${encodeURIComponent(ndtBatchNo)}/context`),
   manualStationRecord: (
-    station: "Visual" | "Hydrotesting" | "Revisual",
+    station: "Visual" | "Hydrotesting" | "FourHeadHydrotesting" | "BigHydrotesting" | "Revisual",
     args: { ndtBatchNo: string; okPcs: number; rejectedPcs: number; user: string; printTag: boolean }
   ) =>
     fetchApi<ManualTagPrintResponse>(`/api/ManualTags/${encodeURIComponent(station)}/record`, {
       method: "POST",
       body: JSON.stringify(args),
+    }),
+  generateUploadBundleFile: () =>
+    fetchApi<UploadBundleGenerationResponse>("/api/UploadNdtBundle/generate-now", {
+      method: "POST",
     }),
 };

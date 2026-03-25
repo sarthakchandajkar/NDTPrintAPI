@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
@@ -10,6 +11,10 @@ public enum ManualTagStation
 {
     Visual,
     Hydrotesting,
+    /// <summary>Same pipeline step as <see cref="Hydrotesting"/>; distinct CSV/station label for Four Head line.</summary>
+    FourHeadHydrotesting,
+    /// <summary>Same pipeline step as <see cref="Hydrotesting"/>; distinct CSV/station label for Big Hydro line.</summary>
+    BigHydrotesting,
     Revisual
 }
 
@@ -67,6 +72,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
     private readonly ILogger<ManualNdtTagService> _logger;
 
     private static readonly object StateLock = new();
+    private static readonly ConcurrentDictionary<string, FlowState> InMemoryState = new(StringComparer.OrdinalIgnoreCase);
 
     public ManualNdtTagService(
         IOptions<NdtBundleOptions> options,
@@ -160,7 +166,8 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         return station switch
         {
             ManualTagStation.Visual => (_options.VisualNdtOutputFolder ?? string.Empty).Trim(),
-            ManualTagStation.Hydrotesting => (_options.HydrotestingNdtOutputFolder ?? string.Empty).Trim(),
+            ManualTagStation.Hydrotesting or ManualTagStation.FourHeadHydrotesting or ManualTagStation.BigHydrotesting =>
+                (_options.HydrotestingNdtOutputFolder ?? string.Empty).Trim(),
             ManualTagStation.Revisual => (_options.RevisualNdtOutputFolder ?? string.Empty).Trim(),
             _ => (_options.OutputBundleFolder ?? string.Empty).Trim()
         };
@@ -171,6 +178,8 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         {
             ManualTagStation.Visual => "Visual",
             ManualTagStation.Hydrotesting => "Hydrotesting",
+            ManualTagStation.FourHeadHydrotesting => "Four Head Hydrotesting",
+            ManualTagStation.BigHydrotesting => "Big Hydrotesting",
             ManualTagStation.Revisual => "Revisual",
             _ => "Manual"
         };
@@ -203,6 +212,12 @@ public sealed class ManualNdtTagService : IManualNdtTagService
 
     private async Task<bool> TryPrintTagAsync(string poNumber, int millNo, string ndtBatchNo, int pcs, DateTime date, ManualTagStation station, CancellationToken cancellationToken)
     {
+        if (!_options.EnableNdtTagZplAndPrint)
+        {
+            _logger.LogDebug("NDT tag ZPL and network print are disabled (NdtBundle:EnableNdtTagZplAndPrint); CSV only.");
+            return false;
+        }
+
         var address = (_options.NdtTagPrinterAddress ?? "").Trim();
         var useAddress = !string.IsNullOrEmpty(address) && !address.Equals("0.0.0.0", StringComparison.OrdinalIgnoreCase);
         if (!useAddress)
@@ -270,15 +285,24 @@ public sealed class ManualNdtTagService : IManualNdtTagService
 
     private async Task<FlowState> LoadOrCreateStateAsync(string ndtBatchNo, CancellationToken cancellationToken)
     {
-        var path = GetStatePath(ndtBatchNo);
-        lock (StateLock)
+        if (!_options.EnableManualStationStateFiles && InMemoryState.TryGetValue(ndtBatchNo, out var memoryState))
+            return memoryState;
+
+        if (_options.EnableManualStationStateFiles)
         {
-            if (File.Exists(path))
+            var path = GetStatePath(ndtBatchNo);
+            lock (StateLock)
             {
-                var json = File.ReadAllText(path);
-                var loaded = JsonSerializer.Deserialize<FlowState>(json);
-                if (loaded != null)
-                    return loaded;
+                if (File.Exists(path))
+                {
+                    var json = File.ReadAllText(path);
+                    var loaded = JsonSerializer.Deserialize<FlowState>(json);
+                    if (loaded != null)
+                    {
+                        InMemoryState[ndtBatchNo] = loaded;
+                        return loaded;
+                    }
+                }
             }
         }
 
@@ -300,6 +324,10 @@ public sealed class ManualNdtTagService : IManualNdtTagService
 
     private Task SaveStateAsync(FlowState state, CancellationToken cancellationToken)
     {
+        InMemoryState[state.NdtBatchNo] = state;
+        if (!_options.EnableManualStationStateFiles)
+            return Task.CompletedTask;
+
         var path = GetStatePath(state.NdtBatchNo);
         var json = JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true });
         lock (StateLock)
@@ -314,7 +342,8 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         return station switch
         {
             ManualTagStation.Visual => state.InitialPcs,
-            ManualTagStation.Hydrotesting => state.Visual?.OkPcs ?? throw new InvalidOperationException("Visual station not recorded yet for this batch."),
+            ManualTagStation.Hydrotesting or ManualTagStation.FourHeadHydrotesting or ManualTagStation.BigHydrotesting =>
+                state.Visual?.OkPcs ?? throw new InvalidOperationException("Visual station not recorded yet for this batch."),
             ManualTagStation.Revisual => state.Hydrotesting?.OkPcs ?? throw new InvalidOperationException("Hydrotesting station not recorded yet for this batch."),
             _ => state.InitialPcs
         };
@@ -324,7 +353,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         station switch
         {
             ManualTagStation.Visual => state.Visual,
-            ManualTagStation.Hydrotesting => state.Hydrotesting,
+            ManualTagStation.Hydrotesting or ManualTagStation.FourHeadHydrotesting or ManualTagStation.BigHydrotesting => state.Hydrotesting,
             ManualTagStation.Revisual => state.Revisual,
             _ => null
         };
@@ -337,6 +366,8 @@ public sealed class ManualNdtTagService : IManualNdtTagService
                 state.Visual = record;
                 break;
             case ManualTagStation.Hydrotesting:
+            case ManualTagStation.FourHeadHydrotesting:
+            case ManualTagStation.BigHydrotesting:
                 state.Hydrotesting = record;
                 break;
             case ManualTagStation.Revisual:

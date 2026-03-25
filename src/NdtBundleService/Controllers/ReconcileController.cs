@@ -15,6 +15,8 @@ namespace NdtBundleService.Controllers;
 public sealed class ReconcileController : ControllerBase
 {
     private readonly INdtBundleRepository _bundleRepository;
+    private readonly IFormationChartProvider _formationChartProvider;
+    private readonly IPipeSizeProvider _pipeSizeProvider;
     private readonly IWipLabelProvider _wipLabelProvider;
     private readonly INetworkPrinterSender _printerSender;
     private readonly NdtBundleOptions _options;
@@ -22,12 +24,16 @@ public sealed class ReconcileController : ControllerBase
 
     public ReconcileController(
         INdtBundleRepository bundleRepository,
+        IFormationChartProvider formationChartProvider,
+        IPipeSizeProvider pipeSizeProvider,
         IWipLabelProvider wipLabelProvider,
         INetworkPrinterSender printerSender,
         IOptions<NdtBundleOptions> options,
         ILogger<ReconcileController> logger)
     {
         _bundleRepository = bundleRepository;
+        _formationChartProvider = formationChartProvider;
+        _pipeSizeProvider = pipeSizeProvider;
         _wipLabelProvider = wipLabelProvider;
         _printerSender = printerSender;
         _options = options.Value;
@@ -41,7 +47,8 @@ public sealed class ReconcileController : ControllerBase
     public async Task<IActionResult> GetBundles(CancellationToken cancellationToken)
     {
         var list = await _bundleRepository.GetBundlesAsync(cancellationToken).ConfigureAwait(false);
-        return Ok(list.Select(b => new
+        var filtered = await ExcludeOpenPartialLatestBatchesAsync(list, cancellationToken).ConfigureAwait(false);
+        return Ok(filtered.Select(b => new
         {
             b.BundleNo,
             b.PoNumber,
@@ -49,6 +56,65 @@ public sealed class ReconcileController : ControllerBase
             b.TotalNdtPcs,
             b.SlitNo
         }).ToList());
+    }
+
+    private async Task<IReadOnlyList<NdtBundleRecord>> ExcludeOpenPartialLatestBatchesAsync(
+        IReadOnlyList<NdtBundleRecord> bundles,
+        CancellationToken cancellationToken)
+    {
+        var pipeSizes = await _pipeSizeProvider.GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
+        var formation = await _formationChartProvider.GetFormationChartAsync(cancellationToken).ConfigureAwait(false);
+
+        var byPoMill = bundles.GroupBy(b => (b.PoNumber, b.MillNo));
+        var result = new List<NdtBundleRecord>();
+
+        foreach (var group in byPoMill)
+        {
+            var threshold = ResolveThreshold(group.Key.PoNumber, pipeSizes, formation);
+            var ordered = group
+                .OrderBy(b => ParseBatchSequence(b.BundleNo))
+                .ThenBy(b => b.BundleNo, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (ordered.Count == 0)
+                continue;
+
+            var maxSeq = ParseBatchSequence(ordered[^1].BundleNo);
+            foreach (var bundle in ordered)
+            {
+                var seq = ParseBatchSequence(bundle.BundleNo);
+                var isLatest = seq == maxSeq;
+                var isOpenPartial = isLatest && bundle.TotalNdtPcs > 0 && bundle.TotalNdtPcs < threshold;
+                if (!isOpenPartial)
+                    result.Add(bundle);
+            }
+        }
+
+        return result
+            .OrderByDescending(b => ParseBatchSequence(b.BundleNo))
+            .ThenByDescending(b => b.BundleNo, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static int ResolveThreshold(
+        string poNumber,
+        IReadOnlyDictionary<string, string> pipeSizes,
+        IReadOnlyDictionary<string, FormationChartEntry> formation)
+    {
+        pipeSizes.TryGetValue(poNumber, out var pipeSize);
+        pipeSize ??= string.Empty;
+        formation.TryGetValue(pipeSize, out var entry);
+        entry ??= formation.TryGetValue("Default", out var defaultEntry) ? defaultEntry : null;
+        var threshold = entry?.RequiredNdtPcs ?? 10;
+        return threshold <= 0 ? 10 : threshold;
+    }
+
+    private static int ParseBatchSequence(string bundleNo)
+    {
+        if (string.IsNullOrWhiteSpace(bundleNo) || bundleNo.Length < 5)
+            return 0;
+        var tail = bundleNo[^5..];
+        return int.TryParse(tail, out var seq) ? seq : 0;
     }
 
     /// <summary>
@@ -171,6 +237,9 @@ public sealed class ReconcileController : ControllerBase
         var bundle = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
         if (bundle is null)
             return NotFound(new { Message = $"Bundle {batchNo} not found." });
+
+        if (!_options.EnableNdtTagZplAndPrint)
+            return BadRequest(new { Message = "NDT tag ZPL and network print are disabled (NdtBundle:EnableNdtTagZplAndPrint)." });
 
         var address = (_options.NdtTagPrinterAddress ?? "").Trim();
         var useAddress = !string.IsNullOrEmpty(address) && !address.Equals("0.0.0.0", StringComparison.OrdinalIgnoreCase);

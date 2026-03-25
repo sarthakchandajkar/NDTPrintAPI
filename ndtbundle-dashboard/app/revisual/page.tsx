@@ -14,6 +14,7 @@ export default function RevisualPage() {
   const [printTag, setPrintTag] = useState(true);
   const [loadingContext, setLoadingContext] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [generatingUpload, setGeneratingUpload] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
@@ -78,6 +79,24 @@ export default function RevisualPage() {
       setError(e instanceof Error ? e.message : "Print failed.");
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const generateUploadFile = async () => {
+    setError(null);
+    setSuccess(null);
+    setGeneratingUpload(true);
+    try {
+      const res = await api.generateUploadBundleFile();
+      setSuccess(
+        `${res.message ?? "Upload file generated."}${res.filePath ? ` Path: ${res.filePath}` : ""}${
+          typeof res.rowCount === "number" ? ` | Rows: ${res.rowCount}` : ""
+        }`
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to generate upload file.");
+    } finally {
+      setGeneratingUpload(false);
     }
   };
 
@@ -175,13 +194,23 @@ export default function RevisualPage() {
           Print tag for outgoing OK pcs (final count)
         </label>
 
-        <button
-          onClick={submit}
-          disabled={submitting || incomingPcs == null}
-          className="px-4 py-2 bg-primary-500 text-white text-sm font-medium rounded-md hover:bg-primary-600 disabled:opacity-50 disabled:pointer-events-none"
-        >
-          {submitting ? "Saving…" : "Save"}
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={submit}
+            disabled={submitting || incomingPcs == null}
+            className="px-4 py-2 bg-primary-500 text-white text-sm font-medium rounded-md hover:bg-primary-600 disabled:opacity-50 disabled:pointer-events-none"
+          >
+            {submitting ? "Saving…" : "Save"}
+          </button>
+          <button
+            type="button"
+            onClick={generateUploadFile}
+            disabled={generatingUpload}
+            className="px-4 py-2 bg-gray-700 text-white text-sm font-medium rounded-md hover:bg-gray-800 disabled:opacity-50 disabled:pointer-events-none"
+          >
+            {generatingUpload ? "Generating…" : "Generate Upload CSV Now"}
+          </button>
+        </div>
       </div>
     </div>
   );

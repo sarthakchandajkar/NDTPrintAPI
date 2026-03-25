@@ -47,6 +47,30 @@ public class NdtBundleOptions
     /// <summary>Port for direct network printing when NdtTagPrinterAddress is set (e.g. 9100 for many label printers). Ignored if using NdtTagPrinterName.</summary>
     public int NdtTagPrinterPort { get; set; } = 9100;
 
+    /// <summary>When true, the service writes ZPL preview files to output folders and sends tags to NdtTagPrinterAddress. When false, only CSV outputs are produced (bundle CSV, slit CSV, manual station CSV); no ZPL files and no network print.</summary>
+    public bool EnableNdtTagZplAndPrint { get; set; }
+
+    /// <summary>When true, manual station state is persisted as JSON files under OutputBundleFolder\ManualStationState. When false, state is kept in memory only and no files are generated in that folder.</summary>
+    public bool EnableManualStationStateFiles { get; set; }
+
+    /// <summary>When true, the service writes NDT_Bundle_*.csv summary files in OutputBundleFolder. When false, these summary files are skipped while other CSV flows continue.</summary>
+    public bool EnableBundleSummaryCsvFiles { get; set; } = true;
+
+    /// <summary>Folder where NDT_Bundle_*.csv summary files are written and read for Printed Tags totals.</summary>
+    public string BundleSummaryOutputFolder { get; set; } = @"D:\NDT\NDT Bundles Generated";
+
+    /// <summary>Folder where Upload NDT Bundle Files CSV output is written.</summary>
+    public string UploadNdtBundleFilesFolder { get; set; } = @"D:\NDT\To SAP\Upload NDT Bundle Files";
+
+    /// <summary>Folder where Slit Accepted files are written (used to map slit width by slit batch number).</summary>
+    public string SlitAcceptedFolder { get; set; } = @"D:\NDT\To SAP\Slitting\Slit Accepted";
+
+    /// <summary>When true, the upload bundle CSV generator runs on a timer.</summary>
+    public bool EnableUploadNdtBundleScheduler { get; set; } = true;
+
+    /// <summary>Timer interval in hours for generating Upload NDT Bundle Files CSV.</summary>
+    public int UploadNdtBundleIntervalHours { get; set; } = 12;
+
     /// <summary>Optional local IP to bind to when connecting to the printer (e.g. 192.168.0.14). Use when the PC has multiple NICs and you want to force the same interface that can reach the printer. Leave empty to let the OS choose.</summary>
     public string NdtTagPrinterLocalBindAddress { get; set; } = string.Empty;
 

@@ -364,7 +364,7 @@ public sealed class NdtBundleRepository : INdtBundleRepository
 
     public async Task<bool> UpdateBundleSummaryCsvAsync(string batchNo, int newTotalPipes, CancellationToken cancellationToken)
     {
-        var folder = _options.OutputBundleFolder;
+        var folder = GetBundleSummaryFolder();
         if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder) || string.IsNullOrWhiteSpace(batchNo))
             return false;
 
@@ -418,15 +418,29 @@ public sealed class NdtBundleRepository : INdtBundleRepository
     /// </summary>
     private async Task<List<NdtBundleRecord>> GetBundlesFromCsvAsync(CancellationToken cancellationToken)
     {
-        var folder = _options.OutputBundleFolder;
-        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+        var perSlitFolder = _options.OutputBundleFolder;
+        var summaryFolder = GetBundleSummaryFolder();
+
+        var hasPerSlit = !string.IsNullOrWhiteSpace(perSlitFolder) && Directory.Exists(perSlitFolder);
+        var hasSummary = !string.IsNullOrWhiteSpace(summaryFolder) && Directory.Exists(summaryFolder);
+        if (!hasPerSlit && !hasSummary)
             return new List<NdtBundleRecord>();
 
         var byBundle = new Dictionary<string, (int TotalNdtPcs, string SlitNo, string PoNumber, int MillNo, string NdtShortLengthPipe, string RejectedShortLengthPipe)>(StringComparer.OrdinalIgnoreCase);
+        var bundleNosFromSummary = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        var allFiles = Directory.EnumerateFiles(folder, "*.csv").OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
-        var bundleFiles = allFiles.Where(p => Path.GetFileName(p).StartsWith("NDT_Bundle_", StringComparison.OrdinalIgnoreCase)).ToList();
-        var otherFiles = allFiles.Except(bundleFiles).ToList();
+        var bundleFiles = hasSummary
+            ? Directory.EnumerateFiles(summaryFolder!, "NDT_Bundle_*.csv")
+                .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
+                .ToList()
+            : new List<string>();
+
+        var otherFiles = hasPerSlit
+            ? Directory.EnumerateFiles(perSlitFolder!, "*.csv")
+                .Where(p => !Path.GetFileName(p).StartsWith("NDT_Bundle_", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
+                .ToList()
+            : new List<string>();
 
         // First pass: NDT_Bundle_*.csv = one row per bundle with actual total (e.g. 11 pipes)
         foreach (var path in bundleFiles)
@@ -450,6 +464,7 @@ public sealed class NdtBundleRepository : INdtBundleRepository
                 var ndtShort = cols.Count > 7 ? cols[7].Trim() : "";
                 var rejShort = cols.Count > 8 ? cols[8].Trim() : "";
                 byBundle[bundleNo] = (ndtPipes, slitNo, po, millNo, ndtShort, rejShort);
+                bundleNosFromSummary.Add(bundleNo);
             }
             catch (Exception ex)
             {
@@ -474,7 +489,7 @@ public sealed class NdtBundleRepository : INdtBundleRepository
                     if (cols.Count < MinColumns) continue;
                     var bundleNo = cols[ColNdtBatchNo].Trim();
                     if (string.IsNullOrEmpty(bundleNo)) continue;
-                    if (byBundle.ContainsKey(bundleNo)) continue; // already have authoritative total from NDT_Bundle_*.csv
+                    if (bundleNosFromSummary.Contains(bundleNo)) continue; // already have authoritative total from NDT_Bundle_*.csv
                     if (!int.TryParse(cols[ColNdtPipes].Trim(), out var ndtPipes)) ndtPipes = 0;
                     var po = cols[0].Trim();
                     var slitNo = cols[1].Trim();
@@ -526,5 +541,13 @@ public sealed class NdtBundleRepository : INdtBundleRepository
     private static List<string> SplitCsvLine(string line)
     {
         return line.Split(',').Select(s => s.Trim()).ToList();
+    }
+
+    private string GetBundleSummaryFolder()
+    {
+        var configured = (_options.BundleSummaryOutputFolder ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(configured))
+            return configured;
+        return (_options.OutputBundleFolder ?? string.Empty).Trim();
     }
 }

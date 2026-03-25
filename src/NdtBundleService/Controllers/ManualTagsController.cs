@@ -21,7 +21,7 @@ public sealed class ManualTagsController : ControllerBase
     public async Task<IActionResult> GetContext(string station, string ndtBatchNo, CancellationToken cancellationToken)
     {
         if (!TryParseStation(station, out var st))
-            return BadRequest(new { Message = "Invalid station. Use Visual, Hydrotesting, or Revisual." });
+            return BadRequest(new { Message = "Invalid station. Use Visual, Hydrotesting, FourHeadHydrotesting, BigHydrotesting, or Revisual." });
 
         try
         {
@@ -58,7 +58,7 @@ public sealed class ManualTagsController : ControllerBase
     public async Task<IActionResult> Record(string station, [FromBody] RecordManualStationRequest request, CancellationToken cancellationToken)
     {
         if (!TryParseStation(station, out var st))
-            return BadRequest(new { Message = "Invalid station. Use Visual, Hydrotesting, or Revisual." });
+            return BadRequest(new { Message = "Invalid station. Use Visual, Hydrotesting, FourHeadHydrotesting, BigHydrotesting, or Revisual." });
 
         if (request is null)
             return BadRequest(new { Message = "Request body is required." });
@@ -112,6 +112,8 @@ public sealed class ManualTagsController : ControllerBase
         var v = raw.Trim();
         if (v.Equals("Visual", StringComparison.OrdinalIgnoreCase)) { station = ManualTagStation.Visual; return true; }
         if (v.Equals("Hydrotesting", StringComparison.OrdinalIgnoreCase)) { station = ManualTagStation.Hydrotesting; return true; }
+        if (v.Equals("FourHeadHydrotesting", StringComparison.OrdinalIgnoreCase)) { station = ManualTagStation.FourHeadHydrotesting; return true; }
+        if (v.Equals("BigHydrotesting", StringComparison.OrdinalIgnoreCase)) { station = ManualTagStation.BigHydrotesting; return true; }
         if (v.Equals("Revisual", StringComparison.OrdinalIgnoreCase)) { station = ManualTagStation.Revisual; return true; }
         return false;
     }

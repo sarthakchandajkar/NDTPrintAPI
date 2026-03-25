@@ -1,9 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 
+const HYDRO_STATIONS = [
+  { value: "FourHeadHydrotesting" as const, label: "Four Head Hydrotesting" },
+  { value: "BigHydrotesting" as const, label: "Big Hydrotesting" },
+];
+
 export default function HydrotestingPage() {
+  const [hydroStation, setHydroStation] = useState<(typeof HYDRO_STATIONS)[number]["value"]>("FourHeadHydrotesting");
   const [ndtBatchNo, setNdtBatchNo] = useState("");
   const [poNumber, setPoNumber] = useState<string | null>(null);
   const [millNo, setMillNo] = useState<number | null>(null);
@@ -17,12 +23,12 @@ export default function HydrotestingPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  const loadContext = async (batch: string) => {
+  const loadContext = useCallback(async (batch: string) => {
     setLoadingContext(true);
     setError(null);
     setSuccess(null);
     try {
-      const ctx = await api.manualStationContext("Hydrotesting", batch);
+      const ctx = await api.manualStationContext(hydroStation, batch);
       setPoNumber(ctx.poNumber ?? null);
       setMillNo(typeof ctx.millNo === "number" ? ctx.millNo : null);
       setIncomingPcs(typeof ctx.incomingPcs === "number" ? ctx.incomingPcs : null);
@@ -36,7 +42,15 @@ export default function HydrotestingPage() {
     } finally {
       setLoadingContext(false);
     }
-  };
+  }, [hydroStation]);
+
+  useEffect(() => {
+    const batch = ndtBatchNo.trim();
+    if (!batch) return;
+    void loadContext(batch);
+    // Only when the hydro line changes — not when typing the batch number.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydroStation, loadContext]);
 
   const submit = async () => {
     setError(null);
@@ -62,7 +76,7 @@ export default function HydrotestingPage() {
 
     setSubmitting(true);
     try {
-      const res = await api.manualStationRecord("Hydrotesting", {
+      const res = await api.manualStationRecord(hydroStation, {
         ndtBatchNo: batch,
         okPcs,
         rejectedPcs,
@@ -81,12 +95,14 @@ export default function HydrotestingPage() {
     }
   };
 
+  const stationLabel = HYDRO_STATIONS.find((s) => s.value === hydroStation)?.label ?? "Hydrotesting";
+
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold text-gray-900">Hydrotesting</h1>
       <p className="text-gray-600 text-sm">
-        Scan/enter the NDT Batch No, then enter OK and Rejected pipe counts for Hydrotesting. Incoming pcs come from
-        Visual OK.
+        Choose the hydro line, then scan/enter the NDT Batch No and OK / Rejected pipe counts. Incoming pcs come from
+        Visual OK. Revisual uses the same hydro result whether you use Four Head or Big Hydrotesting.
       </p>
 
       {error && <div className="rounded-md bg-red-50 border border-red-200 p-4 text-red-700 text-sm">{error}</div>}
@@ -95,6 +111,29 @@ export default function HydrotestingPage() {
       )}
 
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-6 max-w-xl space-y-4">
+        <div>
+          <label htmlFor="hydro-station" className="block text-sm font-medium text-gray-700 mb-1">
+            Hydro line
+          </label>
+          <select
+            id="hydro-station"
+            value={hydroStation}
+            onChange={(e) => {
+              setHydroStation(e.target.value as (typeof HYDRO_STATIONS)[number]["value"]);
+              setError(null);
+              setSuccess(null);
+            }}
+            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm bg-white focus:ring-primary-500 focus:border-primary-500"
+          >
+            {HYDRO_STATIONS.map((s) => (
+              <option key={s.value} value={s.value}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+          <p className="mt-1 text-xs text-gray-500">Active screen: {stationLabel}</p>
+        </div>
+
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">NDT Batch No</label>
           <input
@@ -186,4 +225,3 @@ export default function HydrotestingPage() {
     </div>
   );
 }
-

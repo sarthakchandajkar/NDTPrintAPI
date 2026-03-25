@@ -7,7 +7,7 @@ using NdtBundleService.Models;
 namespace NdtBundleService.Services;
 
 /// <summary>
-/// Writes one CSV file per completed bundle and sends the tag to the printer (ZPL) when configured.
+/// Writes one CSV file per completed bundle. Sends ZPL to the printer only when NdtBundle:EnableNdtTagZplAndPrint is true.
 /// </summary>
 public sealed class CsvBundleOutputWriter : IBundleOutputWriter
 {
@@ -42,32 +42,43 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
         // NDT_Batch_No format: 10 chars = 0 (fixed) + YY (year) + ShopId (01-04) + Sequence (5 digits)
         var ndtBatchNoFormatted = FormatNdtBatchNo(ndtBatchNo);
 
-        // Write bundle summary to a distinct file (actual total for this bundle, e.g. 11 pipes).
-        // Do not overwrite per-slit output files (SlitNo_date_PO.csv) which keep per-row NDT pipe counts.
-        var fileName = $"NDT_Bundle_{ndtBatchNoFormatted}.csv";
-        var path = Path.Combine(folder, fileName);
-
-        var lines = new List<string>
+        if (_options.EnableBundleSummaryCsvFiles)
         {
-            "PO Number,Slit No,NDT Pipes,Rejected P,Slit Start Time,Slit Finish Time,Mill No,NDT Short Length Pipe,Rejected Short Length Pipe,NDT Batch No"
-        };
+            // Write bundle summary to a distinct file (actual total for this bundle, e.g. 11 pipes).
+            // Do not overwrite per-slit output files (SlitNo_date_PO.csv) which keep per-row NDT pipe counts.
+            var summaryFolder = string.IsNullOrWhiteSpace(_options.BundleSummaryOutputFolder)
+                ? folder
+                : _options.BundleSummaryOutputFolder.Trim();
+            Directory.CreateDirectory(summaryFolder);
+            var fileName = $"NDT_Bundle_{ndtBatchNoFormatted}.csv";
+            var path = Path.Combine(summaryFolder, fileName);
 
-        var line = string.Join(",",
-            Escape(contextRecord.PoNumber),
-            Escape(contextRecord.SlitNo),
-            totalNdtPcs.ToString(CultureInfo.InvariantCulture),
-            contextRecord.RejectedPipes.ToString(CultureInfo.InvariantCulture),
-            Escape(contextRecord.SlitStartTime?.ToString("O") ?? string.Empty),
-            Escape(contextRecord.SlitFinishTime?.ToString("O") ?? string.Empty),
-            contextRecord.MillNo.ToString(CultureInfo.InvariantCulture),
-            Escape(contextRecord.NdtShortLengthPipe),
-            Escape(contextRecord.RejectedShortLengthPipe),
-            ndtBatchNoFormatted);
+            var lines = new List<string>
+            {
+                "PO Number,Slit No,NDT Pipes,Rejected P,Slit Start Time,Slit Finish Time,Mill No,NDT Short Length Pipe,Rejected Short Length Pipe,NDT Batch No"
+            };
 
-        lines.Add(line);
+            var line = string.Join(",",
+                Escape(contextRecord.PoNumber),
+                Escape(contextRecord.SlitNo),
+                totalNdtPcs.ToString(CultureInfo.InvariantCulture),
+                contextRecord.RejectedPipes.ToString(CultureInfo.InvariantCulture),
+                Escape(contextRecord.SlitStartTime?.ToString("O") ?? string.Empty),
+                Escape(contextRecord.SlitFinishTime?.ToString("O") ?? string.Empty),
+                contextRecord.MillNo.ToString(CultureInfo.InvariantCulture),
+                Escape(contextRecord.NdtShortLengthPipe),
+                Escape(contextRecord.RejectedShortLengthPipe),
+                ndtBatchNoFormatted);
 
-        await File.WriteAllLinesAsync(path, lines, cancellationToken);
-        _logger.LogInformation("Wrote bundle CSV: {Path}", path);
+            lines.Add(line);
+
+            await File.WriteAllLinesAsync(path, lines, cancellationToken);
+            _logger.LogInformation("Wrote bundle CSV: {Path}", path);
+        }
+        else
+        {
+            _logger.LogDebug("Skipping NDT_Bundle summary CSV for {BatchNo} (NdtBundle:EnableBundleSummaryCsvFiles=false).", ndtBatchNoFormatted);
+        }
 
         var record = new NdtBundleRecord
         {

@@ -318,6 +318,9 @@ namespace NdtBundleService.Controllers;
     [HttpPost("print-dummy-bundle")]
     public async Task<IActionResult> PrintDummyBundle(CancellationToken cancellationToken)
     {
+        if (!_options.EnableNdtTagZplAndPrint)
+            return BadRequest(new { Message = "NDT tag ZPL and network print are disabled (NdtBundle:EnableNdtTagZplAndPrint)." });
+
         var address = (_options.NdtTagPrinterAddress ?? "").Trim();
         var useAddress = !string.IsNullOrEmpty(address) && !address.Equals("0.0.0.0", StringComparison.OrdinalIgnoreCase);
         if (!useAddress)
