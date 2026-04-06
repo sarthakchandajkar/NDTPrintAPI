@@ -51,12 +51,11 @@ public static class ZplDummyLabelBuilder
         zpl.Append("   Slit: ");
         zpl.Append(EscapeZplField(slitNo));
         zpl.Append("^FS");
-        // Code 128 barcode
-        zpl.Append("^BY2,2,80");
-        zpl.Append("^FO50,180^BCN,80,Y,N,N^FD");
+        // QR code (same batch number as human-readable line below)
+        zpl.Append("^FO50,170^BQN,2,5^FDMA,");
         zpl.Append(EscapeZplField(bundleNo));
         zpl.Append("^FS");
-        zpl.Append("^FO50,280^FD");
+        zpl.Append("^FO50,300^FD");
         zpl.Append(EscapeZplField(bundleNo));
         zpl.Append("^FS");
         // Footer

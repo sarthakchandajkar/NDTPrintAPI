@@ -44,6 +44,26 @@ export interface WipInfo {
   itemDescription?: string;
 }
 
+/** WIP row for one mill (1–4) from the current PO plan CSV. */
+export interface WipByMillRow {
+  /** API returns a number; string tolerated if serialized differently. */
+  millNo?: number | string;
+  poNumber?: string;
+  plannedMonth?: string;
+  pipeGrade?: string;
+  pipeSize?: string;
+  /** Required NDT pipes per bundle from the NDT Bundle Formation chart (same as bundle engine). */
+  ndtPcsPerBundle?: number | null;
+  pipeLength?: string;
+  piecesPerBundle?: string;
+  totalPieces?: string;
+}
+
+export interface WipByMillsResponse {
+  mills?: WipByMillRow[];
+  sourcePath?: string;
+}
+
 export interface NdtSummary {
   poNumber?: string;
   millNo?: number;
@@ -95,6 +115,10 @@ export interface PrinterStatus {
   message?: string;
 }
 
+export interface ZplGenerationStatus {
+  enabled?: boolean;
+}
+
 export interface ManualTagPrintResponse {
   message?: string;
   station?: string;
@@ -107,6 +131,20 @@ export interface ManualTagPrintResponse {
   csvPath?: string;
 }
 
+export interface ManualStationContext {
+  station?: string;
+  ndtBatchNo?: string;
+  poNumber?: string;
+  millNo?: number;
+  incomingPcs?: number;
+  alreadyOkPcs?: number;
+  alreadyRejectedPcs?: number;
+  outgoingPcs?: number;
+  hydroRedoRequired?: boolean;
+  revisualRedoRequired?: boolean;
+  hasRecordedThisStation?: boolean;
+}
+
 export interface UploadBundleGenerationResponse {
   message?: string;
   filePath?: string;
@@ -115,6 +153,7 @@ export interface UploadBundleGenerationResponse {
 
 export const api = {
   wipInfo: () => fetchApi<WipInfo>("/api/Test/wip-info"),
+  wipByMills: () => fetchApi<WipByMillsResponse>("/api/Test/wip-by-mills"),
   ndtSummary: (poNumber: string, millNo: number) =>
     fetchApi<NdtSummary>(`/api/Test/ndt-summary?poNumber=${encodeURIComponent(poNumber)}&millNo=${millNo}`),
   bundles: () => fetchApi<BundleFile[]>("/api/Test/bundles"),
@@ -152,6 +191,12 @@ export const api = {
   inputSlitContent: (fileName: string) => fetchApi<InputSlitContent>(`/api/InputSlits/files/${encodeURIComponent(fileName)}/content`),
   plcStatus: () => fetchApi<PlcStatus>("/api/Status/plc"),
   printerStatus: () => fetchApi<PrinterStatus>("/api/Status/printer"),
+  zplGenerationStatus: () => fetchApi<ZplGenerationStatus>("/api/Status/zpl-generation"),
+  setZplGenerationStatus: (enabled: boolean) =>
+    fetchApi<ZplGenerationStatus>("/api/Status/zpl-generation", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
   printDummyBundle: () =>
     fetchApi<{ message?: string; address?: string; port?: number }>("/api/Test/print-dummy-bundle", {
       method: "POST",
@@ -160,21 +205,20 @@ export const api = {
     station: "Visual" | "Hydrotesting" | "FourHeadHydrotesting" | "BigHydrotesting" | "Revisual",
     ndtBatchNo: string
   ) =>
-    fetchApi<{
-      station?: string;
-      ndtBatchNo?: string;
-      poNumber?: string;
-      millNo?: number;
-      incomingPcs?: number;
-      alreadyOkPcs?: number;
-      alreadyRejectedPcs?: number;
-      outgoingPcs?: number;
-    }>(`/api/ManualTags/${encodeURIComponent(station)}/${encodeURIComponent(ndtBatchNo)}/context`),
+    fetchApi<ManualStationContext>(`/api/ManualTags/${encodeURIComponent(station)}/${encodeURIComponent(ndtBatchNo)}/context`),
   manualStationRecord: (
     station: "Visual" | "Hydrotesting" | "FourHeadHydrotesting" | "BigHydrotesting" | "Revisual",
-    args: { ndtBatchNo: string; okPcs: number; rejectedPcs: number; user: string; printTag: boolean }
+    args: { ndtBatchNo: string; okPcs: number; rejectedPcs: number; printTag: boolean }
   ) =>
     fetchApi<ManualTagPrintResponse>(`/api/ManualTags/${encodeURIComponent(station)}/record`, {
+      method: "POST",
+      body: JSON.stringify(args),
+    }),
+  manualStationReconcile: (
+    station: "Visual" | "Hydrotesting" | "FourHeadHydrotesting" | "BigHydrotesting" | "Revisual",
+    args: { ndtBatchNo: string; okPcs: number; rejectedPcs: number; printTag: boolean }
+  ) =>
+    fetchApi<ManualTagPrintResponse>(`/api/ManualTags/${encodeURIComponent(station)}/reconcile`, {
       method: "POST",
       body: JSON.stringify(args),
     }),

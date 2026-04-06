@@ -179,21 +179,22 @@ public sealed class SlitMonitoringWorker : BackgroundService
         await using var stream = File.OpenRead(path);
         using var reader = new StreamReader(stream);
 
-        var headerLine = await reader.ReadLineAsync();
-        if (headerLine is null)
+        var headerRaw = await reader.ReadLineAsync();
+        if (headerRaw is null)
             return (string.Empty, rows);
 
-        var headers = headerLine.Split(',');
+        var headerLine = InputSlitCsvParsing.StripBom(headerRaw);
+        var headers = InputSlitCsvParsing.SplitCsvFields(headerLine);
 
-        int poIndex = GetIndex(headers, "PO Number");
-        int slitIndex = GetIndex(headers, "Slit No");
-        int ndtIndex = GetIndex(headers, "NDT Pipes");
-        int rejectedIndex = GetIndex(headers, "Rejected P");
-        int startIndex = GetIndex(headers, "Slit Start Time");
-        int finishIndex = GetIndex(headers, "Slit Finish Time");
-        int millIndex = GetIndex(headers, "Mill No");
-        int shortIndex = GetIndex(headers, "NDT Short Length Pipe");
-        int rejShortIndex = GetIndex(headers, "Rejected Short Length Pipe");
+        var poIndex = InputSlitCsvParsing.HeaderIndex(headers, "PO Number", "PO_No", "PO No");
+        var slitIndex = InputSlitCsvParsing.HeaderIndex(headers, "Slit No");
+        var ndtIndex = InputSlitCsvParsing.HeaderIndex(headers, "NDT Pipes");
+        var rejectedIndex = InputSlitCsvParsing.HeaderIndex(headers, "Rejected P");
+        var startIndex = InputSlitCsvParsing.HeaderIndex(headers, "Slit Start Time");
+        var finishIndex = InputSlitCsvParsing.HeaderIndex(headers, "Slit Finish Time");
+        var millIndex = InputSlitCsvParsing.HeaderIndex(headers, "Mill No", "Mill Number");
+        var shortIndex = InputSlitCsvParsing.HeaderIndex(headers, "NDT Short Length Pipe");
+        var rejShortIndex = InputSlitCsvParsing.HeaderIndex(headers, "Rejected Short Length Pipe");
 
         while (!reader.EndOfStream)
         {
@@ -203,19 +204,24 @@ public sealed class SlitMonitoringWorker : BackgroundService
             if (string.IsNullOrWhiteSpace(line))
                 continue;
 
-            var cols = line.Split(',');
+            var cols = InputSlitCsvParsing.SplitCsvFields(line);
             if (cols.Length == 0)
                 continue;
 
+            var poRaw = GetString(cols, poIndex);
+            var poNumber = string.IsNullOrWhiteSpace(poRaw) ? string.Empty : InputSlitCsvParsing.NormalizePo(poRaw);
+
+            var millParsed = GetMillNo(cols, millIndex);
+
             var record = new InputSlitRecord
             {
-                PoNumber = GetString(cols, poIndex),
+                PoNumber = poNumber,
                 SlitNo = GetString(cols, slitIndex),
-                NdtPipes = GetInt(cols, ndtIndex),
-                RejectedPipes = GetInt(cols, rejectedIndex),
+                NdtPipes = GetIntFlexible(cols, ndtIndex),
+                RejectedPipes = GetIntFlexible(cols, rejectedIndex),
                 SlitStartTime = GetDateTime(cols, startIndex),
                 SlitFinishTime = GetDateTime(cols, finishIndex),
-                MillNo = GetInt(cols, millIndex),
+                MillNo = millParsed,
                 NdtShortLengthPipe = GetString(cols, shortIndex),
                 RejectedShortLengthPipe = GetString(cols, rejShortIndex)
             };
@@ -227,15 +233,17 @@ public sealed class SlitMonitoringWorker : BackgroundService
         return (headerLine, rows);
     }
 
-    private static int GetIndex(IReadOnlyList<string> headers, string name)
+    private static int GetMillNo(string[] cols, int index)
     {
-        for (var i = 0; i < headers.Count; i++)
-        {
-            if (headers[i].Trim().Equals(name, StringComparison.OrdinalIgnoreCase))
-                return i;
-        }
+        var raw = GetString(cols, index);
+        return InputSlitCsvParsing.TryParseMillNo(raw, out var m) ? m : 0;
+    }
 
-        return -1;
+    private static int GetIntFlexible(string[] cols, int index)
+    {
+        if (index < 0 || index >= cols.Length)
+            return 0;
+        return InputSlitCsvParsing.TryParseIntFlexible(cols[index].Trim(), out var v) ? v : 0;
     }
 
     private static string GetString(string[] cols, int index)
@@ -243,13 +251,6 @@ public sealed class SlitMonitoringWorker : BackgroundService
         if (index < 0 || index >= cols.Length)
             return string.Empty;
         return cols[index].Trim();
-    }
-
-    private static int GetInt(string[] cols, int index)
-    {
-        if (index < 0 || index >= cols.Length)
-            return 0;
-        return int.TryParse(cols[index].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) ? value : 0;
     }
 
     private static DateTime? GetDateTime(string[] cols, int index)

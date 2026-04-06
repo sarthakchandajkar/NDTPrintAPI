@@ -6,7 +6,7 @@ namespace NdtBundleService.Models;
 /// </summary>
 public sealed class NDTBundlePrintData
 {
-    /// <summary>Bundle number (displayed and encoded in barcodes).</summary>
+    /// <summary>Bundle number (displayed and encoded in the label QR code).</summary>
     public string BundleNo { get; init; } = string.Empty;
 
     /// <summary>Batch number (optional identifier).</summary>

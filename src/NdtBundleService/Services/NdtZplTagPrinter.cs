@@ -13,17 +13,20 @@ namespace NdtBundleService.Services;
 public sealed class NdtZplTagPrinter : INdtTagPrinter
 {
     private readonly NdtBundleOptions _options;
+    private readonly IZplGenerationToggle _zplToggle;
     private readonly IWipLabelProvider _wipLabelProvider;
     private readonly INetworkPrinterSender _sender;
     private readonly ILogger<NdtZplTagPrinter> _logger;
 
     public NdtZplTagPrinter(
         IOptions<NdtBundleOptions> options,
+        IZplGenerationToggle zplToggle,
         IWipLabelProvider wipLabelProvider,
         INetworkPrinterSender sender,
         ILogger<NdtZplTagPrinter> logger)
     {
         _options = options.Value;
+        _zplToggle = zplToggle;
         _wipLabelProvider = wipLabelProvider;
         _sender = sender;
         _logger = logger;
@@ -31,9 +34,9 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
 
     public async Task<bool> PrintBundleTagAsync(InputSlitRecord record, int batchNumber, int totalNdtPcs, bool isReprint, CancellationToken cancellationToken = default)
     {
-        if (!_options.EnableNdtTagZplAndPrint)
+        if (!_zplToggle.IsEnabled)
         {
-            _logger.LogDebug("NDT tag ZPL and network print are disabled (NdtBundle:EnableNdtTagZplAndPrint).");
+            _logger.LogDebug("NDT tag ZPL and network print are disabled (runtime toggle).");
             return false;
         }
 

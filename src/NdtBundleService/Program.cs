@@ -30,6 +30,7 @@ builder.Services.AddSingleton<INdtBundleTagPrinter, NdtBundleTagPrintService>();
 builder.Services.AddSingleton<INetworkPrinterSender, NetworkPrinterSender>();
 builder.Services.AddSingleton<IWipLabelProvider, WipLabelProvider>();
 builder.Services.AddSingleton<INdtTagPrinter, NdtZplTagPrinter>();
+builder.Services.AddSingleton<IZplGenerationToggle, ZplGenerationToggle>();
 builder.Services.AddSingleton<IPlcClient, StubPlcClient>();
 builder.Services.AddSingleton<IManualNdtTagService, ManualNdtTagService>();
 builder.Services.AddSingleton<IUploadNdtBundleFileService, UploadNdtBundleFileService>();

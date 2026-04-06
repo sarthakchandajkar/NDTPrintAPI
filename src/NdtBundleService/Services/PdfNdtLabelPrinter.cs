@@ -18,7 +18,7 @@ namespace NdtBundleService.Services;
 /// <summary>
 /// Renders the NDT bundle tag as PDF using QuestPDF and ZXing (no Telerik).
 /// Layout matches Rpt_NDTLabel / NDT_Bundle_Printing_POC: 100×100mm page, panel 9.7×9.5cm at 2mm, 3pt border,
-/// Microsoft New Tai Lue body, Malgun Gothic footer, Code128 barcodes 48×18mm and 19×42mm (90° at 78,53mm).
+/// Microsoft New Tai Lue body, Malgun Gothic footer, QR codes for the bundle number (header slot).
 /// Sends the PDF to the configured network printer (NdtTagPrinterAddress:Port) or saves to OutputBundleFolder.
 /// </summary>
 [SupportedOSPlatform("windows")]
@@ -97,8 +97,8 @@ public sealed class PdfNdtLabelPrinter : INdtLabelPrinter
 
     private byte[] BuildLabelPdf(string bundleNo, string specification, string type, string sizeFormatted, string lengthFormatted, string pcsBund, string slitNo, bool isReprint)
     {
-        byte[] barcode1Png = GenerateCode128Png(bundleNo, 480, 180); // 48×18mm
-        byte[] barcode2Png = GenerateCode128Png(bundleNo, 190, 420); // 19×42mm vertical
+        // Square QR in the 48×18mm header row (fits ~18×18mm; ~144px at label scale)
+        byte[] qrPng = GenerateQrCodePng(bundleNo, 144);
 
         return Document.Create(container =>
         {
@@ -112,11 +112,12 @@ public sealed class PdfNdtLabelPrinter : INdtLabelPrinter
                     .Width(PanelWidthMm, Unit.Millimetre)
                     .Column(column =>
                     {
-                        // Header: barcode 48mm, text takes remaining, logo 18mm (RelativeItem absorbs any rounding)
+                        // Header: QR 48mm, text takes remaining, logo 18mm (RelativeItem absorbs any rounding)
                         column.Item().Height(18, Unit.Millimetre).Row(row =>
                         {
                             row.ConstantItem(48, Unit.Millimetre).Width(48, Unit.Millimetre).Height(18, Unit.Millimetre)
-                                .Image(barcode1Png);
+                                .AlignCenter().AlignMiddle()
+                                .Image(qrPng);
                             row.RelativeItem().AlignCenter().AlignMiddle()
                                 .Text("AJSPC - OMAN").FontSize(11).Bold().FontFamily(FontBody);
                             row.ConstantItem(18, Unit.Millimetre).Width(18, Unit.Millimetre).Height(18, Unit.Millimetre)
@@ -199,18 +200,18 @@ public sealed class PdfNdtLabelPrinter : INdtLabelPrinter
     }
 
     [SupportedOSPlatform("windows")]
-    private static byte[] GenerateCode128Png(string content, int widthPx, int heightPx)
+    private static byte[] GenerateQrCodePng(string content, int pixels)
     {
         var writer = new BarcodeWriter<Bitmap>
         {
-            Format = BarcodeFormat.CODE_128,
+            Format = BarcodeFormat.QR_CODE,
             Renderer = new BitmapRenderer(),
             Options = new EncodingOptions
             {
-                Width = widthPx,
-                Height = heightPx,
-                Margin = 2,
-                PureBarcode = false
+                Width = pixels,
+                Height = pixels,
+                Margin = 1,
+                PureBarcode = true
             }
         };
         using var bitmap = writer.Write(content);

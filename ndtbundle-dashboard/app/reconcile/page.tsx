@@ -3,7 +3,11 @@
 import { useEffect, useState } from "react";
 import { api, type ReconcileBundle, type ReconcileSlitItem } from "@/lib/api";
 
+type ReconcileMode = "OutputBundle" | "Visual" | "Hydrotesting" | "Revisual";
+type HydroType = "FourHeadHydrotesting" | "BigHydrotesting";
+
 export default function ReconcilePage() {
+  const [mode, setMode] = useState<ReconcileMode>("OutputBundle");
   const [bundles, setBundles] = useState<ReconcileBundle[]>([]);
   const [selectedBatchNo, setSelectedBatchNo] = useState("");
   const [slits, setSlits] = useState<ReconcileSlitItem[]>([]);
@@ -17,6 +21,18 @@ export default function ReconcilePage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [printMessage, setPrintMessage] = useState<string | null>(null);
+
+  // Station reconcile (Visual / Hydro / Revisual)
+  const [stationBatchNo, setStationBatchNo] = useState("");
+  const [hydroType, setHydroType] = useState<HydroType>("FourHeadHydrotesting");
+  const [stationPoNumber, setStationPoNumber] = useState<string | null>(null);
+  const [stationMillNo, setStationMillNo] = useState<number | null>(null);
+  const [stationIncoming, setStationIncoming] = useState<number | null>(null);
+  const [stationOk, setStationOk] = useState(0);
+  const [stationReject, setStationReject] = useState(0);
+  const [stationPrintTag, setStationPrintTag] = useState(true);
+  const [stationLoading, setStationLoading] = useState(false);
+  const [stationReconciling, setStationReconciling] = useState(false);
 
   const refresh = async () => {
     setLoading(true);
@@ -37,6 +53,7 @@ export default function ReconcilePage() {
   }, []);
 
   useEffect(() => {
+    if (mode !== "OutputBundle") return;
     const b = bundles.find((x) => x.bundleNo === selectedBatchNo);
     if (!selectedBatchNo) {
       setSlits([]);
@@ -64,7 +81,101 @@ export default function ReconcilePage() {
         setSlits([]);
       })
       .finally(() => setSlitsLoading(false));
-  }, [selectedBatchNo, bundles]);
+  }, [selectedBatchNo, bundles, mode]);
+
+  useEffect(() => {
+    // Clear per-mode state when switching reconcile mode
+    setError(null);
+    setSuccess(null);
+    setPrintMessage(null);
+
+    if (mode !== "OutputBundle") {
+      setSelectedBatchNo("");
+      setSlits([]);
+      setSelectedSlitNo("");
+      setNewSlitNdtPipes(0);
+    } else {
+      setStationBatchNo("");
+      setStationPoNumber(null);
+      setStationMillNo(null);
+      setStationIncoming(null);
+      setStationOk(0);
+      setStationReject(0);
+    }
+  }, [mode]);
+
+  const loadStationContext = async () => {
+    setError(null);
+    setSuccess(null);
+    const batch = stationBatchNo.trim();
+    if (!batch) {
+      setError("Enter/scan NDT Batch No.");
+      return;
+    }
+
+    const station =
+      mode === "Visual" ? "Visual" : mode === "Revisual" ? "Revisual" : hydroType;
+
+    setStationLoading(true);
+    try {
+      const ctx = await api.manualStationContext(station, batch);
+      setStationPoNumber(ctx.poNumber ?? null);
+      setStationMillNo(typeof ctx.millNo === "number" ? ctx.millNo : null);
+      setStationIncoming(typeof ctx.incomingPcs === "number" ? ctx.incomingPcs : null);
+      setStationOk(typeof ctx.alreadyOkPcs === "number" ? ctx.alreadyOkPcs : 0);
+      setStationReject(typeof ctx.alreadyRejectedPcs === "number" ? ctx.alreadyRejectedPcs : 0);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load station context.");
+      setStationPoNumber(null);
+      setStationMillNo(null);
+      setStationIncoming(null);
+    } finally {
+      setStationLoading(false);
+    }
+  };
+
+  const reconcileStation = async () => {
+    setError(null);
+    setSuccess(null);
+    const batch = stationBatchNo.trim();
+    if (!batch) {
+      setError("Enter/scan NDT Batch No.");
+      return;
+    }
+    if (stationIncoming == null) {
+      setError("Load context first.");
+      return;
+    }
+    if (stationOk < 0 || stationReject < 0) {
+      setError("OK/Reject must be non-negative.");
+      return;
+    }
+    if (stationOk + stationReject !== stationIncoming) {
+      setError(`OK (${stationOk}) + Reject (${stationReject}) must equal Incoming (${stationIncoming}).`);
+      return;
+    }
+
+    const station =
+      mode === "Visual" ? "Visual" : mode === "Revisual" ? "Revisual" : hydroType;
+
+    setStationReconciling(true);
+    try {
+      const res = await api.manualStationReconcile(station, {
+        ndtBatchNo: batch,
+        okPcs: stationOk,
+        rejectedPcs: stationReject,
+        printTag: stationPrintTag,
+      });
+      setSuccess(
+        `${res.message ?? "Reconciled."}${res.csvPath ? ` | CSV: ${res.csvPath}` : ""}${res.printed ? " | Tag sent to printer." : ""}`
+      );
+      await loadStationContext();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Reconcile failed.");
+    } finally {
+      setStationReconciling(false);
+    }
+  };
 
   const reconcileBundleTotal = async (newTotal: number) => {
     if (!selectedBatchNo.trim()) {
@@ -145,8 +256,8 @@ export default function ReconcilePage() {
     <div className="space-y-6">
       <h1 className="text-2xl font-bold text-gray-900">Reconcile Bundle</h1>
       <p className="text-gray-600 text-sm">
-        Select an NDT Batch No. Review bundle totals on the left and slit totals on the right. Use &quot;Edit slit&quot;
-        to correct a specific slit&apos;s NDT pipe count; the bundle total will be recomputed from the slit CSV rows.
+        Use this screen to reconcile output bundle totals (existing workflow) or reconcile station outputs (Visual /
+        Hydrotesting / Revisual) for an NDT batch.
       </p>
 
       {error && (
@@ -166,24 +277,144 @@ export default function ReconcilePage() {
       )}
 
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-6 max-w-3xl space-y-4">
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">NDT Batch No.</label>
-          <select
-            value={selectedBatchNo}
-            onChange={(e) => setSelectedBatchNo(e.target.value)}
-            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
-          >
-            <option value="">— Select bundle —</option>
-            {bundles.map((b) => (
-              <option key={b.bundleNo} value={b.bundleNo}>
-                {b.bundleNo} (PO: {b.poNumber}, Mill: {b.millNo}, current: {b.totalNdtPcs} pcs)
-              </option>
-            ))}
-          </select>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Reconcile type</label>
+            <select
+              value={mode}
+              onChange={(e) => setMode(e.target.value as ReconcileMode)}
+              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
+            >
+              <option value="OutputBundle">Output NDT Batch No. (current)</option>
+              <option value="Visual">Visual</option>
+              <option value="Hydrotesting">Hydrotesting</option>
+              <option value="Revisual">Revisual</option>
+            </select>
+          </div>
+
+          {mode === "OutputBundle" ? (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">NDT Batch No.</label>
+              <select
+                value={selectedBatchNo}
+                onChange={(e) => setSelectedBatchNo(e.target.value)}
+                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
+              >
+                <option value="">— Select bundle —</option>
+                {bundles.map((b) => (
+                  <option key={b.bundleNo} value={b.bundleNo}>
+                    {b.bundleNo} (PO: {b.poNumber}, Mill: {b.millNo}, current: {b.totalNdtPcs} pcs)
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">NDT Batch No.</label>
+              <input
+                value={stationBatchNo}
+                onChange={(e) => setStationBatchNo(e.target.value)}
+                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
+                placeholder="Scan/enter batch no (QR)"
+              />
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={loadStationContext}
+                  disabled={stationLoading || !stationBatchNo.trim()}
+                  className="text-sm font-medium text-primary-700 hover:text-primary-800 disabled:opacity-50"
+                >
+                  {stationLoading ? "Loading…" : "Load context"}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
+
+        {mode === "Hydrotesting" && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Hydrotesting type</label>
+            <select
+              value={hydroType}
+              onChange={(e) => setHydroType(e.target.value as HydroType)}
+              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
+            >
+              <option value="FourHeadHydrotesting">Four Head Hydrotesting</option>
+              <option value="BigHydrotesting">Big Hydrotesting</option>
+            </select>
+          </div>
+        )}
+
+        {mode !== "OutputBundle" && (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 pt-2">
+            <div className="rounded-md border border-gray-200 px-3 py-2 text-sm">
+              <div className="text-gray-500">PO Number</div>
+              <div className="font-medium text-gray-900">{stationPoNumber ?? "—"}</div>
+            </div>
+            <div className="rounded-md border border-gray-200 px-3 py-2 text-sm">
+              <div className="text-gray-500">Mill No</div>
+              <div className="font-medium text-gray-900">{stationMillNo ?? "—"}</div>
+            </div>
+            <div className="rounded-md border border-gray-200 px-3 py-2 text-sm">
+              <div className="text-gray-500">Incoming Pcs</div>
+              <div className="font-semibold text-gray-900">{stationIncoming ?? "—"}</div>
+            </div>
+          </div>
+        )}
+
+        {mode !== "OutputBundle" && (
+          <>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">OK pcs</label>
+                <input
+                  type="number"
+                  min={0}
+                  value={stationOk}
+                  onChange={(e) => setStationOk(parseInt(e.target.value, 10) || 0)}
+                  disabled={stationIncoming == null}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Reject pcs</label>
+                <input
+                  type="number"
+                  min={0}
+                  value={stationReject}
+                  onChange={(e) => setStationReject(parseInt(e.target.value, 10) || 0)}
+                  disabled={stationIncoming == null}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50"
+                />
+              </div>
+            </div>
+
+            <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                checked={stationPrintTag}
+                onChange={(e) => setStationPrintTag(e.target.checked)}
+                className="h-4 w-4"
+              />
+              Reprint tag after reconcile
+            </label>
+
+            <div className="flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={reconcileStation}
+                disabled={stationReconciling || stationIncoming == null}
+                className="px-4 py-2 bg-amber-600 text-white text-sm font-medium rounded-md hover:bg-amber-700 disabled:opacity-50 disabled:pointer-events-none"
+              >
+                {stationReconciling ? "Reconciling…" : "Reconcile station output"}
+              </button>
+            </div>
+          </>
+        )}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      {mode === "OutputBundle" && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <section className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
           <div className="px-5 py-3 bg-primary-50 text-gray-900 font-semibold border-b border-gray-200 flex items-center justify-between">
             <span>Bundle Details</span>
@@ -333,13 +564,16 @@ export default function ReconcilePage() {
           </div>
         </section>
       </div>
+      )}
 
-      <button
-        onClick={refresh}
-        className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
-      >
-        Refresh bundle list
-      </button>
+      {mode === "OutputBundle" && (
+        <button
+          onClick={refresh}
+          className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
+        >
+          Refresh bundle list
+        </button>
+      )}
     </div>
   );
 }

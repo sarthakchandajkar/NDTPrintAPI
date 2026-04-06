@@ -36,7 +36,10 @@ public sealed class ManualTagsController : ControllerBase
                 ctx.IncomingPcs,
                 ctx.AlreadyOkPcs,
                 ctx.AlreadyRejectedPcs,
-                ctx.OutgoingPcs
+                ctx.OutgoingPcs,
+                ctx.HydroRedoRequired,
+                ctx.RevisualRedoRequired,
+                ctx.HasRecordedThisStation
             });
         }
         catch (InvalidOperationException ex)
@@ -101,6 +104,57 @@ public sealed class ManualTagsController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Manual station record failed for station {Station}.", station);
+            return StatusCode(500, new { Message = ex.Message });
+        }
+    }
+
+    [HttpPost("{station}/reconcile")]
+    public async Task<IActionResult> Reconcile(string station, [FromBody] RecordManualStationRequest request, CancellationToken cancellationToken)
+    {
+        if (!TryParseStation(station, out var st))
+            return BadRequest(new { Message = "Invalid station. Use Visual, Hydrotesting, FourHeadHydrotesting, BigHydrotesting, or Revisual." });
+
+        if (request is null)
+            return BadRequest(new { Message = "Request body is required." });
+
+        try
+        {
+            var result = await _service.ReconcileAsync(new ManualStationRecordRequest
+            {
+                Station = st,
+                NdtBatchNo = request.NdtBatchNo ?? string.Empty,
+                OkPcs = request.OkPcs,
+                RejectedPcs = request.RejectedPcs,
+                User = request.User ?? string.Empty,
+                StartTime = request.StartTime,
+                EndTime = request.EndTime,
+                PrintTag = request.PrintTag
+            }, cancellationToken).ConfigureAwait(false);
+
+            return Ok(new
+            {
+                Message = "Station reconciled and CSV replaced. Downstream steps may need to be re-entered if the flow was reset.",
+                Station = station,
+                result.NdtBatchNo,
+                result.IncomingPcs,
+                result.OkPcs,
+                result.RejectedPcs,
+                result.OutgoingPcs,
+                result.Printed,
+                result.CsvPath
+            });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { Message = ex.Message });
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { Message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Manual station reconcile failed for station {Station}.", station);
             return StatusCode(500, new { Message = ex.Message });
         }
     }

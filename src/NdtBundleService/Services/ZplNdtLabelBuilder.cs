@@ -5,12 +5,12 @@ namespace NdtBundleService.Services;
 /// <summary>
 /// Builds ZPL for the full NDT bundle tag (Honeywell PD45S).
 /// Layout matches the physical NDT tag:
-/// - Top: single barcode with NDT Batch Number and human readable text under it
+/// - Top: QR code with NDT Batch Number and human readable text under it
 /// - Middle content (3 lines):
 ///   Mill, PO Number, NDT Batch Number on one line
 ///   Grade, Pipe Size, Pipe Length, Bundle/pipe weight on one line
 ///   Date, Number of NDT pipes, Pipe type/WIP/FG and optional "Reprint" on one line
-/// - Bottom: two stacked barcodes with the same NDT Batch Number.
+/// - Bottom: two stacked QR codes with the same NDT Batch Number.
 /// </summary>
 public static class ZplNdtLabelBuilder
 {
@@ -29,7 +29,8 @@ public static class ZplNdtLabelBuilder
         string pipeType,
         DateTime date,
         int pcsInBundle,
-        bool isReprint)
+        bool isReprint,
+        string? stationText = null)
     {
         var zpl = new StringBuilder();
         zpl.Append("^XA");
@@ -46,16 +47,16 @@ public static class ZplNdtLabelBuilder
         var escapedLength = Escape(pipeLength);
         var escapedWeight = Escape(pipeWeightPerMeter);
         var escapedType = Escape(pipeType);
+        var escapedStation = Escape(stationText);
 
         var y = 40;
         var lineHeight = 34;
 
-        // Top: single barcode (Code 128) with NDT Batch Number and text under it
-        zpl.Append("^BY3,2,90");
-        // Center-ish top barcode
-        zpl.AppendFormat("^FO140,{0}^BCN,90,Y,N,N^FD{1}^FS", y, escapedBatch);
-        y += 110;
-        // Centered human-readable batch below barcode
+        // Top: QR code (ZPL ^BQ) with NDT Batch Number; human-readable text below.
+        // ^BQN,2,m = Model 2, module size m. Field data: MA, = medium error correction + automatic input, then payload.
+        zpl.AppendFormat("^FO220,{0}^BQN,2,6^FDMA,{1}^FS", y, escapedBatch);
+        y += 140;
+        // Centered human-readable batch below QR
         zpl.AppendFormat("^FO80,{0}^FB640,1,0,C,0^FD{1}^FS", y, escapedBatch);
         y += lineHeight + 20;
 
@@ -74,6 +75,13 @@ public static class ZplNdtLabelBuilder
             string.IsNullOrEmpty(escapedWeight) ? "-" : escapedWeight);
         y += lineHeight;
 
+        // Optional station line (Visual / Hydrotesting / Revisual; for hydro includes Four Head vs Big).
+        if (!string.IsNullOrWhiteSpace(escapedStation))
+        {
+            zpl.AppendFormat("^FO80,{0}^FB640,1,0,C,0^FDStation: {1}^FS", y, escapedStation);
+            y += lineHeight;
+        }
+
         // Middle content – line 3: Date, pieces, type/WIP/FG and optional Reprint
         var dateText = date.ToString("dd/MM/yy");
         var typeText = string.IsNullOrEmpty(escapedType) ? "" : $"  {escapedType}";
@@ -85,14 +93,12 @@ public static class ZplNdtLabelBuilder
             typeText,
             reprintText);
 
-        // Bottom: two stacked barcodes with the same NDT Batch Number.
-        // Move them up and increase label length so both are visible.
-        var bottomY1 = LabelLengthDots - 320;
-        var bottomY2 = bottomY1 + 100;
+        // Bottom: two stacked QR codes with the same NDT Batch Number.
+        var bottomY1 = LabelLengthDots - 360;
+        var bottomY2 = bottomY1 + 130;
 
-        zpl.Append("^BY3,2,70");
-        zpl.AppendFormat("^FO140,{0}^BCN,70,Y,N,N^FD{1}^FS", bottomY1, escapedBatch);
-        zpl.AppendFormat("^FO140,{0}^BCN,70,Y,N,N^FD{1}^FS", bottomY2, escapedBatch);
+        zpl.AppendFormat("^FO220,{0}^BQN,2,5^FDMA,{1}^FS", bottomY1, escapedBatch);
+        zpl.AppendFormat("^FO220,{0}^BQN,2,5^FDMA,{1}^FS", bottomY2, escapedBatch);
 
         zpl.Append("^XZ");
         return Encoding.UTF8.GetBytes(zpl.ToString());

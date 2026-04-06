@@ -20,6 +20,7 @@ public sealed class ReconcileController : ControllerBase
     private readonly IWipLabelProvider _wipLabelProvider;
     private readonly INetworkPrinterSender _printerSender;
     private readonly NdtBundleOptions _options;
+    private readonly IZplGenerationToggle _zplToggle;
     private readonly ILogger<ReconcileController> _logger;
 
     public ReconcileController(
@@ -29,6 +30,7 @@ public sealed class ReconcileController : ControllerBase
         IWipLabelProvider wipLabelProvider,
         INetworkPrinterSender printerSender,
         IOptions<NdtBundleOptions> options,
+        IZplGenerationToggle zplToggle,
         ILogger<ReconcileController> logger)
     {
         _bundleRepository = bundleRepository;
@@ -37,6 +39,7 @@ public sealed class ReconcileController : ControllerBase
         _wipLabelProvider = wipLabelProvider;
         _printerSender = printerSender;
         _options = options.Value;
+        _zplToggle = zplToggle;
         _logger = logger;
     }
 
@@ -238,8 +241,8 @@ public sealed class ReconcileController : ControllerBase
         if (bundle is null)
             return NotFound(new { Message = $"Bundle {batchNo} not found." });
 
-        if (!_options.EnableNdtTagZplAndPrint)
-            return BadRequest(new { Message = "NDT tag ZPL and network print are disabled (NdtBundle:EnableNdtTagZplAndPrint)." });
+        if (!_zplToggle.IsEnabled)
+            return BadRequest(new { Message = "NDT tag ZPL and network print are disabled (runtime toggle)." });
 
         var address = (_options.NdtTagPrinterAddress ?? "").Trim();
         var useAddress = !string.IsNullOrEmpty(address) && !address.Equals("0.0.0.0", StringComparison.OrdinalIgnoreCase);

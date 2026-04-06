@@ -2,39 +2,66 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { api, type WipInfo, type NdtSummary, type BundleFile } from "@/lib/api";
+import { api, type WipByMillRow, type BundleFile } from "@/lib/api";
+
+type MillRowState = {
+  row: WipByMillRow;
+  ndtPipes: number | null;
+};
 
 export default function SummaryPage() {
-  const [wip, setWip] = useState<WipInfo | null>(null);
-  const [summary, setSummary] = useState<NdtSummary | null>(null);
+  const [millRows, setMillRows] = useState<MillRowState[]>([]);
+  const [sourcePath, setSourcePath] = useState<string | null>(null);
   const [bundles, setBundles] = useState<BundleFile[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [poNumber, setPoNumber] = useState("");
-  const [millNo, setMillNo] = useState(1);
   const [dummyPrintStatus, setDummyPrintStatus] = useState<{ success: boolean; message: string } | null>(null);
+  const [zplEnabled, setZplEnabled] = useState<boolean | null>(null);
+  const [togglingZpl, setTogglingZpl] = useState(false);
   const [secondsUntilRefresh, setSecondsUntilRefresh] = useState(30);
 
   const refresh = async () => {
     setLoading(true);
     setError(null);
     try {
-      const [wipRes, bundlesRes] = await Promise.all([
-        api.wipInfo().catch(() => null),
+      const [byMills, bundlesRes, zplStatus] = await Promise.all([
+        api.wipByMills(),
         api.bundles().catch(() => []),
+        api.zplGenerationStatus().catch(() => null),
       ]);
-      setWip(wipRes ?? null);
+
+      setSourcePath(typeof byMills.sourcePath === "string" ? byMills.sourcePath : null);
+      const mills = Array.isArray(byMills.mills) ? byMills.mills : [];
+
+      const withNdt: MillRowState[] = await Promise.all(
+        mills.map(async (row) => {
+          const po = (row.poNumber ?? "").trim();
+          const rawMill = row.millNo;
+          let ndtMill: number | null = null;
+          if (typeof rawMill === "number" && Number.isFinite(rawMill)) ndtMill = rawMill;
+          else if (typeof rawMill === "string" && rawMill.trim() !== "") {
+            const p = parseInt(rawMill.trim(), 10);
+            if (Number.isFinite(p)) ndtMill = p;
+          }
+          if (!po || ndtMill == null || ndtMill < 1 || ndtMill > 4) {
+            return { row, ndtPipes: null };
+          }
+          try {
+            const s = await api.ndtSummary(po, ndtMill);
+            return { row, ndtPipes: typeof s.totalNdtPipes === "number" ? s.totalNdtPipes : 0 };
+          } catch {
+            return { row, ndtPipes: null };
+          }
+        })
+      );
+
+      setMillRows(withNdt);
       setBundles(Array.isArray(bundlesRes) ? bundlesRes : []);
-      const po = (wipRes?.poNumber ?? (poNumber || "")).trim();
-      if (po) {
-        setPoNumber(po);
-        const sum = await api.ndtSummary(po, millNo).catch(() => null);
-        setSummary(sum ?? null);
-      } else {
-        setSummary(null);
-      }
+      setZplEnabled(typeof zplStatus?.enabled === "boolean" ? zplStatus.enabled : null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
+      setMillRows([]);
+      setSourcePath(null);
     } finally {
       setLoading(false);
       setSecondsUntilRefresh(30);
@@ -58,14 +85,6 @@ export default function SummaryPage() {
     return () => clearInterval(interval);
   }, []);
 
-  useEffect(() => {
-    if (poNumber.trim()) {
-      api.ndtSummary(poNumber.trim(), millNo).then(setSummary).catch(() => setSummary(null));
-    } else {
-      setSummary(null);
-    }
-  }, [poNumber, millNo]);
-
   const handlePrintDummyBundle = async () => {
     setDummyPrintStatus(null);
     setError(null);
@@ -77,7 +96,6 @@ export default function SummaryPage() {
       });
     } catch (e) {
       let msg = e instanceof Error ? e.message : "Print request failed.";
-      // If the error is "API 500: {...}", try to show the server's Message field
       const match = msg.match(/^API 500: ([\s\S]+)$/);
       if (match) {
         try {
@@ -91,7 +109,32 @@ export default function SummaryPage() {
     }
   };
 
-  if (loading && !wip && !summary)
+  const handleToggleZpl = async () => {
+    if (zplEnabled == null) return;
+    setTogglingZpl(true);
+    setError(null);
+    try {
+      const next = !zplEnabled;
+      const res = await api.setZplGenerationStatus(next);
+      const enabled = !!res.enabled;
+      setZplEnabled(enabled);
+      setDummyPrintStatus({
+        success: true,
+        message: enabled
+          ? "ZPL generation enabled. New tag actions will generate .zpl preview files."
+          : "ZPL generation disabled.",
+      });
+    } catch (e) {
+      setDummyPrintStatus({
+        success: false,
+        message: e instanceof Error ? e.message : "Failed to update ZPL generation setting.",
+      });
+    } finally {
+      setTogglingZpl(false);
+    }
+  };
+
+  if (loading && millRows.length === 0 && !error)
     return (
       <div className="flex items-center justify-center py-12">
         <div className="text-gray-500">Loading...</div>
@@ -118,54 +161,103 @@ export default function SummaryPage() {
           {error}
         </div>
       )}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-5">
-          <p className="text-sm font-medium text-gray-500">Current PO</p>
-          <p className="mt-1 text-xl font-semibold text-gray-900">{wip?.poNumber ?? "—"}</p>
-        </div>
-        <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-5">
-          <p className="text-sm font-medium text-gray-500">Mill No</p>
-          <p className="mt-1 text-xl font-semibold text-gray-900">{wip?.millNumber ?? millNo}</p>
-        </div>
-        <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-5 border-l-4 border-l-primary-500">
-          <p className="text-sm font-medium text-gray-500">NDT Pipes (this PO / mill)</p>
-          <p className="mt-1 text-2xl font-bold text-primary-600">{summary?.totalNdtPipes ?? 0}</p>
-        </div>
-      </div>
 
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
-        <h2 className="px-5 py-3 bg-primary-50 text-gray-900 font-semibold border-b border-gray-200">
-          WIP / Current PO Plan
-        </h2>
-        {wip ? (
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <tbody className="divide-y divide-gray-200">
-                {[
-                  ["PO Number", wip.poNumber],
-                  ["Mill Number", wip.millNumber],
-                  ["Pipe Size", wip.pipeSize],
-                  ["Pipe Length", wip.pipeLength],
-                  ["Pieces Per Bundle", wip.piecesPerBundle],
-                  ["Total Pieces", wip.totalPieces],
-                  ["Planned Month", wip.plannedMonth],
-                ].map(([label, value]) => (
-                  <tr key={String(label)} className="hover:bg-gray-50">
-                    <td className="px-5 py-2 text-sm font-medium text-gray-500 w-48">{label}</td>
-                    <td className="px-5 py-2 text-sm text-gray-900">{value ?? "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <p className="px-5 py-8 text-gray-500 text-sm">No WIP data. Check service URL and that NdtBundleService is running.</p>
+        <div className="px-5 py-3 bg-primary-50 border-b border-gray-200">
+          <h2 className="font-semibold text-gray-900">PO running by mill</h2>
+          <p className="text-sm text-gray-600 mt-1">
+            Each row is one mill (Mill-1 … Mill-4). When the TM folder is configured, PO details are merged from every WIP
+            CSV in that folder (newer files override per mill). NDT pipe counts use slit CSV rows for that PO and mill in
+            the input folder.
+          </p>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="min-w-full divide-y divide-gray-200 text-sm">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Mill</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">
+                  PO number
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">
+                  NDT pipes
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide hidden lg:table-cell">
+                  Pipe size
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide hidden lg:table-cell">
+                  NDT pcs / bundle
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide hidden lg:table-cell">
+                  Pipe length
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide hidden xl:table-cell">
+                  Planned month
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide hidden xl:table-cell">
+                  Pcs / bundle
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide hidden xl:table-cell">
+                  Total pcs
+                </th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-200">
+              {millRows.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="px-4 py-8 text-gray-500">
+                    No mill data. Ensure the PO plan CSV has a &quot;Mill Number&quot; column and rows for mills 1–4.
+                  </td>
+                </tr>
+              ) : (
+                millRows.map(({ row, ndtPipes }) => {
+                  const m = row.millNo ?? 0;
+                  return (
+                    <tr key={m} className="hover:bg-gray-50">
+                      <td className="px-4 py-3 font-semibold text-gray-900 whitespace-nowrap">
+                        Mill-{m}
+                      </td>
+                      <td className="px-4 py-3 text-gray-900 font-medium whitespace-nowrap">
+                        {(row.poNumber ?? "").trim() || "—"}
+                      </td>
+                      <td className="px-4 py-3 text-primary-600 font-semibold whitespace-nowrap">
+                        {ndtPipes == null ? "—" : ndtPipes}
+                      </td>
+                      <td className="px-4 py-3 text-gray-700 hidden lg:table-cell whitespace-nowrap">
+                        {row.pipeSize?.trim() || "—"}
+                      </td>
+                      <td className="px-4 py-3 text-gray-700 hidden lg:table-cell whitespace-nowrap font-medium tabular-nums">
+                        {row.ndtPcsPerBundle == null ? "—" : row.ndtPcsPerBundle}
+                      </td>
+                      <td className="px-4 py-3 text-gray-700 hidden lg:table-cell whitespace-nowrap">
+                        {row.pipeLength?.trim() || "—"}
+                      </td>
+                      <td className="px-4 py-3 text-gray-700 hidden xl:table-cell whitespace-nowrap">
+                        {row.plannedMonth?.trim() || "—"}
+                      </td>
+                      <td className="px-4 py-3 text-gray-700 hidden xl:table-cell whitespace-nowrap">
+                        {row.piecesPerBundle?.trim() || "—"}
+                      </td>
+                      <td className="px-4 py-3 text-gray-700 hidden xl:table-cell whitespace-nowrap">
+                        {row.totalPieces?.trim() || "—"}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+        {sourcePath && (
+          <p className="px-5 py-2 text-xs text-gray-400 border-t border-gray-100 truncate" title={sourcePath}>
+            Plan file: {sourcePath}
+          </p>
         )}
       </div>
 
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
         <div className="px-5 py-3 bg-primary-50 flex justify-between items-center border-b border-gray-200">
-          <h2 className="font-semibold text-gray-900">Bundle CSV Files</h2>
+          <h2 className="font-semibold text-gray-900">Bundle CSV files</h2>
           <span className="text-sm text-gray-600">{bundles.length} file(s)</span>
         </div>
         {bundles.length > 0 ? (
@@ -194,6 +286,22 @@ export default function SummaryPage() {
       )}
 
       <div className="flex flex-wrap gap-3">
+        <button
+          type="button"
+          onClick={handleToggleZpl}
+          disabled={togglingZpl || zplEnabled == null}
+          className={`inline-flex items-center px-4 py-2 rounded-md text-sm font-medium disabled:opacity-50 ${
+            zplEnabled
+              ? "bg-amber-600 text-white hover:bg-amber-700"
+              : "bg-emerald-600 text-white hover:bg-emerald-700"
+          }`}
+        >
+          {togglingZpl
+            ? "Updating..."
+            : zplEnabled
+              ? "Disable ZPL Generation"
+              : "Enable ZPL Generation"}
+        </button>
         <button
           type="button"
           onClick={handlePrintDummyBundle}

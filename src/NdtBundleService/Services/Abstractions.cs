@@ -167,3 +167,12 @@ public interface INdtTagPrinter
     Task<bool> PrintBundleTagAsync(InputSlitRecord record, int batchNumber, int totalNdtPcs, bool isReprint, CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Runtime switch for enabling/disabling ZPL generation and print behavior without changing appsettings.
+/// </summary>
+public interface IZplGenerationToggle
+{
+    bool IsEnabled { get; }
+    bool SetEnabled(bool enabled);
+}
+

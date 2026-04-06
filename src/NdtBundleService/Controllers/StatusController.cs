@@ -15,12 +15,18 @@ public sealed class StatusController : ControllerBase
 {
     private readonly IPlcClient _plcClient;
     private readonly NdtBundleOptions _options;
+    private readonly IZplGenerationToggle _zplToggle;
     private readonly ILogger<StatusController> _logger;
 
-    public StatusController(IPlcClient plcClient, IOptions<NdtBundleOptions> options, ILogger<StatusController> logger)
+    public StatusController(
+        IPlcClient plcClient,
+        IOptions<NdtBundleOptions> options,
+        IZplGenerationToggle zplToggle,
+        ILogger<StatusController> logger)
     {
         _plcClient = plcClient;
         _options = options.Value;
+        _zplToggle = zplToggle;
         _logger = logger;
     }
 
@@ -52,5 +58,30 @@ public sealed class StatusController : ControllerBase
             Status = hasPrinter ? "Ready" : "NotConfigured",
             Message = hasPrinter ? "Printer configured." : "No printer configured (tags saved to PDF only)."
         });
+    }
+
+    [HttpGet("zpl-generation")]
+    public IActionResult GetZplGenerationStatus()
+    {
+        return Ok(new
+        {
+            Enabled = _zplToggle.IsEnabled
+        });
+    }
+
+    [HttpPost("zpl-generation")]
+    public IActionResult SetZplGenerationStatus([FromBody] SetZplGenerationRequest request)
+    {
+        if (request is null)
+            return BadRequest(new { Message = "Request body is required." });
+
+        var enabled = _zplToggle.SetEnabled(request.Enabled);
+        _logger.LogInformation("ZPL generation toggle set to {Enabled}.", enabled);
+        return Ok(new { Enabled = enabled });
+    }
+
+    public sealed class SetZplGenerationRequest
+    {
+        public bool Enabled { get; set; }
     }
 }

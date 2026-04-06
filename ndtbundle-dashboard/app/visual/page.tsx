@@ -10,7 +10,6 @@ export default function VisualPage() {
   const [incomingPcs, setIncomingPcs] = useState<number | null>(null);
   const [okPcs, setOkPcs] = useState(0);
   const [rejectedPcs, setRejectedPcs] = useState(0);
-  const [user, setUser] = useState("");
   const [printTag, setPrintTag] = useState(true);
   const [loadingContext, setLoadingContext] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -66,7 +65,6 @@ export default function VisualPage() {
         ndtBatchNo: batch,
         okPcs,
         rejectedPcs,
-        user: user.trim(),
         printTag,
       });
       setSuccess(
@@ -94,7 +92,7 @@ export default function VisualPage() {
         <div className="rounded-md bg-green-50 border border-green-200 p-4 text-green-800 text-sm">{success}</div>
       )}
 
-      <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-6 max-w-xl space-y-4">
+      <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-6 md:p-8 w-full max-w-6xl mx-auto space-y-4">
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">NDT Batch No</label>
           <input
@@ -128,16 +126,6 @@ export default function VisualPage() {
             <div className="text-gray-500">Incoming Pcs</div>
             <div className="font-semibold text-gray-900">{incomingPcs ?? "—"}</div>
           </div>
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">User</label>
-          <input
-            value={user}
-            onChange={(e) => setUser(e.target.value)}
-            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
-            placeholder="Operator name"
-          />
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
