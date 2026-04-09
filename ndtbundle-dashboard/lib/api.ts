@@ -70,6 +70,12 @@ export interface NdtSummary {
   totalNdtPipes?: number;
 }
 
+export interface RunningPoNdtSummary {
+  millNo?: number;
+  poNumber?: string;
+  totalNdtPipes?: number;
+}
+
 export interface BundleFile {
   fileName?: string;
   fullPath?: string;
@@ -156,6 +162,7 @@ export const api = {
   wipByMills: () => fetchApi<WipByMillsResponse>("/api/Test/wip-by-mills"),
   ndtSummary: (poNumber: string, millNo: number) =>
     fetchApi<NdtSummary>(`/api/Test/ndt-summary?poNumber=${encodeURIComponent(poNumber)}&millNo=${millNo}`),
+  ndtSummaryRunningPo: () => fetchApi<RunningPoNdtSummary[]>("/api/Test/ndt-summary-running-po"),
   bundles: () => fetchApi<BundleFile[]>("/api/Test/bundles"),
   poEnd: (poNumber: string, millNo: number) =>
     fetchApi<{ message?: string }>("/api/Test/po-end", {

@@ -19,15 +19,18 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
 {
     private readonly NdtBundleOptions _options;
     private readonly INdtBundleRepository _bundleRepository;
+    private readonly ITraceabilityRepository _traceability;
     private readonly ILogger<UploadNdtBundleFileService> _logger;
 
     public UploadNdtBundleFileService(
         IOptions<NdtBundleOptions> options,
         INdtBundleRepository bundleRepository,
+        ITraceabilityRepository traceability,
         ILogger<UploadNdtBundleFileService> logger)
     {
         _options = options.Value;
         _bundleRepository = bundleRepository;
+        _traceability = traceability;
         _logger = logger;
     }
 
@@ -46,6 +49,7 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
         {
             "PO_NO,Slit_No,HRC Number,Slit Width,Slit Thick,NSS,Slit Grade,Bundle Number,NumOfPipes,TotalBundleWt,LenPerPipe,IsFullBundle"
         };
+        var uploadRowsForSql = new List<UploadBundleRow>();
 
         var revisualFiles = Directory.EnumerateFiles(revisualFolder, "*.csv")
             .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
@@ -57,10 +61,17 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var lines = await ReadAllLinesSharedAsync(file, cancellationToken).ConfigureAwait(false);
-                if (lines.Length < 3)
+                if (lines.Length < 2)
                     continue;
 
-                var values = SplitCsvLine(lines[2]);
+                // Revisual station files are written as 2 lines: header + one data row.
+                // Be defensive and use the last non-empty line as the data row.
+                var dataLine = lines
+                    .LastOrDefault(static line => !string.IsNullOrWhiteSpace(line));
+                if (string.IsNullOrWhiteSpace(dataLine))
+                    continue;
+
+                var values = SplitCsvLine(dataLine);
                 if (values.Count < 4)
                     continue;
 
@@ -98,6 +109,22 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
                     ""); // IsFullBundle
 
                 rows.Add(outputLine);
+
+                uploadRowsForSql.Add(new UploadBundleRow
+                {
+                    PoNo = poNo,
+                    SlitNo = convertedSlitNo,
+                    HrcNumber = hrcNumber,
+                    SlitWidth = slitWidth,
+                    SlitThick = slitThick,
+                    Nss = string.Empty,
+                    SlitGrade = slitGrade,
+                    BundleNumber = batchNo,
+                    NumOfPipes = okPcs,
+                    TotalBundleWt = totalBundleWt,
+                    LenPerPipe = lenPerPipe,
+                    IsFullBundle = null
+                });
             }
             catch (Exception ex)
             {
@@ -108,6 +135,9 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
         var fileName = $"Upload_NDT_Bundle_{DateTime.Now:yyyyMMddHHmmss}.csv";
         var fullPath = Path.Combine(uploadFolder, fileName);
         await File.WriteAllLinesAsync(fullPath, rows, cancellationToken).ConfigureAwait(false);
+
+        // Best-effort SQL traceability; do not fail generation if SQL is down.
+        await _traceability.RecordUploadBundleRowsAsync(fullPath, uploadRowsForSql, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation("Generated upload NDT bundle CSV: {Path} with {Rows} row(s).", fullPath, rows.Count - 1);
         return new UploadNdtBundleGenerationResult { FilePath = fullPath, RowCount = Math.Max(0, rows.Count - 1) };

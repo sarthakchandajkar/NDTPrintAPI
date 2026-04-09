@@ -5,6 +5,12 @@ public class NdtBundleOptions
     /// <summary>Folder where Input Slit CSV files are dropped.</summary>
     public string InputSlitFolder { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Optional folder where Input Slit CSV files are moved after acceptance (e.g. SAP). When set, <c>ndt-summary</c> and
+    /// current-PO-per-mill on the dashboard sum/read from both this folder and <see cref="InputSlitFolder"/>; files are never modified.
+    /// </summary>
+    public string InputSlitAcceptedFolder { get; set; } = string.Empty;
+
     /// <summary>Folder where output bundle CSV files (with NDT_Batch_No) are written.</summary>
     public string OutputBundleFolder { get; set; } = string.Empty;
 
@@ -74,7 +80,17 @@ public class NdtBundleOptions
     /// <summary>Optional local IP to bind to when connecting to the printer (e.g. 192.168.0.14). Use when the PC has multiple NICs and you want to force the same interface that can reach the printer. Leave empty to let the OS choose.</summary>
     public string NdtTagPrinterLocalBindAddress { get; set; } = string.Empty;
 
-    /// <summary>SQL Server connection string for NDT_Bundle and reconciliation. If empty, bundle list comes from output CSVs and only CSV + reprint are updated on reconcile.</summary>
+    /// <summary>When false, SQL Server is never used for bundles (reads/writes use CSV folders only), even if <see cref="ConnectionString"/> is set (e.g. env override).</summary>
+    public bool UseSqlServerForBundles { get; set; } = true;
+
+    /// <summary>SQL Server connection string for NDT_Bundle and reconciliation. Ignored unless <see cref="UseSqlServerForBundles"/> is true. If empty, bundle list comes from output CSVs.</summary>
     public string ConnectionString { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Optional UTC cutoff (ISO-8601, e.g. <c>2026-04-05T00:00:00Z</c>). When set, only CSV files whose last write time (UTC)
+    /// is on or after this instant are read for input slits, WIP merge, PO plan rotation, Input Slit Accepted, and bundle-output CSVs used for ndt-summary.
+    /// Leave empty to include all files.
+    /// </summary>
+    public string? MinSourceFileLastWriteUtc { get; set; }
 }
 

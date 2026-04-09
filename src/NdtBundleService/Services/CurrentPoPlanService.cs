@@ -1,3 +1,4 @@
+using System.Linq;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
@@ -110,7 +111,9 @@ public sealed class CurrentPoPlanService : ICurrentPoPlanService
             return;
         }
 
+        var minUtc = SourceFileEligibility.ParseMinUtc(_options);
         var files = Directory.EnumerateFiles(folder, "*.csv")
+            .Where(f => SourceFileEligibility.IncludeFileUtc(new FileInfo(f).LastWriteTimeUtc, minUtc))
             .OrderBy(f => new FileInfo(f).LastWriteTimeUtc)
             .ToArray();
 

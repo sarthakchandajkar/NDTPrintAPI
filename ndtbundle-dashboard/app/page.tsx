@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { api, type WipByMillRow, type BundleFile } from "@/lib/api";
+import { api, type WipByMillRow, type BundleFile, type RunningPoNdtSummary } from "@/lib/api";
 
 type MillRowState = {
   row: WipByMillRow;
@@ -24,36 +24,37 @@ export default function SummaryPage() {
     setLoading(true);
     setError(null);
     try {
-      const [byMills, bundlesRes, zplStatus] = await Promise.all([
+      const [byMills, runningSummary, bundlesRes, zplStatus] = await Promise.all([
         api.wipByMills(),
+        api.ndtSummaryRunningPo().catch(() => [] as RunningPoNdtSummary[]),
         api.bundles().catch(() => []),
         api.zplGenerationStatus().catch(() => null),
       ]);
 
       setSourcePath(typeof byMills.sourcePath === "string" ? byMills.sourcePath : null);
       const mills = Array.isArray(byMills.mills) ? byMills.mills : [];
+      const ndtByMill = new Map<number, number>();
+      (Array.isArray(runningSummary) ? runningSummary : []).forEach((s) => {
+        const m = typeof s.millNo === "number" ? s.millNo : Number.NaN;
+        if (Number.isFinite(m) && m >= 1 && m <= 4) {
+          ndtByMill.set(m, typeof s.totalNdtPipes === "number" ? s.totalNdtPipes : 0);
+        }
+      });
 
-      const withNdt: MillRowState[] = await Promise.all(
-        mills.map(async (row) => {
-          const po = (row.poNumber ?? "").trim();
-          const rawMill = row.millNo;
-          let ndtMill: number | null = null;
-          if (typeof rawMill === "number" && Number.isFinite(rawMill)) ndtMill = rawMill;
-          else if (typeof rawMill === "string" && rawMill.trim() !== "") {
-            const p = parseInt(rawMill.trim(), 10);
-            if (Number.isFinite(p)) ndtMill = p;
-          }
-          if (!po || ndtMill == null || ndtMill < 1 || ndtMill > 4) {
-            return { row, ndtPipes: null };
-          }
-          try {
-            const s = await api.ndtSummary(po, ndtMill);
-            return { row, ndtPipes: typeof s.totalNdtPipes === "number" ? s.totalNdtPipes : 0 };
-          } catch {
-            return { row, ndtPipes: null };
-          }
-        })
-      );
+      const withNdt: MillRowState[] = mills.map((row) => {
+        const po = (row.poNumber ?? "").trim();
+        const rawMill = row.millNo;
+        let ndtMill: number | null = null;
+        if (typeof rawMill === "number" && Number.isFinite(rawMill)) ndtMill = rawMill;
+        else if (typeof rawMill === "string" && rawMill.trim() !== "") {
+          const p = parseInt(rawMill.trim(), 10);
+          if (Number.isFinite(p)) ndtMill = p;
+        }
+        if (!po || ndtMill == null || ndtMill < 1 || ndtMill > 4) {
+          return { row, ndtPipes: null };
+        }
+        return { row, ndtPipes: ndtByMill.has(ndtMill) ? ndtByMill.get(ndtMill) ?? 0 : null };
+      });
 
       setMillRows(withNdt);
       setBundles(Array.isArray(bundlesRes) ? bundlesRes : []);

@@ -1,6 +1,8 @@
+using System.Linq;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
+using NdtBundleService.Services;
 
 namespace NdtBundleService.Controllers;
 
@@ -31,6 +33,7 @@ public sealed class InputSlitsController : ControllerBase
         if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
             return Ok(Array.Empty<object>());
 
+        var minUtc = SourceFileEligibility.ParseMinUtc(_options);
         var files = Directory.EnumerateFiles(folder, "*.csv")
             .Select(path =>
             {
@@ -42,6 +45,7 @@ public sealed class InputSlitsController : ControllerBase
                     Size = fi.Length
                 };
             })
+            .Where(f => SourceFileEligibility.IncludeFileUtc(f.LastModified, minUtc))
             .OrderByDescending(f => f.LastModified)
             .ToList();
 

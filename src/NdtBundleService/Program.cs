@@ -34,6 +34,7 @@ builder.Services.AddSingleton<IZplGenerationToggle, ZplGenerationToggle>();
 builder.Services.AddSingleton<IPlcClient, StubPlcClient>();
 builder.Services.AddSingleton<IManualNdtTagService, ManualNdtTagService>();
 builder.Services.AddSingleton<IUploadNdtBundleFileService, UploadNdtBundleFileService>();
+builder.Services.AddSingleton<ITraceabilityRepository, TraceabilityRepository>();
 
 builder.Services.AddCors(options =>
 {

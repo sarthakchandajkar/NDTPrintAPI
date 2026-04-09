@@ -3,7 +3,7 @@ using NdtBundleService.Models;
 namespace NdtBundleService.Services;
 
 /// <summary>
-/// Persists and queries NDT bundles for listing and reconciliation. When ConnectionString is set, uses SQL Server; otherwise uses output CSV folder.
+/// Persists and queries NDT bundles for listing and reconciliation. When UseSqlServerForBundles and ConnectionString are set, uses SQL Server; otherwise uses output CSV folder.
 /// </summary>
 public interface INdtBundleRepository
 {

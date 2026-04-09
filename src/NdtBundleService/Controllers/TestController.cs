@@ -1,3 +1,5 @@
+using System.Linq;
+using Microsoft.Data.SqlClient;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -81,6 +83,13 @@ namespace NdtBundleService.Controllers;
     {
         public string PoNumber { get; set; } = string.Empty;
         public int MillNo { get; set; }
+        public int TotalNdtPipes { get; set; }
+    }
+
+    public sealed class RunningPoNdtSummaryDto
+    {
+        public int MillNo { get; set; }
+        public string PoNumber { get; set; } = string.Empty;
         public int TotalNdtPipes { get; set; }
     }
 
@@ -213,37 +222,38 @@ namespace NdtBundleService.Controllers;
 
     /// <summary>
     /// Returns WIP plan rows grouped for mills 1–4.
-    /// When <see cref="NdtBundleOptions.PoPlanFolder"/> is set, merges all <c>*.csv</c> files in that folder
-    /// in oldest-to-newest order (by last write time). For each mill, the latest file that contains a row for that mill wins;
-    /// mills not mentioned in newer files keep the value from an older file. This matches plants that drop one WIP file per PO
-    /// while several mills run different POs at once.
-    /// Otherwise reads the single resolved PO plan CSV (same as <c>wip-info</c>).
+    /// <b>Current PO per mill</b> comes from the latest slit CSV rows in <see cref="NdtBundleOptions.InputSlitFolder"/> and, when set, <see cref="NdtBundleOptions.InputSlitAcceptedFolder"/> (read-only; real-time).
+    /// Pipe size, planned month, and SAP pieces/bundle are enriched from merged WIP files in <see cref="NdtBundleOptions.PoPlanFolder"/> when the PO matches.
+    /// When <see cref="NdtBundleOptions.PoPlanFolder"/> is set, WIP CSVs are merged (newer files override per mill) for enrichment only.
     /// </summary>
     [HttpGet("wip-by-mills")]
     public async Task<IActionResult> GetWipByMills(CancellationToken cancellationToken)
     {
         try
         {
-            var byMill = new Dictionary<int, WipByMillRowDto>();
+            var wipByMill = new Dictionary<int, WipByMillRowDto>();
+            var wipByPo = new Dictionary<string, WipByMillRowDto>(StringComparer.OrdinalIgnoreCase);
             string sourcePath;
 
+            var minUtc = SourceFileEligibility.ParseMinUtc(_options);
             var planFolder = _options.PoPlanFolder?.Trim();
             if (!string.IsNullOrWhiteSpace(planFolder) && Directory.Exists(planFolder))
             {
                 var files = Directory.EnumerateFiles(planFolder, "*.csv")
                     .Select(f => new FileInfo(f))
+                    .Where(f => SourceFileEligibility.IncludeFileUtc(f.LastWriteTimeUtc, minUtc))
                     .OrderBy(f => f.LastWriteTimeUtc)
                     .ThenBy(f => f.FullName, StringComparer.OrdinalIgnoreCase)
                     .Select(f => f.FullName)
                     .ToArray();
 
                 if (files.Length == 0)
-                    return NotFound(new { Message = "PoPlanFolder contains no CSV files.", Path = planFolder });
+                    return NotFound(new { Message = "PoPlanFolder has no eligible CSV files (check MinSourceFileLastWriteUtc or folder path).", Path = planFolder });
 
                 foreach (var file in files)
-                    await MergeWipFileIntoByMillAsync(file, byMill, cancellationToken).ConfigureAwait(false);
+                    await MergeWipFileIntoByMillAsync(file, wipByMill, wipByPo, cancellationToken).ConfigureAwait(false);
 
-                sourcePath = $"{planFolder} ({files.Length} WIP CSV file(s); newer file overrides per mill)";
+                sourcePath = $"{planFolder} ({files.Length} WIP CSV file(s); PO per mill from Input Slit + Input Slit Accepted folders)";
             }
             else
             {
@@ -253,19 +263,41 @@ namespace NdtBundleService.Controllers;
                 if (path.StartsWith("NOTFOUND:", StringComparison.Ordinal))
                     return NotFound(new { Message = "WIP CSV file not found.", Path = path["NOTFOUND:".Length..] });
 
-                if (!await MergeWipFileIntoByMillAsync(path, byMill, cancellationToken).ConfigureAwait(false))
+                if (!SourceFileEligibility.IncludeFileUtc(System.IO.File.GetLastWriteTimeUtc(path), minUtc))
+                    return NotFound(new { Message = "WIP CSV file is older than MinSourceFileLastWriteUtc.", Path = path });
+
+                if (!await MergeWipFileIntoByMillAsync(path, wipByMill, wipByPo, cancellationToken).ConfigureAwait(false))
                     return BadRequest(new { Message = "WIP CSV must include \"Mill Number\" or \"Mill No\", and \"PO_No\", \"PO Number\", or \"PO No\"." });
 
                 sourcePath = path;
             }
 
+            var slitPoByMill = await GetLatestPoPerMillFromSlitFolderAsync(cancellationToken).ConfigureAwait(false);
+
             var mills = new List<WipByMillRowDto>(4);
             for (var m = 1; m <= 4; m++)
             {
-                if (byMill.TryGetValue(m, out var row))
+                wipByMill.TryGetValue(m, out var wipRowForMill);
+                slitPoByMill.TryGetValue(m, out var slitPo);
+
+                if (!string.IsNullOrWhiteSpace(slitPo))
+                {
+                    var row = new WipByMillRowDto { MillNo = m, PoNumber = slitPo };
+                    if (wipByPo.TryGetValue(slitPo, out var byPo))
+                        CopyWipDetails(row, byPo);
+                    else if (wipRowForMill != null && InputSlitCsvParsing.PoEquals(wipRowForMill.PoNumber, slitPo))
+                        CopyWipDetails(row, wipRowForMill);
+
                     mills.Add(row);
+                }
+                else if (wipRowForMill != null && !string.IsNullOrWhiteSpace(wipRowForMill.PoNumber))
+                {
+                    mills.Add(wipRowForMill);
+                }
                 else
+                {
                     mills.Add(new WipByMillRowDto { MillNo = m, PoNumber = string.Empty });
+                }
             }
 
             var formation = await _formationChartProvider.GetFormationChartAsync(cancellationToken).ConfigureAwait(false);
@@ -281,7 +313,14 @@ namespace NdtBundleService.Controllers;
                 row.NdtPcsPerBundle = ResolveNdtPcsPerBundleFromChart(formation, pipeSize);
             }
 
-            return Ok(new { Mills = mills, SourcePath = sourcePath });
+            var slitLocations = string.Join(" | ", GetInputSlitReadFolderPaths().Where(static p => !string.IsNullOrWhiteSpace(p)));
+            var detail = $"WIP: {sourcePath}; current PO per mill from slit CSVs in: {slitLocations}";
+            return Ok(new { Mills = mills, SourcePath = detail });
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("GetWipByMills canceled by client/request timeout.");
+            return StatusCode(499, new { Message = "Request canceled." });
         }
         catch (Exception ex)
         {
@@ -290,11 +329,259 @@ namespace NdtBundleService.Controllers;
         }
     }
 
+    private static void CopyWipDetails(WipByMillRowDto target, WipByMillRowDto source)
+    {
+        target.PlannedMonth = source.PlannedMonth;
+        target.PipeGrade = source.PipeGrade;
+        target.PipeSize = source.PipeSize;
+        target.PipeLength = source.PipeLength;
+        target.PiecesPerBundle = source.PiecesPerBundle;
+        target.TotalPieces = source.TotalPieces;
+    }
+
+    /// <summary>Latest PO per mill from slit inbox + optional accepted folder: files processed oldest→newest, rows top→bottom; last row wins per mill.</summary>
+    private async Task<Dictionary<int, string>> GetLatestPoPerMillFromSlitFolderAsync(CancellationToken cancellationToken)
+    {
+        // Fast path: read newest slit files first and stop when all 4 mills are found.
+        var fromLatestFiles = await GetLatestPoPerMillFromLatestFilesAsync(cancellationToken).ConfigureAwait(false);
+        if (fromLatestFiles.Count == 4)
+            return fromLatestFiles;
+
+        if (UseDatabaseForSummary)
+        {
+            var fromDb = await GetLatestPoPerMillFromDatabaseAsync(cancellationToken).ConfigureAwait(false);
+            if (fromDb.Count > 0)
+                return fromDb;
+        }
+
+        var result = new Dictionary<int, string>();
+        var files = GetEligibleInputSlitCsvFilesOrdered();
+        foreach (var fullPath in files)
+        {
+            await using var stream = System.IO.File.OpenRead(fullPath);
+            using var reader = new StreamReader(stream);
+
+            var headerLine = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            if (headerLine is null)
+                continue;
+
+            headerLine = InputSlitCsvParsing.StripBom(headerLine);
+            var headers = InputSlitCsvParsing.SplitCsvFields(headerLine);
+            var poIndex = InputSlitCsvParsing.HeaderIndex(headers, "PO Number", "PO_No", "PO No");
+            var millIndex = InputSlitCsvParsing.HeaderIndex(headers, "Mill No", "Mill Number");
+            if (poIndex < 0 || millIndex < 0)
+                continue;
+
+            while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                    continue;
+                var cols = InputSlitCsvParsing.SplitCsvFields(line);
+                if (cols.Length == 0)
+                    continue;
+                string Get(int i) => i >= 0 && i < cols.Length ? cols[i].Trim() : string.Empty;
+                var millRaw = Get(millIndex);
+                if (!InputSlitCsvParsing.TryParseMillNo(millRaw, out var millNo))
+                    continue;
+                var po = Get(poIndex);
+                if (string.IsNullOrWhiteSpace(po))
+                    continue;
+                result[millNo] = InputSlitCsvParsing.NormalizePo(po);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Reads newest eligible slit files first (descending LastWriteTimeUtc) and returns first PO seen per mill.
+    /// This reflects current running PO better than DB-import order when old files are reprocessed.
+    /// </summary>
+    private async Task<Dictionary<int, string>> GetLatestPoPerMillFromLatestFilesAsync(CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<int, string>();
+        var minUtc = SourceFileEligibility.ParseMinUtc(_options);
+        const int maxFilesToScan = 300;
+
+        var files = new List<FileInfo>();
+        foreach (var folder in GetInputSlitReadFolderPaths())
+        {
+            if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+                continue;
+            foreach (var file in Directory.EnumerateFiles(folder, "*.csv"))
+            {
+                var fi = new FileInfo(file);
+                if (SourceFileEligibility.IncludeFileUtc(fi.LastWriteTimeUtc, minUtc))
+                    files.Add(fi);
+            }
+        }
+
+        foreach (var fi in files
+                     .OrderByDescending(f => f.LastWriteTimeUtc)
+                     .ThenByDescending(f => f.FullName, StringComparer.OrdinalIgnoreCase)
+                     .Take(maxFilesToScan))
+        {
+            if (result.Count == 4)
+                break;
+            cancellationToken.ThrowIfCancellationRequested();
+
+            string[] lines;
+            try
+            {
+                lines = await System.IO.File.ReadAllLinesAsync(fi.FullName, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (lines.Length < 2)
+                continue;
+
+            var headerLine = InputSlitCsvParsing.StripBom(lines[0]);
+            var headers = InputSlitCsvParsing.SplitCsvFields(headerLine);
+            var poIndex = InputSlitCsvParsing.HeaderIndex(headers, "PO Number", "PO_No", "PO No");
+            var millIndex = InputSlitCsvParsing.HeaderIndex(headers, "Mill No", "Mill Number");
+            if (poIndex < 0 || millIndex < 0)
+                continue;
+
+            // Bottom-to-top in each file: "last row wins" for that file.
+            for (var i = lines.Length - 1; i >= 1; i--)
+            {
+                if (result.Count == 4)
+                    break;
+                var line = lines[i];
+                if (string.IsNullOrWhiteSpace(line))
+                    continue;
+
+                var cols = InputSlitCsvParsing.SplitCsvFields(line);
+                if (cols.Length == 0)
+                    continue;
+
+                string Get(int idx) => idx >= 0 && idx < cols.Length ? cols[idx].Trim() : string.Empty;
+                var millRaw = Get(millIndex);
+                if (!InputSlitCsvParsing.TryParseMillNo(millRaw, out var millNo))
+                    continue;
+                if (millNo < 1 || millNo > 4 || result.ContainsKey(millNo))
+                    continue;
+
+                var po = Get(poIndex);
+                if (string.IsNullOrWhiteSpace(po))
+                    continue;
+
+                result[millNo] = InputSlitCsvParsing.NormalizePo(po);
+            }
+        }
+
+        return result;
+    }
+
+    private async Task<Dictionary<int, string>> GetLatestPoPerMillFromDatabaseAsync(CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<int, string>();
+        if (string.IsNullOrWhiteSpace(_options.ConnectionString))
+            return result;
+
+        try
+        {
+            var minUtc = SourceFileEligibility.ParseMinUtc(_options);
+            await using var conn = new SqlConnection(_options.ConnectionString);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+            const string sql = @"
+WITH Dedup AS
+(
+    SELECT
+        Mill_No,
+        PO_Number,
+        ImportedAtUtc,
+        Input_Slit_Row_ID,
+        ROW_NUMBER() OVER (
+            PARTITION BY Source_File, Source_Row_Number
+            ORDER BY ImportedAtUtc DESC, Input_Slit_Row_ID DESC
+        ) AS src_rn
+    FROM dbo.Input_Slit_Row
+    WHERE Mill_No BETWEEN 1 AND 4
+      AND PO_Number IS NOT NULL
+      AND LTRIM(RTRIM(PO_Number)) <> ''
+      AND Source_File IS NOT NULL
+      AND Source_Row_Number IS NOT NULL
+      AND (@MinUtc IS NULL OR ImportedAtUtc >= @MinUtc)
+),
+LatestByMill AS
+(
+    SELECT
+        Mill_No,
+        PO_Number,
+        ROW_NUMBER() OVER (PARTITION BY Mill_No ORDER BY ImportedAtUtc DESC, Input_Slit_Row_ID DESC) AS rn
+    FROM Dedup
+    WHERE src_rn = 1
+)
+SELECT Mill_No, PO_Number
+FROM LatestByMill
+WHERE rn = 1;";
+
+            await using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@MinUtc", minUtc.HasValue ? (object)minUtc.Value : DBNull.Value);
+
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var millNo = reader.IsDBNull(0) ? 0 : reader.GetInt32(0);
+                var po = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
+                if (millNo >= 1 && millNo <= 4 && !string.IsNullOrWhiteSpace(po))
+                    result[millNo] = InputSlitCsvParsing.NormalizePo(po);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to read latest PO per mill from Input_Slit_Row; falling back to CSV scan.");
+        }
+
+        return result;
+    }
+
+    /// <summary>Inbox then accepted TM paths used for read-only slit CSV aggregation (same order as options).</summary>
+    private IEnumerable<string> GetInputSlitReadFolderPaths()
+    {
+        var inbox = _options.InputSlitFolder?.Trim();
+        if (!string.IsNullOrEmpty(inbox))
+            yield return inbox;
+        var accepted = _options.InputSlitAcceptedFolder?.Trim();
+        if (!string.IsNullOrEmpty(accepted))
+            yield return accepted;
+    }
+
+    /// <summary>All eligible <c>*.csv</c> files under inbox + accepted folders, ordered for stable &quot;last row wins&quot; semantics.</summary>
+    private List<string> GetEligibleInputSlitCsvFilesOrdered()
+    {
+        var minUtc = SourceFileEligibility.ParseMinUtc(_options);
+        var acc = new List<string>();
+        foreach (var folder in GetInputSlitReadFolderPaths())
+        {
+            if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+                continue;
+            foreach (var file in Directory.EnumerateFiles(folder, "*.csv"))
+            {
+                if (SourceFileEligibility.IncludeFileUtc(System.IO.File.GetLastWriteTimeUtc(file), minUtc))
+                    acc.Add(file);
+            }
+        }
+
+        return acc
+            .Select(f => new FileInfo(f))
+            .OrderBy(f => f.LastWriteTimeUtc)
+            .ThenBy(f => f.FullName, StringComparer.OrdinalIgnoreCase)
+            .Select(f => f.FullName)
+            .ToList();
+    }
+
     /// <summary>Merges data rows from one WIP CSV into <paramref name="byMill"/> (later calls / later rows overwrite same mill).</summary>
     /// <returns><c>false</c> if headers are missing required columns (caller may treat as hard error for single-file mode).</returns>
     private async Task<bool> MergeWipFileIntoByMillAsync(
         string filePath,
         Dictionary<int, WipByMillRowDto> byMill,
+        Dictionary<string, WipByMillRowDto> wipByPo,
         CancellationToken cancellationToken)
     {
         await using var stream = System.IO.File.OpenRead(filePath);
@@ -352,7 +639,7 @@ namespace NdtBundleService.Controllers;
             if (string.IsNullOrWhiteSpace(po))
                 continue;
 
-            byMill[millNo] = new WipByMillRowDto
+            var dto = new WipByMillRowDto
             {
                 MillNo = millNo,
                 PoNumber = po,
@@ -363,6 +650,8 @@ namespace NdtBundleService.Controllers;
                 PiecesPerBundle = Cell(Idx("Pieces Per Bundle")),
                 TotalPieces = Cell(Idx("Total Pieces")),
             };
+            byMill[millNo] = dto;
+            wipByPo[InputSlitCsvParsing.NormalizePo(po)] = dto;
         }
 
         return true;
@@ -416,8 +705,9 @@ namespace NdtBundleService.Controllers;
 
     /// <summary>
     /// Returns total NDT pipes for a PO, optionally filtered to one mill.
-    /// Counts come from input slit CSVs in <see cref="NdtBundleOptions.InputSlitFolder"/> (e.g. Mill-1 NDT Files from SAP):
-    /// each row's <c>Mill No</c> (1–4) determines which mill the row's <c>NDT Pipes</c> count applies to.
+    /// Counts come from Input Slit CSVs in <see cref="NdtBundleOptions.InputSlitFolder"/> and, when configured,
+    /// <see cref="NdtBundleOptions.InputSlitAcceptedFolder"/>. This matches dashboard "active PO" totals from SAP slit flow.
+    /// Files are read only; nothing is written, altered, or deleted.
     /// </summary>
     [HttpGet("ndt-summary")]
     public async Task<IActionResult> GetNdtSummary([FromQuery] string poNumber, [FromQuery] int? millNo, CancellationToken cancellationToken)
@@ -425,60 +715,39 @@ namespace NdtBundleService.Controllers;
         if (string.IsNullOrWhiteSpace(poNumber))
             return BadRequest(new { Message = "poNumber is required." });
 
-        var folder = _options.InputSlitFolder;
-        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
-            return Ok(new NdtSummaryDto { PoNumber = poNumber, MillNo = millNo ?? 0, TotalNdtPipes = 0 });
-
-        var files = Directory.EnumerateFiles(folder, "*.csv");
-        int total = 0;
         var poRequested = poNumber.Trim();
+        var poNormalized = InputSlitCsvParsing.NormalizePo(poRequested);
+        var minUtc = SourceFileEligibility.ParseMinUtc(_options);
 
-        foreach (var file in files)
+        if (UseDatabaseForSummary)
         {
-            await using var stream = System.IO.File.OpenRead(file);
-            using var reader = new StreamReader(stream);
-
-            var headerLine = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
-            if (headerLine is null)
-                continue;
-
-            headerLine = InputSlitCsvParsing.StripBom(headerLine);
-            var headers = InputSlitCsvParsing.SplitCsvFields(headerLine);
-            var poIndex = InputSlitCsvParsing.HeaderIndex(headers, "PO Number", "PO_No", "PO No");
-            var ndtIndex = InputSlitCsvParsing.HeaderIndex(headers, "NDT Pipes");
-            var millIndex = InputSlitCsvParsing.HeaderIndex(headers, "Mill No", "Mill Number");
-            if (poIndex < 0 || ndtIndex < 0 || millIndex < 0)
-                continue;
-
-            while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+            var totalFromDb = await SumNdtPipesFromDbAsync(poRequested, poNormalized, millNo, minUtc, cancellationToken).ConfigureAwait(false);
+            return Ok(new NdtSummaryDto
             {
-                if (string.IsNullOrWhiteSpace(line))
+                PoNumber = poNormalized,
+                MillNo = millNo ?? 0,
+                TotalNdtPipes = totalFromDb
+            });
+        }
+
+        var readFolders = GetInputSlitReadFolderPaths()
+            .Where(static p => !string.IsNullOrWhiteSpace(p))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (readFolders.Length == 0)
+            return Ok(new NdtSummaryDto { PoNumber = poRequested, MillNo = millNo ?? 0, TotalNdtPipes = 0 });
+
+        var total = 0;
+        foreach (var folder in readFolders)
+        {
+            if (!Directory.Exists(folder))
+                continue;
+
+            foreach (var file in Directory.EnumerateFiles(folder, "*.csv"))
+            {
+                if (!SourceFileEligibility.IncludeFileUtc(System.IO.File.GetLastWriteTimeUtc(file), minUtc))
                     continue;
-
-                var cols = InputSlitCsvParsing.SplitCsvFields(line);
-                if (cols.Length == 0)
-                    continue;
-
-                string Get(string[] c, int i)
-                {
-                    if (i < 0 || i >= c.Length) return string.Empty;
-                    return c[i].Trim();
-                }
-
-                var poCell = Get(cols, poIndex);
-                if (!InputSlitCsvParsing.PoEquals(poCell, poRequested))
-                    continue;
-
-                var millRaw = Get(cols, millIndex);
-                if (!InputSlitCsvParsing.TryParseMillNo(millRaw, out var rowMill))
-                    continue;
-
-                if (millNo.HasValue && rowMill != millNo.Value)
-                    continue;
-
-                var ndtRaw = Get(cols, ndtIndex);
-                if (InputSlitCsvParsing.TryParseIntFlexible(ndtRaw, out var ndtVal))
-                    total += ndtVal;
+                total += await SumNdtPipesFromFileAsync(file, poRequested, millNo, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -488,6 +757,175 @@ namespace NdtBundleService.Controllers;
             MillNo = millNo ?? 0,
             TotalNdtPipes = total
         });
+    }
+
+    /// <summary>Reads one slit/bundle-output CSV and sums <c>NDT Pipes</c> for the requested PO/mill. File is opened read-only.</summary>
+    private static async Task<int> SumNdtPipesFromFileAsync(
+        string file,
+        string poRequested,
+        int? millNo,
+        CancellationToken cancellationToken)
+    {
+        await using var stream = System.IO.File.OpenRead(file);
+        using var reader = new StreamReader(stream);
+
+        var headerLine = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+        if (headerLine is null)
+            return 0;
+
+        headerLine = InputSlitCsvParsing.StripBom(headerLine);
+        var headers = InputSlitCsvParsing.SplitCsvFields(headerLine);
+        var poIndex = InputSlitCsvParsing.HeaderIndex(headers, "PO Number", "PO_No", "PO No");
+        var ndtIndex = InputSlitCsvParsing.HeaderIndex(headers, "NDT Pipes");
+        var millIndex = InputSlitCsvParsing.HeaderIndex(headers, "Mill No", "Mill Number");
+        if (poIndex < 0 || ndtIndex < 0 || millIndex < 0)
+            return 0;
+
+        var sum = 0;
+        while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+        {
+            if (string.IsNullOrWhiteSpace(line))
+                continue;
+
+            var cols = InputSlitCsvParsing.SplitCsvFields(line);
+            if (cols.Length == 0)
+                continue;
+
+            string Get(string[] c, int i)
+            {
+                if (i < 0 || i >= c.Length) return string.Empty;
+                return c[i].Trim();
+            }
+
+            var poCell = Get(cols, poIndex);
+            if (!InputSlitCsvParsing.PoEquals(poCell, poRequested))
+                continue;
+
+            var millRaw = Get(cols, millIndex);
+            if (!InputSlitCsvParsing.TryParseMillNo(millRaw, out var rowMill))
+                continue;
+
+            if (millNo.HasValue && rowMill != millNo.Value)
+                continue;
+
+            var ndtRaw = Get(cols, ndtIndex);
+            if (InputSlitCsvParsing.TryParseIntFlexible(ndtRaw, out var ndtVal))
+                sum += ndtVal;
+        }
+
+        return sum;
+    }
+
+    /// <summary>
+    /// Returns NDT pipe totals for the current running PO in each mill (1..4).
+    /// Uses SQL aggregation from Input_Slit_Row when configured; falls back to CSV scanning otherwise.
+    /// </summary>
+    [HttpGet("ndt-summary-running-po")]
+    public async Task<IActionResult> GetNdtSummaryForRunningPoByMill(CancellationToken cancellationToken)
+    {
+        var latestPoByMill = await GetLatestPoPerMillFromSlitFolderAsync(cancellationToken).ConfigureAwait(false);
+        var minUtc = SourceFileEligibility.ParseMinUtc(_options);
+        var readFolders = GetInputSlitReadFolderPaths()
+            .Where(static p => !string.IsNullOrWhiteSpace(p))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        var result = new List<RunningPoNdtSummaryDto>(4);
+        for (var mill = 1; mill <= 4; mill++)
+        {
+            latestPoByMill.TryGetValue(mill, out var poRaw);
+            var poRequested = poRaw?.Trim() ?? string.Empty;
+            var poNormalized = string.IsNullOrWhiteSpace(poRequested) ? string.Empty : InputSlitCsvParsing.NormalizePo(poRequested);
+            if (string.IsNullOrWhiteSpace(poNormalized))
+            {
+                result.Add(new RunningPoNdtSummaryDto { MillNo = mill, PoNumber = string.Empty, TotalNdtPipes = 0 });
+                continue;
+            }
+
+            int total;
+            if (UseDatabaseForSummary)
+            {
+                total = await SumNdtPipesFromDbAsync(poRequested, poNormalized, mill, minUtc, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                total = 0;
+                foreach (var folder in readFolders)
+                {
+                    if (!Directory.Exists(folder))
+                        continue;
+
+                    foreach (var file in Directory.EnumerateFiles(folder, "*.csv"))
+                    {
+                        if (!SourceFileEligibility.IncludeFileUtc(System.IO.File.GetLastWriteTimeUtc(file), minUtc))
+                            continue;
+                        total += await SumNdtPipesFromFileAsync(file, poNormalized, mill, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+            }
+
+            result.Add(new RunningPoNdtSummaryDto
+            {
+                MillNo = mill,
+                PoNumber = poNormalized,
+                TotalNdtPipes = total
+            });
+        }
+
+        return Ok(result);
+    }
+
+    private bool UseDatabaseForSummary =>
+        _options.UseSqlServerForBundles && !string.IsNullOrWhiteSpace(_options.ConnectionString);
+
+    private async Task<int> SumNdtPipesFromDbAsync(
+        string poRequested,
+        string poNormalized,
+        int? millNo,
+        DateTime? minUtc,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var conn = new SqlConnection(_options.ConnectionString);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+            const string sql = @"
+WITH Dedup AS
+(
+    SELECT
+        NDT_Pipes,
+        ROW_NUMBER() OVER (
+            PARTITION BY Source_File, Source_Row_Number
+            ORDER BY ImportedAtUtc DESC, Input_Slit_Row_ID DESC
+        ) AS src_rn
+    FROM dbo.Input_Slit_Row
+    WHERE (PO_Number = @PoRequested OR PO_Number = @PoNormalized)
+      AND (@MillNo IS NULL OR Mill_No = @MillNo)
+      AND (@MinUtc IS NULL OR ImportedAtUtc >= @MinUtc)
+      AND Source_File IS NOT NULL
+      AND Source_Row_Number IS NOT NULL
+)
+SELECT COALESCE(SUM(NDT_Pipes), 0)
+FROM Dedup
+WHERE src_rn = 1;";
+
+            await using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@PoRequested", poRequested);
+            cmd.Parameters.AddWithValue("@PoNormalized", poNormalized);
+            cmd.Parameters.AddWithValue("@MillNo", millNo.HasValue ? (object)millNo.Value : DBNull.Value);
+            cmd.Parameters.AddWithValue("@MinUtc", minUtc.HasValue ? (object)minUtc.Value : DBNull.Value);
+
+            var scalar = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            if (scalar is null || scalar is DBNull)
+                return 0;
+            return Convert.ToInt32(scalar);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "DB summary query failed for PO {PO} Mill {Mill}; falling back to 0.", poNormalized, millNo);
+            return 0;
+        }
     }
 
     /// <summary>

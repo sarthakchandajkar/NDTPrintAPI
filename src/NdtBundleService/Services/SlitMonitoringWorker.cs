@@ -19,6 +19,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
     private readonly INdtBatchStateService _batchState;
     private readonly ICurrentPoPlanService? _currentPoPlanService;
     private readonly IPlcClient _plcClient;
+    private readonly ITraceabilityRepository _traceability;
     private readonly ILogger<SlitMonitoringWorker> _logger;
 
     // Simple in-memory set to avoid reprocessing files during one runtime.
@@ -30,8 +31,9 @@ public sealed class SlitMonitoringWorker : BackgroundService
         IBundleOutputWriter outputWriter,
         INdtBatchStateService batchState,
         IPlcClient plcClient,
+        ITraceabilityRepository traceability,
         ILogger<SlitMonitoringWorker> logger)
-        : this(options, bundleEngine, outputWriter, batchState, null, plcClient, logger) { }
+        : this(options, bundleEngine, outputWriter, batchState, null, plcClient, traceability, logger) { }
 
     public SlitMonitoringWorker(
         IOptions<NdtBundleOptions> options,
@@ -40,6 +42,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         INdtBatchStateService batchState,
         ICurrentPoPlanService? currentPoPlanService,
         IPlcClient plcClient,
+        ITraceabilityRepository traceability,
         ILogger<SlitMonitoringWorker> logger)
     {
         _options = options.Value;
@@ -48,6 +51,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         _batchState = batchState;
         _currentPoPlanService = currentPoPlanService;
         _plcClient = plcClient;
+        _traceability = traceability;
         _logger = logger;
     }
 
@@ -59,7 +63,13 @@ public sealed class SlitMonitoringWorker : BackgroundService
             return;
         }
 
-        Directory.CreateDirectory(_options.InputSlitFolder);
+        if (!Directory.Exists(_options.InputSlitFolder))
+        {
+            _logger.LogWarning(
+                "InputSlitFolder does not exist or is not reachable (service will not create it): {Folder}",
+                _options.InputSlitFolder);
+            return;
+        }
 
         _logger.LogInformation("SlitMonitoringWorker started. Watching folder {Folder}", _options.InputSlitFolder);
 
@@ -86,10 +96,14 @@ public sealed class SlitMonitoringWorker : BackgroundService
     private async Task ProcessNewSlitFilesAsync(CancellationToken cancellationToken)
     {
         var files = Directory.EnumerateFiles(_options.InputSlitFolder, "*.csv");
+        var minUtc = SourceFileEligibility.ParseMinUtc(_options);
 
         foreach (var file in files)
         {
             if (_processedFiles.Contains(file))
+                continue;
+
+            if (!SourceFileEligibility.IncludeFileUtc(File.GetLastWriteTimeUtc(file), minUtc))
                 continue;
 
             _logger.LogInformation("Processing Input Slit CSV file {File}", file);
@@ -100,20 +114,27 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
                 // Build output content: same format as input with one extra column "NDT Batch No".
                 var outputLines = new List<string> { headerLine.TrimEnd() + ",NDT Batch No" };
+                var inputRowsForSql = new List<(InputSlitRecord Record, int SourceRowNumber)>();
+                var outputRowsForSql = new List<(InputSlitRecord Record, string NdtBatchNo, int SourceRowNumber)>();
 
+                var sourceRowNumber = 2; // CSV header is row 1
                 foreach (var row in rows)
                 {
                     if (row.Record is null)
                     {
                         // Keep source content intact; append blank batch for non-parseable rows.
                         outputLines.Add(row.RawLine.TrimEnd() + ",");
+                        sourceRowNumber++;
                         continue;
                     }
 
                     var record = row.Record;
                     var (batchNumber, _, _) = await _batchState.GetBatchForRecordAsync(record.PoNumber, record.MillNo, record.NdtPipes, cancellationToken).ConfigureAwait(false);
-                    var ndtBatchNoFormatted = FormatNdtBatchNo(batchNumber, _options.ShopId);
+                    var ndtBatchNoFormatted = FormatNdtBatchNo(batchNumber, record.MillNo);
                     outputLines.Add(row.RawLine.TrimEnd() + "," + ndtBatchNoFormatted);
+                    inputRowsForSql.Add((record, sourceRowNumber));
+                    outputRowsForSql.Add((record, ndtBatchNoFormatted, sourceRowNumber));
+                    sourceRowNumber++;
 
                     // Let the bundle engine decide when a bundle is full; it calls the callback to write CSV and print tag.
                     try
@@ -125,12 +146,12 @@ public sealed class SlitMonitoringWorker : BackgroundService
                                 await _outputWriter.WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken).ConfigureAwait(false);
                                 _logger.LogInformation(
                                     "Bundle output completed for {BatchNo} ({Pcs} pcs).",
-                                    FormatNdtBatchNo(batchNo, _options.ShopId),
+                                    FormatNdtBatchNo(batchNo, contextRecord.MillNo),
                                     totalNdtPcs);
                             }
                             catch (Exception ex)
                             {
-                                _logger.LogError(ex, "Tag print failed for bundle {BatchNo}.", FormatNdtBatchNo(batchNo, _options.ShopId));
+                                _logger.LogError(ex, "Tag print failed for bundle {BatchNo}.", FormatNdtBatchNo(batchNo, contextRecord.MillNo));
                             }
                         }, cancellationToken).ConfigureAwait(false);
                     }
@@ -151,6 +172,10 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     _logger.LogInformation("Wrote bundle CSV: {Path}", outputPath);
                 }
 
+                // Best-effort SQL traceability; CSV flow should not fail if SQL is down.
+                await _traceability.RecordInputSlitRowsAsync(file, inputRowsForSql, cancellationToken).ConfigureAwait(false);
+                await _traceability.RecordOutputSlitRowsAsync(file, outputRowsForSql, cancellationToken).ConfigureAwait(false);
+
                 _processedFiles.Add(file);
             }
             catch (Exception ex)
@@ -160,13 +185,12 @@ public sealed class SlitMonitoringWorker : BackgroundService
         }
     }
 
-    private static string FormatNdtBatchNo(int sequenceNumber, string? shopIdRaw)
+    private static string FormatNdtBatchNo(int sequenceNumber, int millNo)
     {
         var yy = (DateTime.Now.Year % 100).ToString("D2", CultureInfo.InvariantCulture);
-        var raw = (shopIdRaw ?? "01").Trim();
-        var shopId = raw.Length >= 2 ? raw[..2].PadLeft(2, '0') : raw.PadLeft(2, '0');
+        var millDigit = (millNo >= 1 && millNo <= 4) ? millNo.ToString(CultureInfo.InvariantCulture) : "1";
         var seq = sequenceNumber.ToString("D5", CultureInfo.InvariantCulture);
-        return "9" + yy + shopId + seq;
+        return "12" + yy + millDigit + seq;
     }
 
     /// <summary>

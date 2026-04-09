@@ -39,8 +39,8 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
 
         Directory.CreateDirectory(folder);
 
-        // NDT_Batch_No format: 10 chars = 0 (fixed) + YY (year) + ShopId (01-04) + Sequence (5 digits)
-        var ndtBatchNoFormatted = FormatNdtBatchNo(ndtBatchNo);
+        // NDT_Batch_No format: 10 chars = 12 (fixed) + YY + Mill(1-4) + Sequence(5 digits)
+        var ndtBatchNoFormatted = FormatNdtBatchNo(ndtBatchNo, contextRecord.MillNo);
 
         if (_options.EnableBundleSummaryCsvFiles)
         {
@@ -110,18 +110,17 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
 
     /// <summary>
     /// Formats NDT_Batch_No per spec: 10 characters.
-    /// Position 1: Fixed "9"
-    /// Position 2-3: YY (2-digit year)
-    /// Position 4-5: Shop ID (01, 02, 03, 04)
+    /// Position 1-2: Fixed "12"
+    /// Position 3-4: YY (2-digit year)
+    /// Position 5: Mill number (1..4)
     /// Position 6-10: Sequence number (5 digits, zero-padded)
     /// </summary>
-    private string FormatNdtBatchNo(int sequenceNumber)
+    private static string FormatNdtBatchNo(int sequenceNumber, int millNo)
     {
         var yy = (DateTime.Now.Year % 100).ToString("D2", CultureInfo.InvariantCulture);
-        var raw = (_options.ShopId ?? "01").Trim();
-        var shopId = raw.Length >= 2 ? raw[..2].PadLeft(2, '0') : raw.PadLeft(2, '0');
+        var millDigit = (millNo >= 1 && millNo <= 4) ? millNo.ToString(CultureInfo.InvariantCulture) : "1";
         var seq = sequenceNumber.ToString("D5", CultureInfo.InvariantCulture);
-        return "9" + yy + shopId + seq;
+        return "12" + yy + millDigit + seq;
     }
 
     private static string Escape(string value)

@@ -72,7 +72,7 @@ public sealed class PipeSizeCsvProvider : IPipeSizeProvider
             if (cols.Length <= Math.Max(poIndex, sizeIndex))
                 continue;
 
-            var poNumber = cols[poIndex].Trim();
+            var poNumber = InputSlitCsvParsing.NormalizePo(cols[poIndex].Trim());
             var pipeSize = cols[sizeIndex].Trim();
 
             if (string.IsNullOrEmpty(poNumber))

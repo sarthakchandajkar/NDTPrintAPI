@@ -7,7 +7,7 @@ using NdtBundleService.Models;
 namespace NdtBundleService.Services;
 
 /// <summary>
-/// Persists and queries NDT bundles. When ConnectionString is set uses SQL Server; otherwise reads from output CSVs.
+/// Persists and queries NDT bundles. When <see cref="NdtBundleOptions.UseSqlServerForBundles"/> is true and ConnectionString is set, uses SQL Server; otherwise reads from output CSVs.
 /// Always updates output CSV files on reconciliation.
 /// </summary>
 public sealed class NdtBundleRepository : INdtBundleRepository
@@ -26,18 +26,43 @@ public sealed class NdtBundleRepository : INdtBundleRepository
         _logger = logger;
     }
 
+    private bool UseDatabase =>
+        _options.UseSqlServerForBundles && !string.IsNullOrWhiteSpace(_options.ConnectionString);
+
     public async Task RecordBundleAsync(NdtBundleRecord record, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(_options.ConnectionString))
+        if (!UseDatabase)
             return;
 
         try
         {
             await using var conn = new Microsoft.Data.SqlClient.SqlConnection(_options.ConnectionString);
             await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            // Upsert so other flows can create a stub row early (e.g. FK from Output_Slit_Row).
             const string sql = @"
-                INSERT INTO dbo.NDT_Bundle (PO_Number, Mill_No, Bundle_No, Total_NDT_Pcs, Context_Slit_No, Slit_Start_Time, Slit_Finish_Time, Rejected_P, NDT_Short_Length_Pipe, Rejected_Short_Length_Pipe, IsReprint)
-                VALUES (@PoNumber, @MillNo, @BundleNo, @TotalNdtPcs, @SlitNo, @SlitStartTime, @SlitFinishTime, @RejectedPipes, @NdtShortLengthPipe, @RejectedShortLengthPipe, 0)";
+IF EXISTS (SELECT 1 FROM dbo.NDT_Bundle WHERE Bundle_No = @BundleNo)
+BEGIN
+    UPDATE dbo.NDT_Bundle
+    SET PO_Number = @PoNumber,
+        Mill_No = @MillNo,
+        Total_NDT_Pcs = @TotalNdtPcs,
+        Context_Slit_No = @SlitNo,
+        Slit_Start_Time = @SlitStartTime,
+        Slit_Finish_Time = @SlitFinishTime,
+        Rejected_P = @RejectedPipes,
+        NDT_Short_Length_Pipe = @NdtShortLengthPipe,
+        Rejected_Short_Length_Pipe = @RejectedShortLengthPipe,
+        PrintedAt = SYSDATETIME(),
+        IsReprint = 0
+    WHERE Bundle_No = @BundleNo;
+END
+ELSE
+BEGIN
+    INSERT INTO dbo.NDT_Bundle
+        (PO_Number, Mill_No, Bundle_No, Total_NDT_Pcs, Context_Slit_No, Slit_Start_Time, Slit_Finish_Time, Rejected_P, NDT_Short_Length_Pipe, Rejected_Short_Length_Pipe, IsReprint)
+    VALUES
+        (@PoNumber, @MillNo, @BundleNo, @TotalNdtPcs, @SlitNo, @SlitStartTime, @SlitFinishTime, @RejectedPipes, @NdtShortLengthPipe, @RejectedShortLengthPipe, 0);
+END";
             await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("@PoNumber", record.PoNumber);
             cmd.Parameters.AddWithValue("@MillNo", record.MillNo);
@@ -60,7 +85,7 @@ public sealed class NdtBundleRepository : INdtBundleRepository
 
     public async Task<IReadOnlyList<NdtBundleRecord>> GetBundlesAsync(CancellationToken cancellationToken)
     {
-        if (!string.IsNullOrWhiteSpace(_options.ConnectionString))
+        if (UseDatabase)
         {
             try
             {
@@ -90,7 +115,7 @@ public sealed class NdtBundleRepository : INdtBundleRepository
         if (string.IsNullOrWhiteSpace(batchNo))
             return null;
 
-        if (!string.IsNullOrWhiteSpace(_options.ConnectionString))
+        if (UseDatabase)
         {
             try
             {
@@ -119,7 +144,7 @@ public sealed class NdtBundleRepository : INdtBundleRepository
         if (string.IsNullOrWhiteSpace(batchNo))
             return;
 
-        if (!string.IsNullOrWhiteSpace(_options.ConnectionString))
+        if (UseDatabase)
         {
             try
             {
@@ -342,7 +367,7 @@ public sealed class NdtBundleRepository : INdtBundleRepository
 
     public async Task UpdateBundleTotalInDatabaseAsync(string batchNo, int newTotalPipes, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(batchNo) || string.IsNullOrWhiteSpace(_options.ConnectionString))
+        if (string.IsNullOrWhiteSpace(batchNo) || !UseDatabase)
             return;
 
         try

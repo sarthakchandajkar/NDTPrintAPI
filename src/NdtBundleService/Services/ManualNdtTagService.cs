@@ -78,6 +78,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
     private readonly INdtBundleRepository _bundleRepository;
     private readonly IWipLabelProvider _wipLabelProvider;
     private readonly INetworkPrinterSender _sender;
+    private readonly ITraceabilityRepository _traceability;
     private readonly ILogger<ManualNdtTagService> _logger;
 
     private static readonly object StateLock = new();
@@ -89,6 +90,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         INdtBundleRepository bundleRepository,
         IWipLabelProvider wipLabelProvider,
         INetworkPrinterSender sender,
+        ITraceabilityRepository traceability,
         ILogger<ManualNdtTagService> logger)
     {
         _options = options.Value;
@@ -96,6 +98,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         _bundleRepository = bundleRepository;
         _wipLabelProvider = wipLabelProvider;
         _sender = sender;
+        _traceability = traceability;
         _logger = logger;
     }
 
@@ -162,6 +165,20 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         var csvPath = await WriteCsvAsync(folder, request.Station, state.PoNumber, batch, incoming, request.OkPcs, request.RejectedPcs, start, end, cancellationToken).ConfigureAwait(false);
         SetLastCsvPath(state, request.Station, csvPath);
         await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
+
+        // Best-effort SQL traceability; do not fail the station flow if SQL is down.
+        await _traceability.RecordManualStationRunAsync(
+            poNumber: state.PoNumber,
+            ndtBatchNo: batch,
+            ndtPcs: incoming,
+            okPcs: request.OkPcs,
+            rejectPcs: request.RejectedPcs,
+            workStation: WorkStationColumnValue(request.Station),
+            start: start,
+            end: end,
+            hydrotestingType: IsHydroStation(request.Station) ? HydrotestingTypeValue(request.Station) : null,
+            sourceFile: csvPath,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
 
         var printed = false;
         if (request.PrintTag)
@@ -271,7 +288,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
 
     private string GetFolder(ManualTagStation station)
     {
-        return station switch
+        var folder = station switch
         {
             ManualTagStation.Visual => (_options.VisualNdtOutputFolder ?? string.Empty).Trim(),
             ManualTagStation.Hydrotesting or ManualTagStation.FourHeadHydrotesting or ManualTagStation.BigHydrotesting =>
@@ -279,6 +296,11 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             ManualTagStation.Revisual => (_options.RevisualNdtOutputFolder ?? string.Empty).Trim(),
             _ => (_options.OutputBundleFolder ?? string.Empty).Trim()
         };
+
+        if (string.IsNullOrWhiteSpace(folder))
+            throw new InvalidOperationException($"Output folder is not configured for station {StationName(station)}.");
+
+        return folder;
     }
 
     private static string StationName(ManualTagStation station) =>

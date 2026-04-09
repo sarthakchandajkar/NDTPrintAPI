@@ -48,7 +48,7 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
             return false;
         }
 
-        var ndtBatchNoFormatted = FormatNdtBatchNo(batchNumber);
+        var ndtBatchNoFormatted = FormatNdtBatchNo(batchNumber, record.MillNo);
         var wip = await _wipLabelProvider.GetWipLabelAsync(record.PoNumber, record.MillNo, cancellationToken).ConfigureAwait(false);
 
         var pipeGrade = wip?.PipeGrade;
@@ -115,12 +115,11 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
         }
     }
 
-    private string FormatNdtBatchNo(int sequenceNumber)
+    private static string FormatNdtBatchNo(int sequenceNumber, int millNo)
     {
         var yy = (DateTime.Now.Year % 100).ToString("D2", CultureInfo.InvariantCulture);
-        var raw = (_options.ShopId ?? "01").Trim();
-        var shopId = raw.Length >= 2 ? raw[..2].PadLeft(2, '0') : raw.PadLeft(2, '0');
+        var millDigit = (millNo >= 1 && millNo <= 4) ? millNo.ToString(CultureInfo.InvariantCulture) : "1";
         var seq = sequenceNumber.ToString("D5", CultureInfo.InvariantCulture);
-        return "9" + yy + shopId + seq;
+        return "12" + yy + millDigit + seq;
     }
 }
