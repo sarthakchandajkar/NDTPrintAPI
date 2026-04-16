@@ -37,35 +37,41 @@ public sealed class NdtBundleEngine : IBundleEngine
         // Pipe size from external file (by PO Number), not from Input Slit CSV
         var pipeSizeByPo = await _pipeSizeProvider.GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
         pipeSizeByPo.TryGetValue(record.PoNumber, out var pipeSize);
-        pipeSize ??= string.Empty;
 
         var formation = await _formationChartProvider.GetFormationChartAsync(cancellationToken).ConfigureAwait(false);
-        formation.TryGetValue(pipeSize, out var formationEntry);
-        formationEntry ??= formation.TryGetValue("Default", out var defaultEntry) ? defaultEntry : null;
-        var sizeThreshold = formationEntry?.RequiredNdtPcs ?? 0;
-        if (sizeThreshold <= 0)
-            sizeThreshold = 10;
+        var sizeThreshold = FormationChartLookup.ResolveThreshold(formation, pipeSize);
 
         // Keep last record as context for bundle export
         state.LastRecord = record;
 
-        // Use a consistent key for lookup so we always track count (enables PO End to close partial bundles)
-        var sizeKey = string.IsNullOrWhiteSpace(pipeSize) ? "Default" : pipeSize;
+        // One accumulator per normalized pipe size (PO can switch size mid-stream in edge cases)
+        var sizeKey = FormationChartLookup.NormalizePipeSizeKey(pipeSize);
+        if (string.IsNullOrEmpty(sizeKey))
+            sizeKey = "Default";
 
         if (!state.SizeCounts.TryGetValue(sizeKey, out var currentSizeCount))
             currentSizeCount = 0;
         currentSizeCount += record.NdtPipes;
-        state.SizeCounts[sizeKey] = currentSizeCount;
 
-        // Size-based scenario: if count for this size reaches Formation Chart threshold, close a bundle
-        if (state.SizeCounts.TryGetValue(sizeKey, out var sizeCount) && sizeCount >= sizeThreshold)
+        // Full bundle closes when threshold is reached.
+        // If a slit pushes past threshold, keep the overshoot in the same bundle total (no carry-forward split).
+        if (currentSizeCount >= sizeThreshold)
         {
             state.CurrentBatchNo++;
-            var totalForBatch = sizeCount;
-            state.SizeCounts[sizeKey] = 0;
-            _logger.LogInformation("Closing size-based bundle {BatchNo} for PO {PO} Mill {Mill} Size {Size} threshold={Threshold}", state.CurrentBatchNo, record.PoNumber, record.MillNo, sizeKey, sizeThreshold);
+            var totalForBatch = currentSizeCount;
+            currentSizeCount = 0;
+            _logger.LogInformation(
+                "Closing size-based bundle {BatchNo} for PO {PO} Mill {Mill} Size {Size} threshold={Threshold} total={Total} (includes slit overshoot)",
+                state.CurrentBatchNo,
+                record.PoNumber,
+                record.MillNo,
+                sizeKey,
+                sizeThreshold,
+                totalForBatch);
             await onBundleClosedAsync(state.LastRecord!, state.CurrentBatchNo, totalForBatch).ConfigureAwait(false);
         }
+
+        state.SizeCounts[sizeKey] = currentSizeCount;
     }
 
     public async Task HandlePoEndAsync(

@@ -1,15 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { api } from "@/lib/api";
 
-const HYDRO_STATIONS = [
-  { value: "FourHeadHydrotesting" as const, label: "Four Head Hydrotesting" },
-  { value: "BigHydrotesting" as const, label: "Big Hydrotesting" },
-];
+type StationNum = 1 | 2;
 
-export default function HydrotestingPage() {
-  const [hydroStation, setHydroStation] = useState<(typeof HYDRO_STATIONS)[number]["value"]>("FourHeadHydrotesting");
+export function RevisualStationScreen({ stationNumber }: { stationNumber: StationNum }) {
   const [ndtBatchNo, setNdtBatchNo] = useState("");
   const [poNumber, setPoNumber] = useState<string | null>(null);
   const [millNo, setMillNo] = useState<number | null>(null);
@@ -19,15 +15,16 @@ export default function HydrotestingPage() {
   const [printTag, setPrintTag] = useState(true);
   const [loadingContext, setLoadingContext] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [generatingUpload, setGeneratingUpload] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  const loadContext = useCallback(async (batch: string) => {
+  const loadContext = async (batch: string) => {
     setLoadingContext(true);
     setError(null);
     setSuccess(null);
     try {
-      const ctx = await api.manualStationContext(hydroStation, batch);
+      const ctx = await api.manualStationContext("Revisual", batch, stationNumber);
       setPoNumber(ctx.poNumber ?? null);
       setMillNo(typeof ctx.millNo === "number" ? ctx.millNo : null);
       setIncomingPcs(typeof ctx.incomingPcs === "number" ? ctx.incomingPcs : null);
@@ -41,15 +38,7 @@ export default function HydrotestingPage() {
     } finally {
       setLoadingContext(false);
     }
-  }, [hydroStation]);
-
-  useEffect(() => {
-    const batch = ndtBatchNo.trim();
-    if (!batch) return;
-    void loadContext(batch);
-    // Only when the hydro line changes — not when typing the batch number.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydroStation, loadContext]);
+  };
 
   const submit = async () => {
     setError(null);
@@ -59,30 +48,30 @@ export default function HydrotestingPage() {
       setError("Enter/scan NDT Batch No.");
       return;
     }
-    const incoming = incomingPcs ?? 0;
+    if (incomingPcs == null) {
+      setError("Load context first (Hydrotesting must be recorded before Revisual).");
+      return;
+    }
     if (okPcs < 0 || rejectedPcs < 0) {
       setError("OK/Rejected must be non-negative.");
       return;
     }
-    if (incomingPcs == null) {
-      setError("Load context first (Visual must be recorded before Hydrotesting).");
-      return;
-    }
-    if (okPcs + rejectedPcs !== incoming) {
-      setError(`OK (${okPcs}) + Rejected (${rejectedPcs}) must equal Incoming (${incoming}).`);
+    if (okPcs + rejectedPcs !== incomingPcs) {
+      setError(`OK (${okPcs}) + Rejected (${rejectedPcs}) must equal Incoming (${incomingPcs}).`);
       return;
     }
 
     setSubmitting(true);
     try {
-      const res = await api.manualStationRecord(hydroStation, {
+      const res = await api.manualStationRecord("Revisual", {
         ndtBatchNo: batch,
         okPcs,
         rejectedPcs,
         printTag,
+        operatorStationNumber: stationNumber,
       });
       setSuccess(
-        `${res.message ?? "Saved."} Batch: ${res.ndtBatchNo ?? "—"} | Outgoing: ${res.outgoingPcs ?? okPcs}${
+        `${res.message ?? "Saved."} Batch: ${res.ndtBatchNo ?? "—"} | Final NDT: ${res.outgoingPcs ?? okPcs}${
           res.csvPath ? ` | CSV: ${res.csvPath}` : ""
         }`
       );
@@ -93,14 +82,30 @@ export default function HydrotestingPage() {
     }
   };
 
-  const stationLabel = HYDRO_STATIONS.find((s) => s.value === hydroStation)?.label ?? "Hydrotesting";
+  const generateUploadFile = async () => {
+    setError(null);
+    setSuccess(null);
+    setGeneratingUpload(true);
+    try {
+      const res = await api.generateUploadBundleFile();
+      setSuccess(
+        `${res.message ?? "Upload file generated."}${res.filePath ? ` Path: ${res.filePath}` : ""}${
+          typeof res.rowCount === "number" ? ` | Rows: ${res.rowCount}` : ""
+        }`
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to generate upload file.");
+    } finally {
+      setGeneratingUpload(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold text-gray-900">Hydrotesting</h1>
+      <h1 className="text-2xl font-bold text-gray-900">Revisual — Station {stationNumber}</h1>
       <p className="text-gray-600 text-sm">
-        Choose the hydro line, then scan/enter the NDT Batch No and OK / Rejected pipe counts. Incoming pcs come from
-        Visual OK. Revisual uses the same hydro result whether you use Four Head or Big Hydrotesting.
+        Scan/enter the NDT Batch No, then enter OK and Rejected pipe counts for Revisual. Incoming pcs come from
+        Hydrotesting OK. Revisual OK becomes the final NDT count.
       </p>
 
       {error && <div className="rounded-md bg-red-50 border border-red-200 p-4 text-red-700 text-sm">{error}</div>}
@@ -109,29 +114,6 @@ export default function HydrotestingPage() {
       )}
 
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-6 md:p-8 w-full max-w-6xl mx-auto space-y-4">
-        <div>
-          <label htmlFor="hydro-station" className="block text-sm font-medium text-gray-700 mb-1">
-            Hydro line
-          </label>
-          <select
-            id="hydro-station"
-            value={hydroStation}
-            onChange={(e) => {
-              setHydroStation(e.target.value as (typeof HYDRO_STATIONS)[number]["value"]);
-              setError(null);
-              setSuccess(null);
-            }}
-            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm bg-white focus:ring-primary-500 focus:border-primary-500"
-          >
-            {HYDRO_STATIONS.map((s) => (
-              <option key={s.value} value={s.value}>
-                {s.label}
-              </option>
-            ))}
-          </select>
-          <p className="mt-1 text-xs text-gray-500">Active screen: {stationLabel}</p>
-        </div>
-
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">NDT Batch No</label>
           <input
@@ -152,7 +134,11 @@ export default function HydrotestingPage() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
+          <div className="rounded-md border border-gray-200 px-3 py-2 bg-gray-50">
+            <div className="text-gray-500">Revisual station no.</div>
+            <div className="font-semibold text-gray-900 tabular-nums">{stationNumber}</div>
+          </div>
           <div className="rounded-md border border-gray-200 px-3 py-2">
             <div className="text-gray-500">PO Number</div>
             <div className="font-medium text-gray-900">{poNumber ?? "—"}</div>
@@ -199,16 +185,26 @@ export default function HydrotestingPage() {
             onChange={(e) => setPrintTag(e.target.checked)}
             className="h-4 w-4"
           />
-          Print tag for outgoing OK pcs
+          Print tag for outgoing OK pcs (final count)
         </label>
 
-        <button
-          onClick={submit}
-          disabled={submitting || incomingPcs == null}
-          className="px-4 py-2 bg-primary-500 text-white text-sm font-medium rounded-md hover:bg-primary-600 disabled:opacity-50 disabled:pointer-events-none"
-        >
-          {submitting ? "Saving…" : "Save"}
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={submit}
+            disabled={submitting || incomingPcs == null}
+            className="px-4 py-2 bg-primary-500 text-white text-sm font-medium rounded-md hover:bg-primary-600 disabled:opacity-50 disabled:pointer-events-none"
+          >
+            {submitting ? "Saving…" : "Save"}
+          </button>
+          <button
+            type="button"
+            onClick={generateUploadFile}
+            disabled={generatingUpload}
+            className="px-4 py-2 bg-gray-700 text-white text-sm font-medium rounded-md hover:bg-gray-800 disabled:opacity-50 disabled:pointer-events-none"
+          >
+            {generatingUpload ? "Generating…" : "Generate Upload CSV Now"}
+          </button>
+        </div>
       </div>
     </div>
   );

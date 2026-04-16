@@ -17,8 +17,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
     private readonly IBundleEngine _bundleEngine;
     private readonly IBundleOutputWriter _outputWriter;
     private readonly INdtBatchStateService _batchState;
-    private readonly ICurrentPoPlanService? _currentPoPlanService;
-    private readonly IPlcClient _plcClient;
+    private readonly PlcPoEndPollHandler _plcPoEndPollHandler;
     private readonly ITraceabilityRepository _traceability;
     private readonly ILogger<SlitMonitoringWorker> _logger;
 
@@ -30,18 +29,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         IBundleEngine bundleEngine,
         IBundleOutputWriter outputWriter,
         INdtBatchStateService batchState,
-        IPlcClient plcClient,
-        ITraceabilityRepository traceability,
-        ILogger<SlitMonitoringWorker> logger)
-        : this(options, bundleEngine, outputWriter, batchState, null, plcClient, traceability, logger) { }
-
-    public SlitMonitoringWorker(
-        IOptions<NdtBundleOptions> options,
-        IBundleEngine bundleEngine,
-        IBundleOutputWriter outputWriter,
-        INdtBatchStateService batchState,
-        ICurrentPoPlanService? currentPoPlanService,
-        IPlcClient plcClient,
+        PlcPoEndPollHandler plcPoEndPollHandler,
         ITraceabilityRepository traceability,
         ILogger<SlitMonitoringWorker> logger)
     {
@@ -49,8 +37,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         _bundleEngine = bundleEngine;
         _outputWriter = outputWriter;
         _batchState = batchState;
-        _currentPoPlanService = currentPoPlanService;
-        _plcClient = plcClient;
+        _plcPoEndPollHandler = plcPoEndPollHandler;
         _traceability = traceability;
         _logger = logger;
     }
@@ -79,9 +66,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
             {
                 await ProcessNewSlitFilesAsync(stoppingToken).ConfigureAwait(false);
 
-                // Poll PO-end signal. When PLC is connected: if GetPoEndAsync returns true, call the same logic as Simulate PO End
-                // (current PO/mill from ICurrentPoPlanService or context, then IncrementBatchOnPoEndAsync + AdvanceToNextPoAsync).
-                _ = await _plcClient.GetPoEndAsync(stoppingToken).ConfigureAwait(false);
+                await _plcPoEndPollHandler.PollAsync(stoppingToken).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -161,20 +146,23 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     }
                 }
 
-                // Write one output file with the same name as the input file.
+                // Write one output file: SlitNumber_Date_PONumber.csv (under OutputBundleFolder).
                 var outputFolder = _options.OutputBundleFolder;
+                string? outputPath = null;
                 if (!string.IsNullOrWhiteSpace(outputFolder))
                 {
                     Directory.CreateDirectory(outputFolder);
-                    var outputFileName = Path.GetFileName(file);
-                    var outputPath = Path.Combine(outputFolder, outputFileName);
+                    var outputFileName = BuildOutputSlitCsvFileName(file, rows);
+                    outputPath = Path.Combine(outputFolder, outputFileName);
+                    if (File.Exists(outputPath))
+                        outputPath = Path.Combine(outputFolder, Path.GetFileNameWithoutExtension(outputFileName) + "_" + DateTime.Now.ToString("HHmmss", CultureInfo.InvariantCulture) + ".csv");
                     await File.WriteAllLinesAsync(outputPath, outputLines, cancellationToken).ConfigureAwait(false);
                     _logger.LogInformation("Wrote bundle CSV: {Path}", outputPath);
                 }
 
                 // Best-effort SQL traceability; CSV flow should not fail if SQL is down.
                 await _traceability.RecordInputSlitRowsAsync(file, inputRowsForSql, cancellationToken).ConfigureAwait(false);
-                await _traceability.RecordOutputSlitRowsAsync(file, outputRowsForSql, cancellationToken).ConfigureAwait(false);
+                await _traceability.RecordOutputSlitRowsAsync(outputPath ?? file, outputRowsForSql, cancellationToken).ConfigureAwait(false);
 
                 _processedFiles.Add(file);
             }
@@ -183,6 +171,19 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 _logger.LogError(ex, "Failed to process Input Slit CSV file {File}", file);
             }
         }
+    }
+
+    /// <summary>SlitNumber_Date_PONumber.csv using the first data row with a PO (date from slit times or file mtime).</summary>
+    private static string BuildOutputSlitCsvFileName(string inputFilePath, List<(string RawLine, InputSlitRecord? Record)> rows)
+    {
+        var first = rows.Select(r => r.Record).FirstOrDefault(r => r is not null && !string.IsNullOrWhiteSpace(r.PoNumber));
+        var po = first?.PoNumber ?? "NA";
+        var slit = string.IsNullOrWhiteSpace(first?.SlitNo) ? "NoSlit" : first!.SlitNo.Trim();
+        var date = (first?.SlitStartTime ?? first?.SlitFinishTime)?.Date
+            ?? File.GetLastWriteTime(inputFilePath).Date;
+        var safeSlit = CsvOutputFileNaming.SanitizeToken(slit, "NoSlit");
+        var safePo = CsvOutputFileNaming.SanitizeToken(po, "NA");
+        return $"{safeSlit}_{date:yyyyMMdd}_{safePo}.csv";
     }
 
     private static string FormatNdtBatchNo(int sequenceNumber, int millNo)

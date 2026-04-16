@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { api, type WipByMillRow, type BundleFile, type RunningPoNdtSummary } from "@/lib/api";
+import { api, type WipByMillRow, type RunningPoNdtSummary } from "@/lib/api";
 
 type MillRowState = {
   row: WipByMillRow;
@@ -12,7 +12,6 @@ type MillRowState = {
 export default function SummaryPage() {
   const [millRows, setMillRows] = useState<MillRowState[]>([]);
   const [sourcePath, setSourcePath] = useState<string | null>(null);
-  const [bundles, setBundles] = useState<BundleFile[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [dummyPrintStatus, setDummyPrintStatus] = useState<{ success: boolean; message: string } | null>(null);
@@ -24,10 +23,9 @@ export default function SummaryPage() {
     setLoading(true);
     setError(null);
     try {
-      const [byMills, runningSummary, bundlesRes, zplStatus] = await Promise.all([
+      const [byMills, runningSummary, zplStatus] = await Promise.all([
         api.wipByMills(),
         api.ndtSummaryRunningPo().catch(() => [] as RunningPoNdtSummary[]),
-        api.bundles().catch(() => []),
         api.zplGenerationStatus().catch(() => null),
       ]);
 
@@ -57,7 +55,6 @@ export default function SummaryPage() {
       });
 
       setMillRows(withNdt);
-      setBundles(Array.isArray(bundlesRes) ? bundlesRes : []);
       setZplEnabled(typeof zplStatus?.enabled === "boolean" ? zplStatus.enabled : null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
@@ -253,24 +250,6 @@ export default function SummaryPage() {
           <p className="px-5 py-2 text-xs text-gray-400 border-t border-gray-100 truncate" title={sourcePath}>
             Plan file: {sourcePath}
           </p>
-        )}
-      </div>
-
-      <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
-        <div className="px-5 py-3 bg-primary-50 flex justify-between items-center border-b border-gray-200">
-          <h2 className="font-semibold text-gray-900">Bundle CSV files</h2>
-          <span className="text-sm text-gray-600">{bundles.length} file(s)</span>
-        </div>
-        {bundles.length > 0 ? (
-          <ul className="divide-y divide-gray-200 max-h-48 overflow-y-auto">
-            {bundles.map((b) => (
-              <li key={b.fileName ?? b.fullPath} className="px-5 py-2 text-sm text-gray-700">
-                {b.fileName}
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="px-5 py-8 text-gray-500 text-sm">No bundle files yet.</p>
         )}
       </div>
 

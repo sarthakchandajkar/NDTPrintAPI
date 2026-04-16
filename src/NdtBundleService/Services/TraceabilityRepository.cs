@@ -24,6 +24,14 @@ public interface ITraceabilityRepository
         string sourceFile,
         CancellationToken cancellationToken);
     Task RecordUploadBundleRowsAsync(string generatedFile, IReadOnlyList<UploadBundleRow> rows, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Deletes Output_Slit_Row rows that correspond to removed per-slit output CSV lines (same source file basename and row number as when the worker imported the file). Input_Slit_Row is not modified.
+    /// </summary>
+    Task DeleteOutputSlitRowsForRemovedOutputLinesAsync(
+        string ndtBatchNo,
+        IReadOnlyList<RemovedSlitRowTraceRef> refs,
+        CancellationToken cancellationToken);
 }
 
 public sealed class UploadBundleRow
@@ -145,6 +153,50 @@ VALUES
             _logger.LogWarning(ex, "Failed to record Output_Slit_Row for file {File}.", sourceFile);
         }
     }
+
+    public async Task DeleteOutputSlitRowsForRemovedOutputLinesAsync(
+        string ndtBatchNo,
+        IReadOnlyList<RemovedSlitRowTraceRef> refs,
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled || refs.Count == 0)
+            return;
+
+        try
+        {
+            await using var conn = CreateConnection();
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+            const string delOutput = @"
+DELETE FROM dbo.Output_Slit_Row
+WHERE NDT_Batch_No = @BatchNo
+  AND PO_Number = @PoNumber
+  AND Source_Row_Number = @RowNo
+  AND (Source_File LIKE @LikeWin OR Source_File LIKE @LikeUnix);";
+
+            foreach (var r in refs)
+            {
+                var esc = SqlLikeEscape(r.FileBaseName);
+                var likeWin = "%\\" + esc;
+                var likeUnix = "%/" + esc;
+
+                await using var cmd = new SqlCommand(delOutput, conn);
+                cmd.Parameters.AddWithValue("@BatchNo", ndtBatchNo.Trim());
+                cmd.Parameters.AddWithValue("@PoNumber", r.PoNumber);
+                cmd.Parameters.AddWithValue("@RowNo", r.SourceRowNumber1Based);
+                cmd.Parameters.AddWithValue("@LikeWin", likeWin);
+                cmd.Parameters.AddWithValue("@LikeUnix", likeUnix);
+                await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to delete Output_Slit_Row after slit removal for batch {BatchNo}.", ndtBatchNo);
+        }
+    }
+
+    private static string SqlLikeEscape(string literal) =>
+        literal.Replace("[", "[[]", StringComparison.Ordinal).Replace("%", "[%]", StringComparison.Ordinal).Replace("_", "[_]", StringComparison.Ordinal);
 
     public async Task RecordManualStationRunAsync(
         string poNumber,

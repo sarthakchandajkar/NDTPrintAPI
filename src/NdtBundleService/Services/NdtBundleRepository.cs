@@ -365,6 +365,119 @@ END";
         return filesUpdated;
     }
 
+    public async Task<(int RowsRemoved, IReadOnlyList<RemovedSlitRowTraceRef> TraceRefs)> DeletePerSlitOutputRowsForBatchSlitsAsync(
+        string batchNo,
+        IReadOnlyList<string> slitNos,
+        CancellationToken cancellationToken)
+    {
+        var traceRefs = new List<RemovedSlitRowTraceRef>();
+        if (string.IsNullOrWhiteSpace(batchNo) || slitNos.Count == 0)
+            return (0, traceRefs);
+
+        var folder = _options.OutputBundleFolder;
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+            return (0, traceRefs);
+
+        var batchNoTrimmed = batchNo.Trim();
+        var targets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var sn in slitNos)
+        {
+            if (string.IsNullOrWhiteSpace(sn))
+                targets.Add("—");
+            else
+                targets.Add(sn.Trim());
+        }
+
+        var files = Directory.EnumerateFiles(folder, "*.csv")
+            .Where(p => !Path.GetFileName(p).StartsWith("NDT_Bundle_", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var rowsRemoved = 0;
+        foreach (var path in files)
+        {
+            string[] rawLines;
+            try
+            {
+                rawLines = await File.ReadAllLinesAsync(path, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Skip delete scan for {Path}.", path);
+                continue;
+            }
+
+            if (rawLines.Length == 0)
+                continue;
+
+            var baseName = Path.GetFileName(path);
+            var kept = new List<string> { rawLines[0] };
+            var changed = false;
+
+            for (var i = 1; i < rawLines.Length; i++)
+            {
+                var line = rawLines[i];
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    kept.Add(line);
+                    continue;
+                }
+
+                var cols = SplitCsvLine(line);
+                if (cols.Count < MinColumns || !cols[ColNdtBatchNo].Trim().Equals(batchNoTrimmed, StringComparison.OrdinalIgnoreCase))
+                {
+                    kept.Add(line);
+                    continue;
+                }
+
+                var slitKey = string.IsNullOrWhiteSpace(cols[ColSlitNo]) ? "—" : cols[ColSlitNo].Trim();
+                if (!targets.Contains(slitKey))
+                {
+                    kept.Add(line);
+                    continue;
+                }
+
+                var poRaw = cols[0].Trim();
+                var po = string.IsNullOrWhiteSpace(poRaw) ? string.Empty : InputSlitCsvParsing.NormalizePo(poRaw);
+                traceRefs.Add(new RemovedSlitRowTraceRef(baseName, i + 1, po));
+                rowsRemoved++;
+                changed = true;
+            }
+
+            if (!changed)
+                continue;
+
+            var hasNonEmptyData = false;
+            for (var k = 1; k < kept.Count; k++)
+            {
+                if (string.IsNullOrWhiteSpace(kept[k]))
+                    continue;
+                hasNonEmptyData = true;
+                break;
+            }
+
+            try
+            {
+                if (!hasNonEmptyData)
+                {
+                    File.Delete(path);
+                    _logger.LogInformation("Deleted per-slit output CSV after slit removal (no data rows left): {Path}", path);
+                }
+                else
+                {
+                    await File.WriteAllLinesAsync(path, kept, cancellationToken).ConfigureAwait(false);
+                    _logger.LogInformation("Rewrote per-slit output CSV after slit removal: {Path}", path);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to delete or rewrite {Path} after slit removal.", path);
+            }
+        }
+
+        return (rowsRemoved, traceRefs);
+    }
+
     public async Task UpdateBundleTotalInDatabaseAsync(string batchNo, int newTotalPipes, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(batchNo) || !UseDatabase)
@@ -478,16 +591,47 @@ END";
                 if (headerLine is null) continue;
                 if (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is not { } line)
                     continue;
-                var cols = SplitCsvLine(line);
-                if (cols.Count < MinColumns) continue;
-                var bundleNo = cols[ColNdtBatchNo].Trim();
+                headerLine = InputSlitCsvParsing.StripBom(headerLine);
+                var headers = InputSlitCsvParsing.SplitCsvFields(headerLine);
+                var cols = InputSlitCsvParsing.SplitCsvFields(line);
+                var idxBatch = InputSlitCsvParsing.HeaderIndex(headers, "NDT Batch No");
+                var idxNd = InputSlitCsvParsing.HeaderIndex(headers, "NDT Pipes");
+                var idxPo = InputSlitCsvParsing.HeaderIndex(headers, "PO Number", "PO_No", "PO No");
+                var idxSlit = InputSlitCsvParsing.HeaderIndex(headers, "Slit No");
+                var idxMill = InputSlitCsvParsing.HeaderIndex(headers, "Mill No", "Mill Number");
+                var idxShort = InputSlitCsvParsing.HeaderIndex(headers, "NDT Short Length Pipe");
+                var idxRejShort = InputSlitCsvParsing.HeaderIndex(headers, "Rejected Short Length Pipe");
+                if (idxBatch < 0 || idxNd < 0)
+                {
+                    if (cols.Length < MinColumns) continue;
+                    idxBatch = ColNdtBatchNo;
+                    idxNd = ColNdtPipes;
+                    idxPo = 0;
+                    idxSlit = 1;
+                    idxMill = 6;
+                    idxShort = 7;
+                    idxRejShort = 8;
+                }
+                else if (cols.Length <= Math.Max(idxBatch, idxNd))
+                {
+                    continue;
+                }
+
+                var maxIdx1 = Math.Max(Math.Max(idxBatch, idxNd), Math.Max(Math.Max(idxPo, idxSlit), Math.Max(Math.Max(idxMill, idxShort), idxRejShort)));
+                if (maxIdx1 >= cols.Length)
+                    continue;
+
+                var bundleNo = cols[idxBatch].Trim();
                 if (string.IsNullOrEmpty(bundleNo)) continue;
-                if (!int.TryParse(cols[ColNdtPipes].Trim(), out var ndtPipes)) ndtPipes = 0;
-                var po = cols[0].Trim();
-                var slitNo = cols[1].Trim();
-                if (!int.TryParse(cols[6].Trim(), out var millNo)) millNo = 0;
-                var ndtShort = cols.Count > 7 ? cols[7].Trim() : "";
-                var rejShort = cols.Count > 8 ? cols[8].Trim() : "";
+                if (!InputSlitCsvParsing.TryParseIntFlexible(cols[idxNd].Trim(), out var ndtPipes))
+                    ndtPipes = 0;
+                var po = idxPo >= 0 && idxPo < cols.Length ? cols[idxPo].Trim() : "";
+                var slitNo = idxSlit >= 0 && idxSlit < cols.Length ? cols[idxSlit].Trim() : "";
+                var millNo = 0;
+                if (idxMill >= 0 && idxMill < cols.Length)
+                    _ = int.TryParse(cols[idxMill].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out millNo);
+                var ndtShort = idxShort >= 0 && idxShort < cols.Length ? cols[idxShort].Trim() : "";
+                var rejShort = idxRejShort >= 0 && idxRejShort < cols.Length ? cols[idxRejShort].Trim() : "";
                 byBundle[bundleNo] = (ndtPipes, slitNo, po, millNo, ndtShort, rejShort);
                 bundleNosFromSummary.Add(bundleNo);
             }
@@ -507,20 +651,48 @@ END";
                 var headerLine = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
                 if (headerLine is null) continue;
 
+                var headers = InputSlitCsvParsing.SplitCsvFields(InputSlitCsvParsing.StripBom(headerLine));
+                var pIdxBatch = InputSlitCsvParsing.HeaderIndex(headers, "NDT Batch No");
+                var pIdxNd = InputSlitCsvParsing.HeaderIndex(headers, "NDT Pipes");
+                var pIdxPo = InputSlitCsvParsing.HeaderIndex(headers, "PO Number", "PO_No", "PO No");
+                var pIdxSlit = InputSlitCsvParsing.HeaderIndex(headers, "Slit No");
+                var pIdxMill = InputSlitCsvParsing.HeaderIndex(headers, "Mill No", "Mill Number");
+                var pIdxShort = InputSlitCsvParsing.HeaderIndex(headers, "NDT Short Length Pipe");
+                var pIdxRejShort = InputSlitCsvParsing.HeaderIndex(headers, "Rejected Short Length Pipe");
+                var useFixed = pIdxBatch < 0 || pIdxNd < 0;
+
                 while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
                 {
                     if (string.IsNullOrWhiteSpace(line)) continue;
-                    var cols = SplitCsvLine(line);
-                    if (cols.Count < MinColumns) continue;
-                    var bundleNo = cols[ColNdtBatchNo].Trim();
+                    var cols = InputSlitCsvParsing.SplitCsvFields(line);
+                    if (!useFixed && (cols.Length <= Math.Max(pIdxBatch, pIdxNd)))
+                        continue;
+                    if (useFixed && cols.Length < MinColumns) continue;
+
+                    int idxBatch = useFixed ? ColNdtBatchNo : pIdxBatch;
+                    int idxNd = useFixed ? ColNdtPipes : pIdxNd;
+                    int idxPo = useFixed ? 0 : pIdxPo;
+                    int idxSlit = useFixed ? 1 : pIdxSlit;
+                    int idxMill = useFixed ? 6 : pIdxMill;
+                    int idxShort = useFixed ? 7 : pIdxShort;
+                    int idxRejShort = useFixed ? 8 : pIdxRejShort;
+
+                    var maxIdx = Math.Max(Math.Max(idxBatch, idxNd), Math.Max(Math.Max(idxPo, idxSlit), Math.Max(Math.Max(idxMill, idxShort), idxRejShort)));
+                    if (maxIdx >= cols.Length)
+                        continue;
+
+                    var bundleNo = cols[idxBatch].Trim();
                     if (string.IsNullOrEmpty(bundleNo)) continue;
                     if (bundleNosFromSummary.Contains(bundleNo)) continue; // already have authoritative total from NDT_Bundle_*.csv
-                    if (!int.TryParse(cols[ColNdtPipes].Trim(), out var ndtPipes)) ndtPipes = 0;
-                    var po = cols[0].Trim();
-                    var slitNo = cols[1].Trim();
-                    if (!int.TryParse(cols[6].Trim(), out var millNo)) millNo = 0;
-                    var ndtShort = cols.Count > 7 ? cols[7].Trim() : "";
-                    var rejShort = cols.Count > 8 ? cols[8].Trim() : "";
+                    if (!InputSlitCsvParsing.TryParseIntFlexible(cols[idxNd].Trim(), out var ndtPipes))
+                        ndtPipes = 0;
+                    var po = idxPo >= 0 && idxPo < cols.Length ? cols[idxPo].Trim() : "";
+                    var slitNo = idxSlit >= 0 && idxSlit < cols.Length ? cols[idxSlit].Trim() : "";
+                    var millNo = 0;
+                    if (idxMill >= 0 && idxMill < cols.Length)
+                        _ = int.TryParse(cols[idxMill].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out millNo);
+                    var ndtShort = idxShort >= 0 && idxShort < cols.Length ? cols[idxShort].Trim() : "";
+                    var rejShort = idxRejShort >= 0 && idxRejShort < cols.Length ? cols[idxRejShort].Trim() : "";
 
                     if (byBundle.TryGetValue(bundleNo, out var existing))
                     {

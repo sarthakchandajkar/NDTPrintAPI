@@ -18,14 +18,14 @@ public sealed class ManualTagsController : ControllerBase
     }
 
     [HttpGet("{station}/{ndtBatchNo}/context")]
-    public async Task<IActionResult> GetContext(string station, string ndtBatchNo, CancellationToken cancellationToken)
+    public async Task<IActionResult> GetContext(string station, string ndtBatchNo, [FromQuery] int operatorStationNumber = 1, CancellationToken cancellationToken = default)
     {
         if (!TryParseStation(station, out var st))
             return BadRequest(new { Message = "Invalid station. Use Visual, Hydrotesting, FourHeadHydrotesting, BigHydrotesting, or Revisual." });
 
         try
         {
-            var ctx = await _service.GetContextAsync(st, ndtBatchNo, cancellationToken).ConfigureAwait(false);
+            var ctx = await _service.GetContextAsync(st, ndtBatchNo, operatorStationNumber, cancellationToken).ConfigureAwait(false);
 
             return Ok(new
             {
@@ -33,6 +33,7 @@ public sealed class ManualTagsController : ControllerBase
                 ctx.NdtBatchNo,
                 ctx.PoNumber,
                 ctx.MillNo,
+                ctx.OperatorStationNumber,
                 ctx.IncomingPcs,
                 ctx.AlreadyOkPcs,
                 ctx.AlreadyRejectedPcs,
@@ -77,7 +78,8 @@ public sealed class ManualTagsController : ControllerBase
                 User = request.User ?? string.Empty,
                 StartTime = request.StartTime,
                 EndTime = request.EndTime,
-                PrintTag = request.PrintTag
+                PrintTag = request.PrintTag,
+                OperatorStationNumber = request.OperatorStationNumber <= 0 ? 1 : request.OperatorStationNumber
             }, cancellationToken).ConfigureAwait(false);
 
             return Ok(new
@@ -128,7 +130,8 @@ public sealed class ManualTagsController : ControllerBase
                 User = request.User ?? string.Empty,
                 StartTime = request.StartTime,
                 EndTime = request.EndTime,
-                PrintTag = request.PrintTag
+                PrintTag = request.PrintTag,
+                OperatorStationNumber = request.OperatorStationNumber <= 0 ? 1 : request.OperatorStationNumber
             }, cancellationToken).ConfigureAwait(false);
 
             return Ok(new
@@ -181,6 +184,8 @@ public sealed class ManualTagsController : ControllerBase
         public DateTime? StartTime { get; set; }
         public DateTime? EndTime { get; set; }
         public bool PrintTag { get; set; }
+        /// <summary>For Visual and Revisual: 1 or 2. Omitted or 0 defaults to 1.</summary>
+        public int OperatorStationNumber { get; set; }
     }
 }
 

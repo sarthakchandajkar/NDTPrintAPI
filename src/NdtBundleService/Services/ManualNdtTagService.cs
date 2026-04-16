@@ -20,7 +20,8 @@ public enum ManualTagStation
 
 public interface IManualNdtTagService
 {
-    Task<ManualStationContext> GetContextAsync(ManualTagStation station, string ndtBatchNo, CancellationToken cancellationToken);
+    /// <param name="operatorStationNumber">For Visual and Revisual only: physical station id (1 or 2). Ignored for hydro stations.</param>
+    Task<ManualStationContext> GetContextAsync(ManualTagStation station, string ndtBatchNo, int operatorStationNumber, CancellationToken cancellationToken);
     Task<ManualStationRecordResult> RecordAsync(ManualStationRecordRequest request, CancellationToken cancellationToken);
     /// <summary>Adjust OK/Rejected for a station that was already recorded; may cascade clearing downstream steps and replaces the prior CSV.</summary>
     Task<ManualStationRecordResult> ReconcileAsync(ManualStationRecordRequest request, CancellationToken cancellationToken);
@@ -31,6 +32,8 @@ public sealed class ManualStationContext
     public string NdtBatchNo { get; init; } = string.Empty;
     public string PoNumber { get; init; } = string.Empty;
     public int MillNo { get; init; }
+    /// <summary>For Visual/Revisual: physical station (1 or 2). Always 1 for hydro.</summary>
+    public int OperatorStationNumber { get; init; } = 1;
     public int IncomingPcs { get; init; }
     public int? AlreadyOkPcs { get; init; }
     public int? AlreadyRejectedPcs { get; init; }
@@ -53,6 +56,8 @@ public sealed class ManualStationRecordRequest
     public DateTime? StartTime { get; init; }
     public DateTime? EndTime { get; init; }
     public bool PrintTag { get; init; }
+    /// <summary>For Visual and Revisual: physical station id 1 or 2 (CSV filename and Work Station column). Default 1.</summary>
+    public int OperatorStationNumber { get; init; } = 1;
 }
 
 public sealed class ManualStationRecordResult
@@ -102,11 +107,12 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         _logger = logger;
     }
 
-    public async Task<ManualStationContext> GetContextAsync(ManualTagStation station, string ndtBatchNo, CancellationToken cancellationToken)
+    public async Task<ManualStationContext> GetContextAsync(ManualTagStation station, string ndtBatchNo, int operatorStationNumber, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(ndtBatchNo))
             throw new ArgumentException("NdtBatchNo is required.", nameof(ndtBatchNo));
 
+        var opStation = NormalizeOperatorStationNumber(station, operatorStationNumber);
         var batch = ndtBatchNo.Trim();
         var state = await LoadOrCreateStateAsync(batch, cancellationToken).ConfigureAwait(false);
         var incoming = GetIncomingForStation(state, station);
@@ -117,6 +123,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             NdtBatchNo = batch,
             PoNumber = state.PoNumber,
             MillNo = state.MillNo,
+            OperatorStationNumber = opStation,
             IncomingPcs = incoming,
             AlreadyOkPcs = existing?.OkPcs,
             AlreadyRejectedPcs = existing?.RejectedPcs,
@@ -137,6 +144,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         var batch = request.NdtBatchNo.Trim();
         var state = await LoadOrCreateStateAsync(batch, cancellationToken).ConfigureAwait(false);
         var incoming = GetIncomingForStation(state, request.Station);
+        var opStation = NormalizeOperatorStationNumber(request.Station, request.OperatorStationNumber);
 
         if (request.OkPcs + request.RejectedPcs != incoming)
             throw new InvalidOperationException($"OK ({request.OkPcs}) + Rejected ({request.RejectedPcs}) must equal Incoming ({incoming}).");
@@ -162,7 +170,8 @@ public sealed class ManualNdtTagService : IManualNdtTagService
 
         var folder = GetFolder(request.Station);
         Directory.CreateDirectory(folder);
-        var csvPath = await WriteCsvAsync(folder, request.Station, state.PoNumber, batch, incoming, request.OkPcs, request.RejectedPcs, start, end, cancellationToken).ConfigureAwait(false);
+        var fileNameStation = FileNameStationSegment(request.Station, state.MillNo, opStation);
+        var csvPath = await WriteCsvAsync(folder, request.Station, fileNameStation, opStation, state.PoNumber, batch, incoming, request.OkPcs, request.RejectedPcs, start, end, cancellationToken).ConfigureAwait(false);
         SetLastCsvPath(state, request.Station, csvPath);
         await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
 
@@ -173,7 +182,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             ndtPcs: incoming,
             okPcs: request.OkPcs,
             rejectPcs: request.RejectedPcs,
-            workStation: WorkStationColumnValue(request.Station),
+            workStation: WorkStationColumnValue(request.Station, opStation),
             start: start,
             end: end,
             hydrotestingType: IsHydroStation(request.Station) ? HydrotestingTypeValue(request.Station) : null,
@@ -183,7 +192,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         var printed = false;
         if (request.PrintTag)
         {
-            printed = await TryPrintTagAsync(state.PoNumber, state.MillNo, batch, request.OkPcs, now, request.Station, isReprint: false, cancellationToken).ConfigureAwait(false);
+            printed = await TryPrintTagAsync(state.PoNumber, state.MillNo, batch, request.OkPcs, now, request.Station, opStation, isReprint: false, cancellationToken).ConfigureAwait(false);
         }
 
         return new ManualStationRecordResult
@@ -213,6 +222,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             throw new InvalidOperationException(
                 $"No existing {StationName(request.Station)} record for batch {batch}. Use Save first, then Reconcile to adjust counts.");
 
+        var opStation = NormalizeOperatorStationNumber(request.Station, request.OperatorStationNumber);
         var incoming = GetIncomingForStation(state, request.Station);
         if (request.OkPcs + request.RejectedPcs != incoming)
             throw new InvalidOperationException($"OK ({request.OkPcs}) + Rejected ({request.RejectedPcs}) must equal Incoming ({incoming}).");
@@ -263,14 +273,15 @@ public sealed class ManualNdtTagService : IManualNdtTagService
 
         var folder = GetFolder(request.Station);
         Directory.CreateDirectory(folder);
-        var csvPath = await WriteCsvAsync(folder, request.Station, state.PoNumber, batch, incoming, request.OkPcs, request.RejectedPcs, start, end, cancellationToken).ConfigureAwait(false);
+        var fileNameStation = FileNameStationSegment(request.Station, state.MillNo, opStation);
+        var csvPath = await WriteCsvAsync(folder, request.Station, fileNameStation, opStation, state.PoNumber, batch, incoming, request.OkPcs, request.RejectedPcs, start, end, cancellationToken).ConfigureAwait(false);
         SetLastCsvPath(state, request.Station, csvPath);
         await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
 
         var printed = false;
         if (request.PrintTag)
         {
-            printed = await TryPrintTagAsync(state.PoNumber, state.MillNo, batch, request.OkPcs, now, request.Station, isReprint: true, cancellationToken).ConfigureAwait(false);
+            printed = await TryPrintTagAsync(state.PoNumber, state.MillNo, batch, request.OkPcs, now, request.Station, opStation, isReprint: true, cancellationToken).ConfigureAwait(false);
         }
 
         return new ManualStationRecordResult
@@ -285,6 +296,19 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             Printed = printed
         };
     }
+
+    private static int NormalizeOperatorStationNumber(ManualTagStation station, int value)
+    {
+        if (station != ManualTagStation.Visual && station != ManualTagStation.Revisual)
+            return 1;
+        if (value is < 1 or > 2)
+            throw new ArgumentException("OperatorStationNumber must be 1 or 2 for Visual and Revisual stations.");
+        return value;
+    }
+
+    /// <summary>Segment used in CSV filename (Visual/Revisual: operator station 1–2; hydro: mill no).</summary>
+    private static int FileNameStationSegment(ManualTagStation station, int millNo, int operatorStationNumber) =>
+        station is ManualTagStation.Visual or ManualTagStation.Revisual ? operatorStationNumber : millNo;
 
     private string GetFolder(ManualTagStation station)
     {
@@ -314,15 +338,26 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             _ => "Manual"
         };
 
+    private static string StationTextForZpl(ManualTagStation station, int operatorStationNumber) =>
+        station switch
+        {
+            ManualTagStation.Visual => $"Visual Station {operatorStationNumber}",
+            ManualTagStation.Revisual => $"Revisual Station {operatorStationNumber}",
+            ManualTagStation.FourHeadHydrotesting => "Four Head Hydrotesting",
+            ManualTagStation.BigHydrotesting => "Big Hydrotesting",
+            ManualTagStation.Hydrotesting => "Hydrotesting",
+            _ => StationName(station)
+        };
+
     private static bool IsHydroStation(ManualTagStation station) =>
         station is ManualTagStation.Hydrotesting or ManualTagStation.FourHeadHydrotesting or ManualTagStation.BigHydrotesting;
 
-    /// <summary>Work Station column: Visual, Hydrotesting, or Revisual (Four Head / Big hydro still record as Hydrotesting).</summary>
-    private static string WorkStationColumnValue(ManualTagStation station) =>
+    /// <summary>Work Station column: Visual/Revisual include physical station number; hydro uses Hydrotesting.</summary>
+    private static string WorkStationColumnValue(ManualTagStation station, int operatorStationNumber) =>
         station switch
         {
-            ManualTagStation.Visual => "Visual",
-            ManualTagStation.Revisual => "Revisual",
+            ManualTagStation.Visual => $"Visual Station {operatorStationNumber}",
+            ManualTagStation.Revisual => $"Revisual Station {operatorStationNumber}",
             ManualTagStation.Hydrotesting or ManualTagStation.FourHeadHydrotesting or ManualTagStation.BigHydrotesting => "Hydrotesting",
             _ => StationName(station)
         };
@@ -337,10 +372,37 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             _ => ""
         };
 
-    private async Task<string> WriteCsvAsync(string folder, ManualTagStation station, string poNumber, string ndtBatchNo, int incomingPcs, int okPcs, int rejectedPcs, DateTime start, DateTime end, CancellationToken cancellationToken)
+    /// <summary>Filename segment for hydro type (no spaces).</summary>
+    private static string HydrotestingTypeFileToken(ManualTagStation station) =>
+        station switch
+        {
+            ManualTagStation.FourHeadHydrotesting => "FourHeadHydrotesting",
+            ManualTagStation.BigHydrotesting => "BigHydrotesting",
+            ManualTagStation.Hydrotesting => "Hydrotesting",
+            _ => "Hydrotesting"
+        };
+
+    private async Task<string> WriteCsvAsync(string folder, ManualTagStation station, int fileNameStationSegment, int operatorStationNumber, string poNumber, string ndtBatchNo, int incomingPcs, int okPcs, int rejectedPcs, DateTime start, DateTime end, CancellationToken cancellationToken)
     {
-        var stamp = DateTime.Now.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
-        var fileName = $"{StationName(station)}_NDT_{ndtBatchNo}_{stamp}.csv";
+        var now = DateTime.Now;
+        var datePart = now.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
+        var timePart = now.ToString("HHmmss", CultureInfo.InvariantCulture);
+        var safePo = CsvOutputFileNaming.SanitizeToken(poNumber.Trim());
+        var safeBatch = CsvOutputFileNaming.SanitizeToken(ndtBatchNo);
+        // Visual: Visual_StationNumber_PONumber_NDT Bundle Number_Date_Time.csv (date = yyyyMMdd, time = HHmmss)
+        // Hydrotesting: HydrotestingType_PONumber_NDT Bundle Number_Date_Time.csv
+        // Revisual: Revisual_StationNumber_PONumber_NDT Bundle Number_Date_Time.csv
+        var fileName = station switch
+        {
+            ManualTagStation.Visual =>
+                $"Visual_{operatorStationNumber}_{safePo}_{safeBatch}_{datePart}_{timePart}.csv",
+            ManualTagStation.Revisual =>
+                $"Revisual_{operatorStationNumber}_{safePo}_{safeBatch}_{datePart}_{timePart}.csv",
+            ManualTagStation.Hydrotesting or ManualTagStation.FourHeadHydrotesting or ManualTagStation.BigHydrotesting =>
+                $"{HydrotestingTypeFileToken(station)}_{safePo}_{safeBatch}_{datePart}_{timePart}.csv",
+            _ =>
+                $"{StationName(station)}_{fileNameStationSegment}_{safePo}_{safeBatch}_{datePart}_{timePart}.csv"
+        };
         var path = Path.Combine(folder, fileName);
 
         // Visual / Revisual: PO Number, NDT BATCH NO, NDT Pcs, OK, Reject, Work Station, Bundle Start, Bundle End
@@ -355,7 +417,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             incomingPcs.ToString(CultureInfo.InvariantCulture),
             okPcs.ToString(CultureInfo.InvariantCulture),
             rejectedPcs.ToString(CultureInfo.InvariantCulture),
-            Escape(WorkStationColumnValue(station)),
+            Escape(WorkStationColumnValue(station, operatorStationNumber)),
             Escape(start.ToString("O", CultureInfo.InvariantCulture)),
             Escape(end.ToString("O", CultureInfo.InvariantCulture)));
         if (IsHydroStation(station))
@@ -401,7 +463,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         }
     }
 
-    private async Task<bool> TryPrintTagAsync(string poNumber, int millNo, string ndtBatchNo, int pcs, DateTime date, ManualTagStation station, bool isReprint, CancellationToken cancellationToken)
+    private async Task<bool> TryPrintTagAsync(string poNumber, int millNo, string ndtBatchNo, int pcs, DateTime date, ManualTagStation station, int operatorStationNumber, bool isReprint, CancellationToken cancellationToken)
     {
         if (!_zplToggle.IsEnabled)
         {
@@ -431,13 +493,13 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             date,
             pcs,
             isReprint,
-            StationName(station));
+            StationTextForZpl(station, operatorStationNumber));
 
-        await TrySaveZplPreviewAsync(station, ndtBatchNo, zplBytes, cancellationToken).ConfigureAwait(false);
+        await TrySaveZplPreviewAsync(station, operatorStationNumber, ndtBatchNo, zplBytes, cancellationToken).ConfigureAwait(false);
         return await _sender.SendAsync(address, _options.NdtTagPrinterPort, zplBytes, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task TrySaveZplPreviewAsync(ManualTagStation station, string ndtBatchNo, byte[] zplBytes, CancellationToken cancellationToken)
+    private async Task TrySaveZplPreviewAsync(ManualTagStation station, int operatorStationNumber, string ndtBatchNo, byte[] zplBytes, CancellationToken cancellationToken)
     {
         try
         {
@@ -446,7 +508,10 @@ public sealed class ManualNdtTagService : IManualNdtTagService
                 return;
 
             Directory.CreateDirectory(folder);
-            var fileName = $"{StationName(station)}_NDTTag_{ndtBatchNo}_{DateTime.Now:yyyyMMddHHmmss}.zpl";
+            var stationTag = station is ManualTagStation.Visual or ManualTagStation.Revisual
+                ? $"{StationName(station)}St{operatorStationNumber}"
+                : StationName(station).Replace(" ", "");
+            var fileName = $"{stationTag}_NDTTag_{ndtBatchNo}_{DateTime.Now:yyyyMMddHHmmss}.zpl";
             var fullPath = Path.Combine(folder, fileName);
             await File.WriteAllBytesAsync(fullPath, zplBytes, cancellationToken).ConfigureAwait(false);
         }

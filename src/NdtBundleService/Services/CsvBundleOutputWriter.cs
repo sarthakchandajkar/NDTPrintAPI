@@ -45,7 +45,7 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
         if (_options.EnableBundleSummaryCsvFiles)
         {
             // Write bundle summary to a distinct file (actual total for this bundle, e.g. 11 pipes).
-            // Do not overwrite per-slit output files (SlitNo_date_PO.csv) which keep per-row NDT pipe counts.
+            // Do not overwrite per-slit output files (SlitNumber_Date_PONumber.csv) which keep per-row NDT pipe counts.
             var summaryFolder = string.IsNullOrWhiteSpace(_options.BundleSummaryOutputFolder)
                 ? folder
                 : _options.BundleSummaryOutputFolder.Trim();

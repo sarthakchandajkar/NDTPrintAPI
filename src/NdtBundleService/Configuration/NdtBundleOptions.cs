@@ -15,13 +15,13 @@ public class NdtBundleOptions
     public string OutputBundleFolder { get; set; } = string.Empty;
 
     /// <summary>Folder where operator-printed Visual NDT output CSV files are written.</summary>
-    public string VisualNdtOutputFolder { get; set; } = @"D:\NDT\To SAP\Visual NDT Output";
+    public string VisualNdtOutputFolder { get; set; } = @"Z:\To SAP\TM\NDT\Visual\Bundle";
 
     /// <summary>Folder where operator-printed Hydrotesting NDT output CSV files are written.</summary>
-    public string HydrotestingNdtOutputFolder { get; set; } = @"D:\NDT\To SAP\Hydrotesting NDT Output";
+    public string HydrotestingNdtOutputFolder { get; set; } = @"Z:\To SAP\TM\NDT\Hydrotesting\Bundle";
 
     /// <summary>Folder where operator-printed Revisual NDT output CSV files are written.</summary>
-    public string RevisualNdtOutputFolder { get; set; } = @"D:\NDT\To SAP\Revisual NDT Output";
+    public string RevisualNdtOutputFolder { get; set; } = @"Z:\To SAP\TM\NDT\Re-Visual\Bundle";
 
     /// <summary>Folder where PO Plan (WIP) CSV files are dropped from SAP (e.g. D:\NDT\From SAP\TM). When set, one file is used as current PO plan; advance to next file only on PO End. If empty, single-file paths below are used.</summary>
     public string PoPlanFolder { get; set; } = string.Empty;
@@ -66,7 +66,7 @@ public class NdtBundleOptions
     public string BundleSummaryOutputFolder { get; set; } = @"D:\NDT\NDT Bundles Generated";
 
     /// <summary>Folder where Upload NDT Bundle Files CSV output is written.</summary>
-    public string UploadNdtBundleFilesFolder { get; set; } = @"D:\NDT\To SAP\Upload NDT Bundle Files";
+    public string UploadNdtBundleFilesFolder { get; set; } = @"Z:\To SAP\TM\NDT\MES PAS NDT\Bundle";
 
     /// <summary>Folder where Slit Accepted files are written (used to map slit width by slit batch number).</summary>
     public string SlitAcceptedFolder { get; set; } = @"D:\NDT\To SAP\Slitting\Slit Accepted";
@@ -92,5 +92,8 @@ public class NdtBundleOptions
     /// Leave empty to include all files.
     /// </summary>
     public string? MinSourceFileLastWriteUtc { get; set; }
+
+    /// <summary>Optional per-mill PLC PO-end signals (Modbus TCP, etc.).</summary>
+    public PlcPoEndOptions PlcPoEnd { get; set; } = new();
 }
 

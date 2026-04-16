@@ -1,6 +1,10 @@
+using NdtBundleService.Configuration;
 using NdtBundleService.Models;
 
 namespace NdtBundleService.Services;
+
+/// <summary>Identifies a removed line in a per-slit output CSV for Output_Slit_Row traceability cleanup.</summary>
+public sealed record RemovedSlitRowTraceRef(string FileBaseName, int SourceRowNumber1Based, string PoNumber);
 
 /// <summary>
 /// Persists and queries NDT bundles for listing and reconciliation. When UseSqlServerForBundles and ConnectionString are set, uses SQL Server; otherwise uses output CSV folder.
@@ -21,6 +25,15 @@ public interface INdtBundleRepository
     Task UpdateBundleTotalInDatabaseAsync(string batchNo, int newTotalPipes, CancellationToken cancellationToken);
     /// <summary>Updates the bundle summary CSV (NDT_Bundle_{batchNo}.csv) if present. Returns true if updated.</summary>
     Task<bool> UpdateBundleSummaryCsvAsync(string batchNo, int newTotalPipes, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Removes data rows for the given NDT batch and slit numbers from per-slit output CSVs (excludes NDT_Bundle_*).
+    /// Deletes a file when only the header row would remain. Returns rows removed and refs for SQL traceability cleanup.
+    /// </summary>
+    Task<(int RowsRemoved, IReadOnlyList<RemovedSlitRowTraceRef> TraceRefs)> DeletePerSlitOutputRowsForBatchSlitsAsync(
+        string batchNo,
+        IReadOnlyList<string> slitNos,
+        CancellationToken cancellationToken);
 }
 
 public interface IPoPlanProvider
@@ -102,11 +115,42 @@ public interface IBundleEngine
 public interface IPlcClient
 {
     /// <summary>
-    /// Returns true when the PO-end signal from the PLC is active.
-    /// When true, the host should perform the same logic as Simulate PO End: call INdtBatchStateService.IncrementBatchOnPoEndAsync
-    /// for the current PO/mill, then ICurrentPoPlanService.AdvanceToNextPoAsync so the next file from the TM folder is used.
+    /// Current PO-end signal level per mill (1–4). Mills without a configured endpoint read as false.
+    /// </summary>
+    Task<IReadOnlyDictionary<int, bool>> GetPoEndSignalsByMillAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// True when any mill reports PO-end active (convenience for dashboard).
     /// </summary>
     Task<bool> GetPoEndAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// When <see cref="PlcPoEndOptions.DetectionMode"/> is Modbus PO_Id transition, returns fresh per-mill snapshots; otherwise null (no extra I/O).
+    /// </summary>
+    Task<IReadOnlyDictionary<int, MillPoPlcSnapshot>?> ReadMillPoSnapshotsAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Writes the MES acknowledgment coil for the mill (PLC RESETMESTOPLC), if configured. No-op for Stub or when the mill has no ack address.
+    /// </summary>
+    Task AcknowledgeMesPoChangeAsync(int millNo, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Runs the same steps as <c>POST /api/Test/po-end</c>: close partial bundles, advance batch state, optional PO plan file advance.
+/// </summary>
+public interface IPoEndWorkflowService
+{
+    Task ExecuteAsync(string poNumber, int millNo, bool advancePoPlanFile, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Resolves the active PO number per mill from Input Slit (+ Accepted) CSVs and optional SQL traceability.
+/// </summary>
+public interface IActivePoPerMillService
+{
+    Task<IReadOnlyDictionary<int, string>> GetLatestPoByMillAsync(CancellationToken cancellationToken);
+
+    IReadOnlyList<string> GetInputSlitReadFolderPaths();
 }
 
 /// <summary>

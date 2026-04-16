@@ -50,6 +50,9 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
             "PO_NO,Slit_No,HRC Number,Slit Width,Slit Thick,NSS,Slit Grade,Bundle Number,NumOfPipes,TotalBundleWt,LenPerPipe,IsFullBundle"
         };
         var uploadRowsForSql = new List<UploadBundleRow>();
+        string? firstPo = null;
+        string? firstBatch = null;
+        int? firstMill = null;
 
         var revisualFiles = Directory.EnumerateFiles(revisualFolder, "*.csv")
             .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
@@ -125,6 +128,13 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
                     LenPerPipe = lenPerPipe,
                     IsFullBundle = null
                 });
+
+                if (firstPo is null)
+                {
+                    firstPo = poNo;
+                    firstBatch = batchNo;
+                    firstMill = bundle?.MillNo ?? 0;
+                }
             }
             catch (Exception ex)
             {
@@ -132,7 +142,12 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
             }
         }
 
-        var fileName = $"Upload_NDT_Bundle_{DateTime.Now:yyyyMMddHHmmss}.csv";
+        var ts = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+        var safePo = CsvOutputFileNaming.SanitizeToken(firstPo ?? "NA");
+        var safeBatch = CsvOutputFileNaming.SanitizeToken(firstBatch ?? "NA");
+        var mill = firstMill ?? 0;
+        // UploadNdtBundle__PO__<PO>__<NDT Bundle Number>-<MillNo>__TS-<yyyyMMdd_HHmmss>.csv
+        var fileName = $"UploadNdtBundle__PO__{safePo}__{safeBatch}-{mill}__TS-{ts}.csv";
         var fullPath = Path.Combine(uploadFolder, fileName);
         await File.WriteAllLinesAsync(fullPath, rows, cancellationToken).ConfigureAwait(false);
 

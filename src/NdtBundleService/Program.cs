@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Services;
 using QuestPDF.Infrastructure;
@@ -31,7 +32,26 @@ builder.Services.AddSingleton<INetworkPrinterSender, NetworkPrinterSender>();
 builder.Services.AddSingleton<IWipLabelProvider, WipLabelProvider>();
 builder.Services.AddSingleton<INdtTagPrinter, NdtZplTagPrinter>();
 builder.Services.AddSingleton<IZplGenerationToggle, ZplGenerationToggle>();
-builder.Services.AddSingleton<IPlcClient, StubPlcClient>();
+builder.Services.AddSingleton<IActivePoPerMillService, ActivePoPerMillService>();
+builder.Services.AddSingleton<IPoEndWorkflowService, PoEndWorkflowService>();
+builder.Services.AddSingleton<MillPoEndTransitionDetector>();
+builder.Services.AddSingleton<PoEndDetectionDiagnostics>();
+builder.Services.AddSingleton<PlcPoEndPollHandler>();
+builder.Services.AddSingleton<PlcConnectionHealth>();
+builder.Services.AddSingleton<IPlcClient>(sp =>
+{
+    var bundleOptions = sp.GetRequiredService<IOptions<NdtBundleOptions>>().Value;
+    var plc = bundleOptions.PlcPoEnd ?? new PlcPoEndOptions();
+    if (plc.Enabled && string.Equals(plc.Driver, "ModbusTcp", StringComparison.OrdinalIgnoreCase))
+    {
+        return new ModbusTcpMillPoEndPlcClient(
+            sp.GetRequiredService<IOptions<NdtBundleOptions>>(),
+            sp.GetRequiredService<PlcConnectionHealth>(),
+            sp.GetRequiredService<ILogger<ModbusTcpMillPoEndPlcClient>>());
+    }
+
+    return new StubPlcClient(sp.GetRequiredService<ILogger<StubPlcClient>>());
+});
 builder.Services.AddSingleton<IManualNdtTagService, ManualNdtTagService>();
 builder.Services.AddSingleton<IUploadNdtBundleFileService, UploadNdtBundleFileService>();
 builder.Services.AddSingleton<ITraceabilityRepository, TraceabilityRepository>();

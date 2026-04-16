@@ -112,10 +112,18 @@ export interface InputSlitContent {
 }
 
 export interface PlcStatus {
+  /** True only when Modbus TCP is enabled and the last Modbus read succeeded. */
   connected?: boolean;
+  lastPlcError?: string | null;
+  lastPlcCheckUtc?: string | null;
   poEndActive?: boolean;
+  plcPoEndEnabled?: boolean;
+  driver?: string;
+  poEndByMill?: Record<string, boolean>;
+  message?: string;
 }
 
+/** NotConfigured | Ready (TCP OK) | Unreachable | Configured (name only, no TCP check). */
 export interface PrinterStatus {
   status?: string;
   message?: string;
@@ -142,6 +150,8 @@ export interface ManualStationContext {
   ndtBatchNo?: string;
   poNumber?: string;
   millNo?: number;
+  /** Visual / Revisual physical station (1 or 2). */
+  operatorStationNumber?: number;
   incomingPcs?: number;
   alreadyOkPcs?: number;
   alreadyRejectedPcs?: number;
@@ -189,6 +199,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ ndtBatchNo, slitNo, newNdtPipes }),
     }),
+  reconcileDeleteSlits: (ndtBatchNo: string, slitNos: string[]) =>
+    fetchApi<{
+      message?: string;
+      ndtBatchNo?: string;
+      rowsRemoved?: number;
+      newBundleTotalNdtPcs?: number;
+      bundleSummaryUpdated?: boolean;
+      slits?: ReconcileSlitItem[];
+    }>("/api/Reconcile/delete-slits", {
+      method: "POST",
+      body: JSON.stringify({ ndtBatchNo, slitNos }),
+    }),
   printReconciledBundle: (ndtBatchNo: string) =>
     fetchApi<{ message?: string; ndtBatchNo?: string; ndtPcs?: number }>("/api/Reconcile/print-bundle", {
       method: "POST",
@@ -210,24 +232,39 @@ export const api = {
     }),
   manualStationContext: (
     station: "Visual" | "Hydrotesting" | "FourHeadHydrotesting" | "BigHydrotesting" | "Revisual",
-    ndtBatchNo: string
+    ndtBatchNo: string,
+    operatorStationNumber = 1
   ) =>
-    fetchApi<ManualStationContext>(`/api/ManualTags/${encodeURIComponent(station)}/${encodeURIComponent(ndtBatchNo)}/context`),
+    fetchApi<ManualStationContext>(
+      `/api/ManualTags/${encodeURIComponent(station)}/${encodeURIComponent(ndtBatchNo)}/context?operatorStationNumber=${operatorStationNumber}`
+    ),
   manualStationRecord: (
     station: "Visual" | "Hydrotesting" | "FourHeadHydrotesting" | "BigHydrotesting" | "Revisual",
-    args: { ndtBatchNo: string; okPcs: number; rejectedPcs: number; printTag: boolean }
+    args: { ndtBatchNo: string; okPcs: number; rejectedPcs: number; printTag: boolean; operatorStationNumber?: number }
   ) =>
     fetchApi<ManualTagPrintResponse>(`/api/ManualTags/${encodeURIComponent(station)}/record`, {
       method: "POST",
-      body: JSON.stringify(args),
+      body: JSON.stringify({
+        ndtBatchNo: args.ndtBatchNo,
+        okPcs: args.okPcs,
+        rejectedPcs: args.rejectedPcs,
+        printTag: args.printTag,
+        operatorStationNumber: args.operatorStationNumber ?? 1,
+      }),
     }),
   manualStationReconcile: (
     station: "Visual" | "Hydrotesting" | "FourHeadHydrotesting" | "BigHydrotesting" | "Revisual",
-    args: { ndtBatchNo: string; okPcs: number; rejectedPcs: number; printTag: boolean }
+    args: { ndtBatchNo: string; okPcs: number; rejectedPcs: number; printTag: boolean; operatorStationNumber?: number }
   ) =>
     fetchApi<ManualTagPrintResponse>(`/api/ManualTags/${encodeURIComponent(station)}/reconcile`, {
       method: "POST",
-      body: JSON.stringify(args),
+      body: JSON.stringify({
+        ndtBatchNo: args.ndtBatchNo,
+        okPcs: args.okPcs,
+        rejectedPcs: args.rejectedPcs,
+        printTag: args.printTag,
+        operatorStationNumber: args.operatorStationNumber ?? 1,
+      }),
     }),
   generateUploadBundleFile: () =>
     fetchApi<UploadBundleGenerationResponse>("/api/UploadNdtBundle/generate-now", {

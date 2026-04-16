@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <!-- Swagger UI for testing the flow and simulating PO end -->
+    <PackageReference Include="NModbus" Version="3.0.81" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="10.1.4" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.0" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.2" />

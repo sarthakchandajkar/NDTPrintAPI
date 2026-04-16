@@ -51,15 +51,12 @@ public static class ZplDummyLabelBuilder
         zpl.Append("   Slit: ");
         zpl.Append(EscapeZplField(slitNo));
         zpl.Append("^FS");
-        // QR code (same batch number as human-readable line below)
-        zpl.Append("^FO50,170^BQN,2,5^FDMA,");
-        zpl.Append(EscapeZplField(bundleNo));
-        zpl.Append("^FS");
-        zpl.Append("^FO50,300^FD");
+        // Code 128 barcode (batch number + human-readable line from printer)
+        zpl.Append("^FO50,170^BY2^BCN,70,Y,N,N^FD");
         zpl.Append(EscapeZplField(bundleNo));
         zpl.Append("^FS");
         // Footer
-        zpl.Append("^CF0,22^FO50,320^FDMADE IN OMAN - TEST PRINT^FS");
+        zpl.Append("^CF0,22^FO50,300^FDMADE IN OMAN - TEST PRINT^FS");
         zpl.Append("^XZ");
 
         return Encoding.UTF8.GetBytes(zpl.ToString());

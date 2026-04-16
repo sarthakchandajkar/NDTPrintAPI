@@ -18,36 +18,36 @@ namespace NdtBundleService.Controllers;
 [Produces("application/json")]
     public sealed class TestController : ControllerBase
 {
-    private readonly IBundleEngine _bundleEngine;
-    private readonly IBundleOutputWriter _outputWriter;
-    private readonly INdtBatchStateService _batchState;
     private readonly ICurrentPoPlanService? _currentPoPlanService;
     private readonly INdtBundleTagPrinter _bundleTagPrinter;
     private readonly INetworkPrinterSender _networkPrinterSender;
     private readonly IZplGenerationToggle _zplToggle;
     private readonly IFormationChartProvider _formationChartProvider;
+    private readonly IPipeSizeProvider _pipeSizeProvider;
+    private readonly IActivePoPerMillService _activePoPerMill;
+    private readonly IPoEndWorkflowService _poEndWorkflow;
     private readonly ILogger<TestController> _logger;
     private readonly NdtBundleOptions _options;
 
     public TestController(
-        IBundleEngine bundleEngine,
-        IBundleOutputWriter outputWriter,
-        INdtBatchStateService batchState,
         IOptions<NdtBundleOptions> options,
         ILogger<TestController> logger,
         INdtBundleTagPrinter bundleTagPrinter,
         INetworkPrinterSender networkPrinterSender,
         IZplGenerationToggle zplToggle,
         IFormationChartProvider formationChartProvider,
+        IPipeSizeProvider pipeSizeProvider,
+        IActivePoPerMillService activePoPerMill,
+        IPoEndWorkflowService poEndWorkflow,
         ICurrentPoPlanService? currentPoPlanService = null)
     {
-        _bundleEngine = bundleEngine;
-        _outputWriter = outputWriter;
-        _batchState = batchState;
         _bundleTagPrinter = bundleTagPrinter;
         _networkPrinterSender = networkPrinterSender;
         _zplToggle = zplToggle;
         _formationChartProvider = formationChartProvider;
+        _pipeSizeProvider = pipeSizeProvider;
+        _activePoPerMill = activePoPerMill;
+        _poEndWorkflow = poEndWorkflow;
         _currentPoPlanService = currentPoPlanService;
         _logger = logger;
         _options = options.Value;
@@ -57,6 +57,13 @@ namespace NdtBundleService.Controllers;
     {
         public string PoNumber { get; set; } = string.Empty;
         public int MillNo { get; set; }
+    }
+
+    public sealed class BackfillBundleTotalsRequest
+    {
+        public string PoNumber { get; set; } = string.Empty;
+        public int MillNo { get; set; }
+        public bool DryRun { get; set; } = true;
     }
 
     public sealed class WipInfoDto
@@ -109,10 +116,8 @@ namespace NdtBundleService.Controllers;
     }
 
     /// <summary>
-    /// Simulate PO-end for a given PO number and mill.
-    /// Closes any partial bundle (e.g. 3 pipes when threshold is 10): prints a tag with that count and the next NDT Batch No.,
-    /// writes NDT_Bundle_*.csv and output slit CSVs, advances batch state, then advances to the new PO from the TM folder (PoPlanFolder).
-    /// Eventually the same logic will be triggered by a PLC PO-end signal.
+    /// Simulate PO-end for a given PO number and mill (1–4). Same workflow as a PLC PO-end: closes partial bundles, increments NDT batch state for that (PO, Mill),
+    /// and optional PO plan file advance when <c>NdtBundle:PlcPoEnd:AdvancePoPlanFileOnPoEnd</c> is true (normally false while testing without PLC).
     /// </summary>
     [HttpPost("po-end")]
     public async Task<IActionResult> SimulatePoEnd([FromBody] PoEndRequest request, CancellationToken cancellationToken)
@@ -120,31 +125,30 @@ namespace NdtBundleService.Controllers;
         if (string.IsNullOrWhiteSpace(request.PoNumber))
             return BadRequest(new { Message = "PoNumber is required." });
 
-        _logger.LogInformation("Simulating PO end for PO {PO} Mill {Mill}", request.PoNumber, request.MillNo);
+        if (request.MillNo is < 1 or > 4)
+            return BadRequest(new { Message = "MillNo must be between 1 and 4." });
 
-        await _bundleEngine.HandlePoEndAsync(
-            request.PoNumber,
-            request.MillNo,
-            async (contextRecord, batchNo, totalNdtPcs) =>
-            {
-                await _outputWriter.WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken).ConfigureAwait(false);
-                _logger.LogInformation(
-                    "SIMULATED PRINT (CSV exported): PO {PO} Mill {Mill} Batch {Batch} NdtPcs {Pcs}",
-                    request.PoNumber,
-                    request.MillNo,
-                    batchNo,
-                    totalNdtPcs);
-            },
-            cancellationToken).ConfigureAwait(false);
+        var po = InputSlitCsvParsing.NormalizePo(request.PoNumber.Trim());
+        var advancePlan = _options.PlcPoEnd?.AdvancePoPlanFileOnPoEnd == true && _currentPoPlanService != null;
 
-        // Advance batch state so the next file gets the next NDT Batch No after PO End.
-        await _batchState.IncrementBatchOnPoEndAsync(request.PoNumber, request.MillNo, cancellationToken).ConfigureAwait(false);
+        _logger.LogInformation("Simulating PO end for PO {PO} Mill {Mill} (advance PO plan file: {Advance})", po, request.MillNo, advancePlan);
 
-        // When PoPlanFolder is set: advance to next PO plan file so the next batch uses the next PO. (Eventually the same logic can be triggered by PLC signal.)
-        if (_currentPoPlanService != null)
-            await _currentPoPlanService.AdvanceToNextPoAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await _poEndWorkflow.ExecuteAsync(po, request.MillNo, advancePlan, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ArgumentOutOfRangeException ex)
+        {
+            return BadRequest(new { Message = ex.Message });
+        }
 
-        return Ok(new { Message = "PO end simulated.", request.PoNumber, request.MillNo });
+        return Ok(new
+        {
+            Message = "PO end simulated.",
+            PoNumber = po,
+            MillNo = request.MillNo,
+            AdvancedPoPlanFile = advancePlan
+        });
     }
 
     /// <summary>
@@ -272,7 +276,7 @@ namespace NdtBundleService.Controllers;
                 sourcePath = path;
             }
 
-            var slitPoByMill = await GetLatestPoPerMillFromSlitFolderAsync(cancellationToken).ConfigureAwait(false);
+            var slitPoByMill = await _activePoPerMill.GetLatestPoByMillAsync(cancellationToken).ConfigureAwait(false);
 
             var mills = new List<WipByMillRowDto>(4);
             for (var m = 1; m <= 4; m++)
@@ -313,7 +317,7 @@ namespace NdtBundleService.Controllers;
                 row.NdtPcsPerBundle = ResolveNdtPcsPerBundleFromChart(formation, pipeSize);
             }
 
-            var slitLocations = string.Join(" | ", GetInputSlitReadFolderPaths().Where(static p => !string.IsNullOrWhiteSpace(p)));
+            var slitLocations = string.Join(" | ", _activePoPerMill.GetInputSlitReadFolderPaths().Where(static p => !string.IsNullOrWhiteSpace(p)));
             var detail = $"WIP: {sourcePath}; current PO per mill from slit CSVs in: {slitLocations}";
             return Ok(new { Mills = mills, SourcePath = detail });
         }
@@ -337,243 +341,6 @@ namespace NdtBundleService.Controllers;
         target.PipeLength = source.PipeLength;
         target.PiecesPerBundle = source.PiecesPerBundle;
         target.TotalPieces = source.TotalPieces;
-    }
-
-    /// <summary>Latest PO per mill from slit inbox + optional accepted folder: files processed oldest→newest, rows top→bottom; last row wins per mill.</summary>
-    private async Task<Dictionary<int, string>> GetLatestPoPerMillFromSlitFolderAsync(CancellationToken cancellationToken)
-    {
-        // Fast path: read newest slit files first and stop when all 4 mills are found.
-        var fromLatestFiles = await GetLatestPoPerMillFromLatestFilesAsync(cancellationToken).ConfigureAwait(false);
-        if (fromLatestFiles.Count == 4)
-            return fromLatestFiles;
-
-        if (UseDatabaseForSummary)
-        {
-            var fromDb = await GetLatestPoPerMillFromDatabaseAsync(cancellationToken).ConfigureAwait(false);
-            if (fromDb.Count > 0)
-                return fromDb;
-        }
-
-        var result = new Dictionary<int, string>();
-        var files = GetEligibleInputSlitCsvFilesOrdered();
-        foreach (var fullPath in files)
-        {
-            await using var stream = System.IO.File.OpenRead(fullPath);
-            using var reader = new StreamReader(stream);
-
-            var headerLine = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
-            if (headerLine is null)
-                continue;
-
-            headerLine = InputSlitCsvParsing.StripBom(headerLine);
-            var headers = InputSlitCsvParsing.SplitCsvFields(headerLine);
-            var poIndex = InputSlitCsvParsing.HeaderIndex(headers, "PO Number", "PO_No", "PO No");
-            var millIndex = InputSlitCsvParsing.HeaderIndex(headers, "Mill No", "Mill Number");
-            if (poIndex < 0 || millIndex < 0)
-                continue;
-
-            while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
-            {
-                if (string.IsNullOrWhiteSpace(line))
-                    continue;
-                var cols = InputSlitCsvParsing.SplitCsvFields(line);
-                if (cols.Length == 0)
-                    continue;
-                string Get(int i) => i >= 0 && i < cols.Length ? cols[i].Trim() : string.Empty;
-                var millRaw = Get(millIndex);
-                if (!InputSlitCsvParsing.TryParseMillNo(millRaw, out var millNo))
-                    continue;
-                var po = Get(poIndex);
-                if (string.IsNullOrWhiteSpace(po))
-                    continue;
-                result[millNo] = InputSlitCsvParsing.NormalizePo(po);
-            }
-        }
-
-        return result;
-    }
-
-    /// <summary>
-    /// Reads newest eligible slit files first (descending LastWriteTimeUtc) and returns first PO seen per mill.
-    /// This reflects current running PO better than DB-import order when old files are reprocessed.
-    /// </summary>
-    private async Task<Dictionary<int, string>> GetLatestPoPerMillFromLatestFilesAsync(CancellationToken cancellationToken)
-    {
-        var result = new Dictionary<int, string>();
-        var minUtc = SourceFileEligibility.ParseMinUtc(_options);
-        const int maxFilesToScan = 300;
-
-        var files = new List<FileInfo>();
-        foreach (var folder in GetInputSlitReadFolderPaths())
-        {
-            if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
-                continue;
-            foreach (var file in Directory.EnumerateFiles(folder, "*.csv"))
-            {
-                var fi = new FileInfo(file);
-                if (SourceFileEligibility.IncludeFileUtc(fi.LastWriteTimeUtc, minUtc))
-                    files.Add(fi);
-            }
-        }
-
-        foreach (var fi in files
-                     .OrderByDescending(f => f.LastWriteTimeUtc)
-                     .ThenByDescending(f => f.FullName, StringComparer.OrdinalIgnoreCase)
-                     .Take(maxFilesToScan))
-        {
-            if (result.Count == 4)
-                break;
-            cancellationToken.ThrowIfCancellationRequested();
-
-            string[] lines;
-            try
-            {
-                lines = await System.IO.File.ReadAllLinesAsync(fi.FullName, cancellationToken).ConfigureAwait(false);
-            }
-            catch
-            {
-                continue;
-            }
-
-            if (lines.Length < 2)
-                continue;
-
-            var headerLine = InputSlitCsvParsing.StripBom(lines[0]);
-            var headers = InputSlitCsvParsing.SplitCsvFields(headerLine);
-            var poIndex = InputSlitCsvParsing.HeaderIndex(headers, "PO Number", "PO_No", "PO No");
-            var millIndex = InputSlitCsvParsing.HeaderIndex(headers, "Mill No", "Mill Number");
-            if (poIndex < 0 || millIndex < 0)
-                continue;
-
-            // Bottom-to-top in each file: "last row wins" for that file.
-            for (var i = lines.Length - 1; i >= 1; i--)
-            {
-                if (result.Count == 4)
-                    break;
-                var line = lines[i];
-                if (string.IsNullOrWhiteSpace(line))
-                    continue;
-
-                var cols = InputSlitCsvParsing.SplitCsvFields(line);
-                if (cols.Length == 0)
-                    continue;
-
-                string Get(int idx) => idx >= 0 && idx < cols.Length ? cols[idx].Trim() : string.Empty;
-                var millRaw = Get(millIndex);
-                if (!InputSlitCsvParsing.TryParseMillNo(millRaw, out var millNo))
-                    continue;
-                if (millNo < 1 || millNo > 4 || result.ContainsKey(millNo))
-                    continue;
-
-                var po = Get(poIndex);
-                if (string.IsNullOrWhiteSpace(po))
-                    continue;
-
-                result[millNo] = InputSlitCsvParsing.NormalizePo(po);
-            }
-        }
-
-        return result;
-    }
-
-    private async Task<Dictionary<int, string>> GetLatestPoPerMillFromDatabaseAsync(CancellationToken cancellationToken)
-    {
-        var result = new Dictionary<int, string>();
-        if (string.IsNullOrWhiteSpace(_options.ConnectionString))
-            return result;
-
-        try
-        {
-            var minUtc = SourceFileEligibility.ParseMinUtc(_options);
-            await using var conn = new SqlConnection(_options.ConnectionString);
-            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
-
-            const string sql = @"
-WITH Dedup AS
-(
-    SELECT
-        Mill_No,
-        PO_Number,
-        ImportedAtUtc,
-        Input_Slit_Row_ID,
-        ROW_NUMBER() OVER (
-            PARTITION BY Source_File, Source_Row_Number
-            ORDER BY ImportedAtUtc DESC, Input_Slit_Row_ID DESC
-        ) AS src_rn
-    FROM dbo.Input_Slit_Row
-    WHERE Mill_No BETWEEN 1 AND 4
-      AND PO_Number IS NOT NULL
-      AND LTRIM(RTRIM(PO_Number)) <> ''
-      AND Source_File IS NOT NULL
-      AND Source_Row_Number IS NOT NULL
-      AND (@MinUtc IS NULL OR ImportedAtUtc >= @MinUtc)
-),
-LatestByMill AS
-(
-    SELECT
-        Mill_No,
-        PO_Number,
-        ROW_NUMBER() OVER (PARTITION BY Mill_No ORDER BY ImportedAtUtc DESC, Input_Slit_Row_ID DESC) AS rn
-    FROM Dedup
-    WHERE src_rn = 1
-)
-SELECT Mill_No, PO_Number
-FROM LatestByMill
-WHERE rn = 1;";
-
-            await using var cmd = new SqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("@MinUtc", minUtc.HasValue ? (object)minUtc.Value : DBNull.Value);
-
-            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            {
-                var millNo = reader.IsDBNull(0) ? 0 : reader.GetInt32(0);
-                var po = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
-                if (millNo >= 1 && millNo <= 4 && !string.IsNullOrWhiteSpace(po))
-                    result[millNo] = InputSlitCsvParsing.NormalizePo(po);
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to read latest PO per mill from Input_Slit_Row; falling back to CSV scan.");
-        }
-
-        return result;
-    }
-
-    /// <summary>Inbox then accepted TM paths used for read-only slit CSV aggregation (same order as options).</summary>
-    private IEnumerable<string> GetInputSlitReadFolderPaths()
-    {
-        var inbox = _options.InputSlitFolder?.Trim();
-        if (!string.IsNullOrEmpty(inbox))
-            yield return inbox;
-        var accepted = _options.InputSlitAcceptedFolder?.Trim();
-        if (!string.IsNullOrEmpty(accepted))
-            yield return accepted;
-    }
-
-    /// <summary>All eligible <c>*.csv</c> files under inbox + accepted folders, ordered for stable &quot;last row wins&quot; semantics.</summary>
-    private List<string> GetEligibleInputSlitCsvFilesOrdered()
-    {
-        var minUtc = SourceFileEligibility.ParseMinUtc(_options);
-        var acc = new List<string>();
-        foreach (var folder in GetInputSlitReadFolderPaths())
-        {
-            if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
-                continue;
-            foreach (var file in Directory.EnumerateFiles(folder, "*.csv"))
-            {
-                if (SourceFileEligibility.IncludeFileUtc(System.IO.File.GetLastWriteTimeUtc(file), minUtc))
-                    acc.Add(file);
-            }
-        }
-
-        return acc
-            .Select(f => new FileInfo(f))
-            .OrderBy(f => f.LastWriteTimeUtc)
-            .ThenBy(f => f.FullName, StringComparer.OrdinalIgnoreCase)
-            .Select(f => f.FullName)
-            .ToList();
     }
 
     /// <summary>Merges data rows from one WIP CSV into <paramref name="byMill"/> (later calls / later rows overwrite same mill).</summary>
@@ -689,18 +456,12 @@ WHERE rn = 1;";
         return "NOTFOUND:" + path;
     }
 
-    /// <summary>Matches <see cref="NdtBundleEngine.ProcessSlitRecordAsync"/> formation lookup (size key, then Default, then minimum 10).</summary>
+    /// <summary>Matches <see cref="NdtBundleEngine.ProcessSlitRecordAsync"/> formation lookup (normalized pipe size, then Default, then minimum 10).</summary>
     private static int ResolveNdtPcsPerBundleFromChart(
         IReadOnlyDictionary<string, FormationChartEntry> formation,
         string pipeSize)
     {
-        pipeSize ??= string.Empty;
-        formation.TryGetValue(pipeSize, out var formationEntry);
-        formationEntry ??= formation.TryGetValue("Default", out var defaultEntry) ? defaultEntry : null;
-        var sizeThreshold = formationEntry?.RequiredNdtPcs ?? 0;
-        if (sizeThreshold <= 0)
-            sizeThreshold = 10;
-        return sizeThreshold;
+        return FormationChartLookup.ResolveThreshold(formation, pipeSize);
     }
 
     /// <summary>
@@ -730,7 +491,7 @@ WHERE rn = 1;";
             });
         }
 
-        var readFolders = GetInputSlitReadFolderPaths()
+        var readFolders = _activePoPerMill.GetInputSlitReadFolderPaths()
             .Where(static p => !string.IsNullOrWhiteSpace(p))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -823,9 +584,9 @@ WHERE rn = 1;";
     [HttpGet("ndt-summary-running-po")]
     public async Task<IActionResult> GetNdtSummaryForRunningPoByMill(CancellationToken cancellationToken)
     {
-        var latestPoByMill = await GetLatestPoPerMillFromSlitFolderAsync(cancellationToken).ConfigureAwait(false);
+        var latestPoByMill = await _activePoPerMill.GetLatestPoByMillAsync(cancellationToken).ConfigureAwait(false);
         var minUtc = SourceFileEligibility.ParseMinUtc(_options);
-        var readFolders = GetInputSlitReadFolderPaths()
+        var readFolders = _activePoPerMill.GetInputSlitReadFolderPaths()
             .Where(static p => !string.IsNullOrWhiteSpace(p))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -926,6 +687,174 @@ WHERE src_rn = 1;";
             _logger.LogWarning(ex, "DB summary query failed for PO {PO} Mill {Mill}; falling back to 0.", poNormalized, millNo);
             return 0;
         }
+    }
+
+    /// <summary>
+    /// One-time backfill: recompute bundle totals for one PO/mill from Input_Slit_Row and update NDT_Bundle rows.
+    /// Uses current formation-chart threshold logic and the same "include overshoot in closing bundle" rule as runtime.
+    /// </summary>
+    [HttpPost("backfill-bundle-totals")]
+    public async Task<IActionResult> BackfillBundleTotals([FromBody] BackfillBundleTotalsRequest request, CancellationToken cancellationToken)
+    {
+        if (request is null || string.IsNullOrWhiteSpace(request.PoNumber))
+            return BadRequest(new { Message = "PoNumber is required." });
+        if (request.MillNo is < 1 or > 4)
+            return BadRequest(new { Message = "MillNo must be between 1 and 4." });
+        if (!UseDatabaseForSummary)
+            return BadRequest(new { Message = "Backfill requires SQL mode (UseSqlServerForBundles=true and ConnectionString set)." });
+
+        var poRequested = request.PoNumber.Trim();
+        var poNormalized = InputSlitCsvParsing.NormalizePo(poRequested);
+        var minUtc = SourceFileEligibility.ParseMinUtc(_options);
+
+        var pipeSizeByPo = await _pipeSizeProvider.GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
+        pipeSizeByPo.TryGetValue(poNormalized, out var pipeSize);
+        var formation = await _formationChartProvider.GetFormationChartAsync(cancellationToken).ConfigureAwait(false);
+        var threshold = FormationChartLookup.ResolveThreshold(formation, pipeSize);
+
+        await using var conn = new SqlConnection(_options.ConnectionString);
+        await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+        // 1) Read deduplicated NDT pipes rows for this PO/mill from Input_Slit_Row.
+        var rowPipes = new List<int>();
+        const string sqlRows = @"
+WITH Dedup AS
+(
+    SELECT
+        NDT_Pipes,
+        ImportedAtUtc,
+        Source_File,
+        Source_Row_Number,
+        ROW_NUMBER() OVER (
+            PARTITION BY Source_File, Source_Row_Number
+            ORDER BY ImportedAtUtc DESC, Input_Slit_Row_ID DESC
+        ) AS src_rn
+    FROM dbo.Input_Slit_Row
+    WHERE (PO_Number = @PoRequested OR PO_Number = @PoNormalized)
+      AND Mill_No = @MillNo
+      AND (@MinUtc IS NULL OR ImportedAtUtc >= @MinUtc)
+      AND Source_File IS NOT NULL
+      AND Source_Row_Number IS NOT NULL
+)
+SELECT NDT_Pipes
+FROM Dedup
+WHERE src_rn = 1
+ORDER BY ImportedAtUtc, Source_File, Source_Row_Number;";
+        await using (var cmdRows = new SqlCommand(sqlRows, conn))
+        {
+            cmdRows.Parameters.AddWithValue("@PoRequested", poRequested);
+            cmdRows.Parameters.AddWithValue("@PoNormalized", poNormalized);
+            cmdRows.Parameters.AddWithValue("@MillNo", request.MillNo);
+            cmdRows.Parameters.AddWithValue("@MinUtc", minUtc.HasValue ? (object)minUtc.Value : DBNull.Value);
+            await using var r = await cmdRows.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await r.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var v = r.IsDBNull(0) ? 0 : r.GetInt32(0);
+                if (v > 0)
+                    rowPipes.Add(v);
+            }
+        }
+
+        // 2) Recompute bundle totals with runtime rule: close when threshold reached/exceeded, overshoot stays in that bundle.
+        var computedTotals = new List<int>();
+        var running = 0;
+        foreach (var p in rowPipes)
+        {
+            running += p;
+            if (running >= threshold)
+            {
+                computedTotals.Add(running);
+                running = 0;
+            }
+        }
+        if (running > 0)
+            computedTotals.Add(running);
+
+        // 3) Get existing bundle rows in sequence order for this PO/mill.
+        var existing = new List<(long Id, string BundleNo, int CurrentTotal)>();
+        const string sqlExisting = @"
+SELECT
+    NDTBundle_ID,
+    Bundle_No,
+    COALESCE(Total_NDT_Pcs, 0) AS Total_NDT_Pcs
+FROM dbo.NDT_Bundle
+WHERE (PO_Number = @PoRequested OR PO_Number = @PoNormalized)
+  AND Mill_No = @MillNo
+ORDER BY
+    TRY_CONVERT(int, RIGHT(Bundle_No, 5)),
+    Bundle_No;";
+        await using (var cmdExisting = new SqlCommand(sqlExisting, conn))
+        {
+            cmdExisting.Parameters.AddWithValue("@PoRequested", poRequested);
+            cmdExisting.Parameters.AddWithValue("@PoNormalized", poNormalized);
+            cmdExisting.Parameters.AddWithValue("@MillNo", request.MillNo);
+            await using var r = await cmdExisting.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await r.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                existing.Add((
+                    r.IsDBNull(0) ? 0L : Convert.ToInt64(r.GetValue(0)),
+                    r.IsDBNull(1) ? string.Empty : r.GetString(1),
+                    r.IsDBNull(2) ? 0 : r.GetInt32(2)));
+            }
+        }
+
+        var mapping = new List<object>();
+        var max = Math.Max(existing.Count, computedTotals.Count);
+        for (var i = 0; i < max; i++)
+        {
+            var hasDb = i < existing.Count;
+            var hasCalc = i < computedTotals.Count;
+            var newTotal = hasCalc ? computedTotals[i] : 0;
+            mapping.Add(new
+            {
+                Index = i + 1,
+                BundleNo = hasDb ? existing[i].BundleNo : "(no-db-row)",
+                BundleId = hasDb ? existing[i].Id : 0,
+                CurrentTotal = hasDb ? existing[i].CurrentTotal : 0,
+                NewTotal = newTotal
+            });
+        }
+
+        if (!request.DryRun)
+        {
+            const string sqlUpdate = @"UPDATE dbo.NDT_Bundle SET Total_NDT_Pcs = @NewTotal WHERE NDTBundle_ID = @Id;";
+            await using var tx = await conn.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await using var cmdUpd = new SqlCommand(sqlUpdate, conn, (SqlTransaction)tx);
+                cmdUpd.Parameters.Add("@NewTotal", System.Data.SqlDbType.Int);
+                cmdUpd.Parameters.Add("@Id", System.Data.SqlDbType.BigInt);
+                for (var i = 0; i < existing.Count; i++)
+                {
+                    var newTotal = i < computedTotals.Count ? computedTotals[i] : 0;
+                    cmdUpd.Parameters["@NewTotal"].Value = newTotal;
+                    cmdUpd.Parameters["@Id"].Value = existing[i].Id;
+                    await cmdUpd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                await tx.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                throw;
+            }
+        }
+
+        return Ok(new
+        {
+            Message = request.DryRun ? "Dry run completed. No DB changes applied." : "Backfill applied to NDT_Bundle.",
+            PoNumberRequested = poRequested,
+            PoNumberNormalized = poNormalized,
+            MillNo = request.MillNo,
+            PipeSize = pipeSize ?? string.Empty,
+            Threshold = threshold,
+            InputRowsUsed = rowPipes.Count,
+            ComputedBundleCount = computedTotals.Count,
+            ExistingBundleRows = existing.Count,
+            DryRun = request.DryRun,
+            Mapping = mapping
+        });
     }
 
     /// <summary>

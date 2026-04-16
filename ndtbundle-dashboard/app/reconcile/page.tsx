@@ -14,9 +14,11 @@ export default function ReconcilePage() {
   const [slitsLoading, setSlitsLoading] = useState(false);
   const [selectedSlitNo, setSelectedSlitNo] = useState("");
   const [newSlitNdtPipes, setNewSlitNdtPipes] = useState(0);
+  const [slitsMarkedForDelete, setSlitsMarkedForDelete] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [savingSlit, setSavingSlit] = useState(false);
+  const [deletingSlits, setDeletingSlits] = useState(false);
   const [printing, setPrinting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -33,6 +35,8 @@ export default function ReconcilePage() {
   const [stationPrintTag, setStationPrintTag] = useState(true);
   const [stationLoading, setStationLoading] = useState(false);
   const [stationReconciling, setStationReconciling] = useState(false);
+  /** Visual / Revisual physical station (1 or 2); used for API and CSV naming. */
+  const [stationOperatorNumber, setStationOperatorNumber] = useState<1 | 2>(1);
 
   const refresh = async () => {
     setLoading(true);
@@ -59,9 +63,11 @@ export default function ReconcilePage() {
       setSlits([]);
       setSelectedSlitNo("");
       setNewSlitNdtPipes(0);
+      setSlitsMarkedForDelete([]);
       return;
     }
 
+    setSlitsMarkedForDelete([]);
     setSlitsLoading(true);
     api
       .reconcileBundleSlits(selectedBatchNo)
@@ -94,6 +100,7 @@ export default function ReconcilePage() {
       setSlits([]);
       setSelectedSlitNo("");
       setNewSlitNdtPipes(0);
+      setSlitsMarkedForDelete([]);
     } else {
       setStationBatchNo("");
       setStationPoNumber(null);
@@ -115,10 +122,11 @@ export default function ReconcilePage() {
 
     const station =
       mode === "Visual" ? "Visual" : mode === "Revisual" ? "Revisual" : hydroType;
+    const opNum = mode === "Visual" || mode === "Revisual" ? stationOperatorNumber : 1;
 
     setStationLoading(true);
     try {
-      const ctx = await api.manualStationContext(station, batch);
+      const ctx = await api.manualStationContext(station, batch, opNum);
       setStationPoNumber(ctx.poNumber ?? null);
       setStationMillNo(typeof ctx.millNo === "number" ? ctx.millNo : null);
       setStationIncoming(typeof ctx.incomingPcs === "number" ? ctx.incomingPcs : null);
@@ -157,6 +165,7 @@ export default function ReconcilePage() {
 
     const station =
       mode === "Visual" ? "Visual" : mode === "Revisual" ? "Revisual" : hydroType;
+    const opNum = mode === "Visual" || mode === "Revisual" ? stationOperatorNumber : 1;
 
     setStationReconciling(true);
     try {
@@ -165,6 +174,7 @@ export default function ReconcilePage() {
         okPcs: stationOk,
         rejectedPcs: stationReject,
         printTag: stationPrintTag,
+        operatorStationNumber: opNum,
       });
       setSuccess(
         `${res.message ?? "Reconciled."}${res.csvPath ? ` | CSV: ${res.csvPath}` : ""}${res.printed ? " | Tag sent to printer." : ""}`
@@ -193,6 +203,64 @@ export default function ReconcilePage() {
       setError(e instanceof Error ? e.message : "Reconcile failed.");
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const slitValueForApi = (s: ReconcileSlitItem) => {
+    const n = (s.slitNo ?? "").trim();
+    return n === "" ? "—" : n;
+  };
+
+  const toggleSlitDeleteMark = (s: ReconcileSlitItem) => {
+    const v = slitValueForApi(s);
+    setSlitsMarkedForDelete((prev) => (prev.includes(v) ? prev.filter((k) => k !== v) : [...prev, v]));
+  };
+
+  const deleteMarkedSlits = async () => {
+    if (!selectedBatchNo.trim()) {
+      setError("Select a bundle.");
+      return;
+    }
+    const slitNos = [...slitsMarkedForDelete];
+    if (slitNos.length === 0) {
+      setError("Select at least one slit to delete.");
+      return;
+    }
+    if (
+      !window.confirm(
+        `Remove ${slitNos.length} slit row(s) from output CSV(s), delete matching Output_Slit_Row rows when configured (Input_Slit_Row is not changed), and update the bundle total? This cannot be undone.`
+      )
+    ) {
+      return;
+    }
+
+    setDeletingSlits(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const res = await api.reconcileDeleteSlits(selectedBatchNo.trim(), slitNos);
+      setSuccess(
+        res.message ??
+          `Removed ${typeof res.rowsRemoved === "number" ? res.rowsRemoved : slitNos.length} row(s). New bundle total: ${res.newBundleTotalNdtPcs ?? "—"}.`
+      );
+      setSlitsMarkedForDelete([]);
+      setSlitsLoading(true);
+      const details = await api.reconcileBundleSlits(selectedBatchNo.trim());
+      setSlits(Array.isArray(details?.slits) ? details.slits : []);
+      const firstSlit = (Array.isArray(details?.slits) ? details.slits : []).find((x) => (x.slitNo ?? "").trim() !== "");
+      if (firstSlit?.slitNo) {
+        setSelectedSlitNo(firstSlit.slitNo);
+        setNewSlitNdtPipes(typeof firstSlit.ndtPipes === "number" ? firstSlit.ndtPipes : 0);
+      } else {
+        setSelectedSlitNo("");
+        setNewSlitNdtPipes(0);
+      }
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Delete slits failed.");
+    } finally {
+      setSlitsLoading(false);
+      setDeletingSlits(false);
     }
   };
 
@@ -345,8 +413,32 @@ export default function ReconcilePage() {
           </div>
         )}
 
+        {(mode === "Visual" || mode === "Revisual") && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              {mode === "Visual" ? "Visual" : "Revisual"} station (for reconcile CSV / tag)
+            </label>
+            <select
+              value={stationOperatorNumber}
+              onChange={(e) => setStationOperatorNumber(Number(e.target.value) as 1 | 2)}
+              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500 max-w-xs"
+            >
+              <option value={1}>Station 1</option>
+              <option value={2}>Station 2</option>
+            </select>
+          </div>
+        )}
+
         {mode !== "OutputBundle" && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 pt-2">
+          <div
+            className={`grid grid-cols-1 gap-3 pt-2 ${mode === "Visual" || mode === "Revisual" ? "lg:grid-cols-4" : "lg:grid-cols-3"}`}
+          >
+            {(mode === "Visual" || mode === "Revisual") && (
+              <div className="rounded-md border border-gray-200 px-3 py-2 text-sm bg-gray-50">
+                <div className="text-gray-500">{mode === "Visual" ? "Visual" : "Revisual"} station no.</div>
+                <div className="font-semibold text-gray-900 tabular-nums">{stationOperatorNumber}</div>
+              </div>
+            )}
             <div className="rounded-md border border-gray-200 px-3 py-2 text-sm">
               <div className="text-gray-500">PO Number</div>
               <div className="font-medium text-gray-900">{stationPoNumber ?? "—"}</div>
@@ -490,6 +582,9 @@ export default function ReconcilePage() {
                 <table className="min-w-full divide-y divide-gray-200 text-sm">
                   <thead className="bg-gray-50">
                     <tr>
+                      <th className="px-2 py-2 w-10 text-left font-medium text-gray-500 uppercase text-xs" scope="col">
+                        Del
+                      </th>
                       <th className="px-3 py-2 text-left font-medium text-gray-500 uppercase text-xs">Slit No</th>
                       <th className="px-3 py-2 text-left font-medium text-gray-500 uppercase text-xs">NDT Pipes</th>
                     </tr>
@@ -505,6 +600,15 @@ export default function ReconcilePage() {
                           setNewSlitNdtPipes(typeof s.ndtPipes === "number" ? s.ndtPipes : 0);
                         }}
                       >
+                        <td className="px-2 py-2 align-middle" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 rounded border-gray-300"
+                            checked={slitsMarkedForDelete.includes(slitValueForApi(s))}
+                            onChange={() => toggleSlitDeleteMark(s)}
+                            aria-label={`Mark slit ${slitValueForApi(s)} for deletion`}
+                          />
+                        </td>
                         <td className="px-3 py-2 text-gray-900 font-medium">{s.slitNo ?? "—"}</td>
                         <td className="px-3 py-2 text-gray-700">{s.ndtPipes ?? 0}</td>
                       </tr>
@@ -558,6 +662,16 @@ export default function ReconcilePage() {
                   className="px-4 py-2 bg-primary-500 text-white text-sm font-medium rounded-md hover:bg-primary-600 disabled:opacity-50 disabled:pointer-events-none"
                 >
                   {savingSlit ? "Saving…" : "Save slit"}
+                </button>
+                <button
+                  type="button"
+                  onClick={deleteMarkedSlits}
+                  disabled={
+                    deletingSlits || !selectedBatchNo.trim() || slits.length === 0 || slitsMarkedForDelete.length === 0
+                  }
+                  className="px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-md hover:bg-red-700 disabled:opacity-50 disabled:pointer-events-none"
+                >
+                  {deletingSlits ? "Deleting…" : `Delete selected slit${slitsMarkedForDelete.length === 1 ? "" : "s"}`}
                 </button>
               </div>
             </div>

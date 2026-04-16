@@ -5,12 +5,12 @@ namespace NdtBundleService.Services;
 /// <summary>
 /// Builds ZPL for the full NDT bundle tag (Honeywell PD45S).
 /// Layout matches the physical NDT tag:
-/// - Top: QR code with NDT Batch Number and human readable text under it
+/// - Top: Code 128 barcode with NDT Batch Number (human-readable line printed by the barcode command)
 /// - Middle content (3 lines):
 ///   Mill, PO Number, NDT Batch Number on one line
 ///   Grade, Pipe Size, Pipe Length, Bundle/pipe weight on one line
 ///   Date, Number of NDT pipes, Pipe type/WIP/FG and optional "Reprint" on one line
-/// - Bottom: two stacked QR codes with the same NDT Batch Number.
+/// - Bottom: two stacked Code 128 barcodes with the same NDT Batch Number.
 /// </summary>
 public static class ZplNdtLabelBuilder
 {
@@ -52,13 +52,9 @@ public static class ZplNdtLabelBuilder
         var y = 40;
         var lineHeight = 34;
 
-        // Top: QR code (ZPL ^BQ) with NDT Batch Number; human-readable text below.
-        // ^BQN,2,m = Model 2, module size m. Field data: MA, = medium error correction + automatic input, then payload.
-        zpl.AppendFormat("^FO220,{0}^BQN,2,6^FDMA,{1}^FS", y, escapedBatch);
-        y += 140;
-        // Centered human-readable batch below QR
-        zpl.AppendFormat("^FO80,{0}^FB640,1,0,C,0^FD{1}^FS", y, escapedBatch);
-        y += lineHeight + 20;
+        // Top: Code 128 (^BC). ^BY = module width; ^BCN,h,f,g,e = normal orientation, bar height, interpretation line below/above, UCC mode.
+        zpl.AppendFormat("^FO80,{0}^BY3^BCN,100,Y,N,N^FD{1}^FS", y, escapedBatch);
+        y += 130;
 
         // Middle content – line 1: Mill, PO, Bund (NDT Batch No), centered
         zpl.AppendFormat("^FO80,{0}^FB640,1,0,C,0^FDMill- {1}  PO: {2}  Bund: {3}^FS", y, millNo, escapedPo, escapedBatch);
@@ -93,12 +89,12 @@ public static class ZplNdtLabelBuilder
             typeText,
             reprintText);
 
-        // Bottom: two stacked QR codes with the same NDT Batch Number.
-        var bottomY1 = LabelLengthDots - 360;
-        var bottomY2 = bottomY1 + 130;
+        // Bottom: two stacked Code 128 barcodes with the same NDT Batch Number.
+        var bottomY1 = LabelLengthDots - 280;
+        var bottomY2 = bottomY1 + 120;
 
-        zpl.AppendFormat("^FO220,{0}^BQN,2,5^FDMA,{1}^FS", bottomY1, escapedBatch);
-        zpl.AppendFormat("^FO220,{0}^BQN,2,5^FDMA,{1}^FS", bottomY2, escapedBatch);
+        zpl.AppendFormat("^FO80,{0}^BY2^BCN,80,Y,N,N^FD{1}^FS", bottomY1, escapedBatch);
+        zpl.AppendFormat("^FO80,{0}^BY2^BCN,80,Y,N,N^FD{1}^FS", bottomY2, escapedBatch);
 
         zpl.Append("^XZ");
         return Encoding.UTF8.GetBytes(zpl.ToString());

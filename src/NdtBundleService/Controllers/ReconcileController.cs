@@ -15,6 +15,7 @@ namespace NdtBundleService.Controllers;
 public sealed class ReconcileController : ControllerBase
 {
     private readonly INdtBundleRepository _bundleRepository;
+    private readonly ITraceabilityRepository _traceability;
     private readonly IFormationChartProvider _formationChartProvider;
     private readonly IPipeSizeProvider _pipeSizeProvider;
     private readonly IWipLabelProvider _wipLabelProvider;
@@ -25,6 +26,7 @@ public sealed class ReconcileController : ControllerBase
 
     public ReconcileController(
         INdtBundleRepository bundleRepository,
+        ITraceabilityRepository traceability,
         IFormationChartProvider formationChartProvider,
         IPipeSizeProvider pipeSizeProvider,
         IWipLabelProvider wipLabelProvider,
@@ -34,6 +36,7 @@ public sealed class ReconcileController : ControllerBase
         ILogger<ReconcileController> logger)
     {
         _bundleRepository = bundleRepository;
+        _traceability = traceability;
         _formationChartProvider = formationChartProvider;
         _pipeSizeProvider = pipeSizeProvider;
         _wipLabelProvider = wipLabelProvider;
@@ -105,11 +108,7 @@ public sealed class ReconcileController : ControllerBase
         IReadOnlyDictionary<string, FormationChartEntry> formation)
     {
         pipeSizes.TryGetValue(poNumber, out var pipeSize);
-        pipeSize ??= string.Empty;
-        formation.TryGetValue(pipeSize, out var entry);
-        entry ??= formation.TryGetValue("Default", out var defaultEntry) ? defaultEntry : null;
-        var threshold = entry?.RequiredNdtPcs ?? 10;
-        return threshold <= 0 ? 10 : threshold;
+        return FormationChartLookup.ResolveThreshold(formation, pipeSize);
     }
 
     private static int ParseBatchSequence(string bundleNo)
@@ -228,6 +227,52 @@ public sealed class ReconcileController : ControllerBase
     }
 
     /// <summary>
+    /// Removes selected slit row(s) for a bundle from per-slit output CSVs (deletes the file when no data rows remain),
+    /// deletes matching Output_Slit_Row traceability rows when SQL is configured (Input_Slit_Row is unchanged), and recomputes bundle total.
+    /// </summary>
+    [HttpPost("delete-slits")]
+    public async Task<IActionResult> DeleteSlits([FromBody] DeleteSlitsRequest request, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.NdtBatchNo))
+            return BadRequest(new { Message = "NdtBatchNo is required." });
+        if (request.SlitNos is null || request.SlitNos.Count == 0)
+            return BadRequest(new { Message = "At least one SlitNo is required." });
+
+        var batchNo = request.NdtBatchNo.Trim();
+        var bundle = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
+        if (bundle is null)
+            return NotFound(new { Message = $"Bundle {batchNo} not found." });
+
+        var (rowsRemoved, traceRefs) = await _bundleRepository
+            .DeletePerSlitOutputRowsForBatchSlitsAsync(batchNo, request.SlitNos, cancellationToken)
+            .ConfigureAwait(false);
+        if (rowsRemoved == 0)
+            return NotFound(new { Message = $"No per-slit output rows found for bundle {batchNo} and the selected slit(s)." });
+
+        await _traceability.DeleteOutputSlitRowsForRemovedOutputLinesAsync(batchNo, traceRefs, cancellationToken).ConfigureAwait(false);
+
+        var slits = await _bundleRepository.GetSlitsForBatchAsync(batchNo, cancellationToken).ConfigureAwait(false);
+        var newTotal = slits.Sum(s => s.NdtPipes);
+
+        await _bundleRepository.UpdateBundleTotalInDatabaseAsync(batchNo, newTotal, cancellationToken).ConfigureAwait(false);
+        var summaryUpdated = await _bundleRepository.UpdateBundleSummaryCsvAsync(batchNo, newTotal, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation(
+            "Deleted {RowsRemoved} slit output row(s) for bundle {BatchNo}; trace refs {TraceCount}; new total {NewTotal}.",
+            rowsRemoved, batchNo, traceRefs.Count, newTotal);
+
+        return Ok(new
+        {
+            Message = "Selected slit row(s) removed from output CSV(s); Output_Slit_Row entries removed where configured (Input_Slit_Row unchanged); bundle total updated.",
+            NdtBatchNo = batchNo,
+            RowsRemoved = rowsRemoved,
+            NewBundleTotalNdtPcs = newTotal,
+            BundleSummaryUpdated = summaryUpdated,
+            Slits = slits.Select(s => new { SlitNo = s.SlitNo, NdtPipes = s.NdtPipes }).ToList()
+        });
+    }
+
+    /// <summary>
     /// Print the selected bundle with its current (reconciled) NDT pipe count as a ZPL tag (with "Reprint" on the label).
     /// </summary>
     [HttpPost("print-bundle")]
@@ -303,5 +348,11 @@ public sealed class ReconcileController : ControllerBase
         public string NdtBatchNo { get; set; } = string.Empty;
         public string SlitNo { get; set; } = string.Empty;
         public int NewNdtPipes { get; set; }
+    }
+
+    public sealed class DeleteSlitsRequest
+    {
+        public string NdtBatchNo { get; set; } = string.Empty;
+        public List<string> SlitNos { get; set; } = new();
     }
 }
