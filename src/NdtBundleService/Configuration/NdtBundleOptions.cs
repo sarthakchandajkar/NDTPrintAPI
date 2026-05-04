@@ -14,14 +14,8 @@ public class NdtBundleOptions
     /// <summary>Folder where output bundle CSV files (with NDT_Batch_No) are written.</summary>
     public string OutputBundleFolder { get; set; } = string.Empty;
 
-    /// <summary>Folder where operator-printed Visual NDT output CSV files are written.</summary>
-    public string VisualNdtOutputFolder { get; set; } = @"Z:\To SAP\TM\NDT\Visual\Bundle";
-
-    /// <summary>Folder where operator-printed Hydrotesting NDT output CSV files are written.</summary>
-    public string HydrotestingNdtOutputFolder { get; set; } = @"Z:\To SAP\TM\NDT\Hydrotesting\Bundle";
-
-    /// <summary>Folder where operator-printed Revisual NDT output CSV files are written.</summary>
-    public string RevisualNdtOutputFolder { get; set; } = @"Z:\To SAP\TM\NDT\Re-Visual\Bundle";
+    /// <summary>Folder for the single consolidated NDT process CSV (after Revisual) and ZPL previews for manual stations.</summary>
+    public string NdtProcessOutputFolder { get; set; } = @"D:\NDT\NDT Bundles";
 
     /// <summary>Folder where PO Plan (WIP) CSV files are dropped from SAP (e.g. D:\NDT\From SAP\TM). When set, one file is used as current PO plan; advance to next file only on PO End. If empty, single-file paths below are used.</summary>
     public string PoPlanFolder { get; set; } = string.Empty;
@@ -62,8 +56,8 @@ public class NdtBundleOptions
     /// <summary>When true, the service writes NDT_Bundle_*.csv summary files in OutputBundleFolder. When false, these summary files are skipped while other CSV flows continue.</summary>
     public bool EnableBundleSummaryCsvFiles { get; set; } = true;
 
-    /// <summary>Folder where NDT_Bundle_*.csv summary files are written and read for Printed Tags totals.</summary>
-    public string BundleSummaryOutputFolder { get; set; } = @"D:\NDT\NDT Bundles Generated";
+    /// <summary>When <see cref="EnableBundleSummaryCsvFiles"/> is true, folder for NDT_Bundle_*.csv summaries; when empty, falls back to <see cref="OutputBundleFolder"/>. Also used when scanning CSVs for bundle list if not using SQL.</summary>
+    public string BundleSummaryOutputFolder { get; set; } = string.Empty;
 
     /// <summary>Folder where Upload NDT Bundle Files CSV output is written.</summary>
     public string UploadNdtBundleFilesFolder { get; set; } = @"Z:\To SAP\TM\NDT\MES PAS NDT\Bundle";

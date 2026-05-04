@@ -36,10 +36,10 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
 
     public async Task<UploadNdtBundleGenerationResult> GenerateAsync(CancellationToken cancellationToken)
     {
-        var revisualFolder = (_options.RevisualNdtOutputFolder ?? string.Empty).Trim();
+        var ndtProcessFolder = (_options.NdtProcessOutputFolder ?? string.Empty).Trim();
         var uploadFolder = (_options.UploadNdtBundleFilesFolder ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(revisualFolder) || !Directory.Exists(revisualFolder))
-            throw new InvalidOperationException("Revisual output folder is not configured or does not exist.");
+        if (string.IsNullOrWhiteSpace(ndtProcessFolder) || !Directory.Exists(ndtProcessFolder))
+            throw new InvalidOperationException("NdtProcessOutputFolder is not configured or does not exist.");
         if (string.IsNullOrWhiteSpace(uploadFolder))
             throw new InvalidOperationException("UploadNdtBundleFilesFolder is not configured.");
 
@@ -54,7 +54,8 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
         string? firstBatch = null;
         int? firstMill = null;
 
-        var revisualFiles = Directory.EnumerateFiles(revisualFolder, "*.csv")
+        var revisualFiles = Directory.EnumerateFiles(ndtProcessFolder, "*.csv")
+            .Where(p => Path.GetFileName(p).StartsWith("NDT process_", StringComparison.OrdinalIgnoreCase))
             .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
@@ -67,7 +68,7 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
                 if (lines.Length < 2)
                     continue;
 
-                // Revisual station files are written as 2 lines: header + one data row.
+                // Consolidated NDT process CSV: header + one data row (final OK count at column index 3).
                 // Be defensive and use the last non-empty line as the data row.
                 var dataLine = lines
                     .LastOrDefault(static line => !string.IsNullOrWhiteSpace(line));
@@ -138,7 +139,7 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Skipping revisual CSV {File} during upload bundle generation.", file);
+                _logger.LogWarning(ex, "Skipping NDT process CSV {File} during upload bundle generation.", file);
             }
         }
 

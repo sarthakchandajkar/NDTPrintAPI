@@ -74,7 +74,7 @@ public sealed class ManualStationRecordResult
 
 /// <summary>
 /// Manual tag printing for Visual/Hydrotesting/Revisual stations.
-/// Generates a unique NDT Batch Number, prints a ZPL tag, and writes a station CSV to the configured output folder.
+/// Writes one consolidated CSV in <see cref="NdtBundleOptions.NdtProcessOutputFolder"/> after Revisual completes (not per station).
 /// </summary>
 public sealed class ManualNdtTagService : IManualNdtTagService
 {
@@ -168,12 +168,13 @@ public sealed class ManualNdtTagService : IManualNdtTagService
 
         await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
 
-        var folder = GetFolder(request.Station);
-        Directory.CreateDirectory(folder);
-        var fileNameStation = FileNameStationSegment(request.Station, state.MillNo, opStation);
-        var csvPath = await WriteCsvAsync(folder, request.Station, fileNameStation, opStation, state.PoNumber, batch, incoming, request.OkPcs, request.RejectedPcs, start, end, cancellationToken).ConfigureAwait(false);
-        SetLastCsvPath(state, request.Station, csvPath);
-        await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
+        string? csvPath = null;
+        if (request.Station == ManualTagStation.Revisual)
+        {
+            csvPath = await WriteConsolidatedNdtProcessCsvAsync(state, cancellationToken).ConfigureAwait(false);
+            state.LastNdtProcessCsvPath = csvPath;
+            await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
+        }
 
         // Best-effort SQL traceability; do not fail the station flow if SQL is down.
         await _traceability.RecordManualStationRunAsync(
@@ -186,7 +187,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             start: start,
             end: end,
             hydrotestingType: IsHydroStation(request.Station) ? HydrotestingTypeValue(request.Station) : null,
-            sourceFile: csvPath,
+            sourceFile: csvPath ?? string.Empty,
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         var printed = false;
@@ -203,7 +204,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             OkPcs = request.OkPcs,
             RejectedPcs = request.RejectedPcs,
             OutgoingPcs = request.OkPcs,
-            CsvPath = csvPath,
+            CsvPath = csvPath ?? string.Empty,
             Printed = printed
         };
     }
@@ -234,28 +235,25 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         switch (request.Station)
         {
             case ManualTagStation.Visual:
-                TryDeleteCsv(state.LastCsvPathVisual);
-                TryDeleteCsv(state.LastCsvPathHydro);
-                TryDeleteCsv(state.LastCsvPathRevisual);
+                TryDeleteCsv(state.LastNdtProcessCsvPath);
                 state.Hydrotesting = null;
                 state.Revisual = null;
-                state.LastCsvPathHydro = null;
-                state.LastCsvPathRevisual = null;
+                state.LastNdtProcessCsvPath = null;
                 state.HydroInvalidatedByVisualReconcile = true;
                 state.RevisualInvalidatedByUpstreamReconcile = true;
                 break;
             case ManualTagStation.Hydrotesting:
             case ManualTagStation.FourHeadHydrotesting:
             case ManualTagStation.BigHydrotesting:
-                TryDeleteCsv(state.LastCsvPathHydro);
-                TryDeleteCsv(state.LastCsvPathRevisual);
+                TryDeleteCsv(state.LastNdtProcessCsvPath);
                 state.Revisual = null;
-                state.LastCsvPathRevisual = null;
+                state.LastNdtProcessCsvPath = null;
                 state.HydroInvalidatedByVisualReconcile = false;
                 state.RevisualInvalidatedByUpstreamReconcile = true;
                 break;
             case ManualTagStation.Revisual:
-                TryDeleteCsv(state.LastCsvPathRevisual);
+                TryDeleteCsv(state.LastNdtProcessCsvPath);
+                state.LastNdtProcessCsvPath = null;
                 state.RevisualInvalidatedByUpstreamReconcile = false;
                 break;
         }
@@ -271,12 +269,13 @@ public sealed class ManualNdtTagService : IManualNdtTagService
 
         await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
 
-        var folder = GetFolder(request.Station);
-        Directory.CreateDirectory(folder);
-        var fileNameStation = FileNameStationSegment(request.Station, state.MillNo, opStation);
-        var csvPath = await WriteCsvAsync(folder, request.Station, fileNameStation, opStation, state.PoNumber, batch, incoming, request.OkPcs, request.RejectedPcs, start, end, cancellationToken).ConfigureAwait(false);
-        SetLastCsvPath(state, request.Station, csvPath);
-        await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
+        string? csvPath = null;
+        if (request.Station == ManualTagStation.Revisual)
+        {
+            csvPath = await WriteConsolidatedNdtProcessCsvAsync(state, cancellationToken).ConfigureAwait(false);
+            state.LastNdtProcessCsvPath = csvPath;
+            await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
+        }
 
         var printed = false;
         if (request.PrintTag)
@@ -292,7 +291,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             OkPcs = request.OkPcs,
             RejectedPcs = request.RejectedPcs,
             OutgoingPcs = request.OkPcs,
-            CsvPath = csvPath,
+            CsvPath = csvPath ?? string.Empty,
             Printed = printed
         };
     }
@@ -306,24 +305,11 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         return value;
     }
 
-    /// <summary>Segment used in CSV filename (Visual/Revisual: operator station 1–2; hydro: mill no).</summary>
-    private static int FileNameStationSegment(ManualTagStation station, int millNo, int operatorStationNumber) =>
-        station is ManualTagStation.Visual or ManualTagStation.Revisual ? operatorStationNumber : millNo;
-
-    private string GetFolder(ManualTagStation station)
+    private string GetNdtProcessOutputFolder()
     {
-        var folder = station switch
-        {
-            ManualTagStation.Visual => (_options.VisualNdtOutputFolder ?? string.Empty).Trim(),
-            ManualTagStation.Hydrotesting or ManualTagStation.FourHeadHydrotesting or ManualTagStation.BigHydrotesting =>
-                (_options.HydrotestingNdtOutputFolder ?? string.Empty).Trim(),
-            ManualTagStation.Revisual => (_options.RevisualNdtOutputFolder ?? string.Empty).Trim(),
-            _ => (_options.OutputBundleFolder ?? string.Empty).Trim()
-        };
-
+        var folder = (_options.NdtProcessOutputFolder ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(folder))
-            throw new InvalidOperationException($"Output folder is not configured for station {StationName(station)}.");
-
+            throw new InvalidOperationException("NdtProcessOutputFolder is not configured.");
         return folder;
     }
 
@@ -372,78 +358,43 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             _ => ""
         };
 
-    /// <summary>Filename segment for hydro type (no spaces).</summary>
-    private static string HydrotestingTypeFileToken(ManualTagStation station) =>
-        station switch
-        {
-            ManualTagStation.FourHeadHydrotesting => "FourHeadHydrotesting",
-            ManualTagStation.BigHydrotesting => "BigHydrotesting",
-            ManualTagStation.Hydrotesting => "Hydrotesting",
-            _ => "Hydrotesting"
-        };
-
-    private async Task<string> WriteCsvAsync(string folder, ManualTagStation station, int fileNameStationSegment, int operatorStationNumber, string poNumber, string ndtBatchNo, int incomingPcs, int okPcs, int rejectedPcs, DateTime start, DateTime end, CancellationToken cancellationToken)
+    /// <summary>Single CSV after Revisual with Visual/Hydro/Revisual metrics; PO and batch tokens sanitized for the filename.</summary>
+    private async Task<string> WriteConsolidatedNdtProcessCsvAsync(FlowState state, CancellationToken cancellationToken)
     {
+        var visual = state.Visual ?? throw new InvalidOperationException("Visual station must be recorded before exporting NDT process CSV.");
+        var hydro = state.Hydrotesting ?? throw new InvalidOperationException("Hydrotesting station must be recorded before exporting NDT process CSV.");
+        var revisual = state.Revisual ?? throw new InvalidOperationException("Revisual station must be recorded before exporting NDT process CSV.");
+
+        var folder = GetNdtProcessOutputFolder();
+        Directory.CreateDirectory(folder);
+
         var now = DateTime.Now;
         var datePart = now.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
         var timePart = now.ToString("HHmmss", CultureInfo.InvariantCulture);
-        var safePo = CsvOutputFileNaming.SanitizeToken(poNumber.Trim());
-        var safeBatch = CsvOutputFileNaming.SanitizeToken(ndtBatchNo);
-        // Visual: Visual_StationNumber_PONumber_NDT Bundle Number_Date_Time.csv (date = yyyyMMdd, time = HHmmss)
-        // Hydrotesting: HydrotestingType_PONumber_NDT Bundle Number_Date_Time.csv
-        // Revisual: Revisual_StationNumber_PONumber_NDT Bundle Number_Date_Time.csv
-        var fileName = station switch
-        {
-            ManualTagStation.Visual =>
-                $"Visual_{operatorStationNumber}_{safePo}_{safeBatch}_{datePart}_{timePart}.csv",
-            ManualTagStation.Revisual =>
-                $"Revisual_{operatorStationNumber}_{safePo}_{safeBatch}_{datePart}_{timePart}.csv",
-            ManualTagStation.Hydrotesting or ManualTagStation.FourHeadHydrotesting or ManualTagStation.BigHydrotesting =>
-                $"{HydrotestingTypeFileToken(station)}_{safePo}_{safeBatch}_{datePart}_{timePart}.csv",
-            _ =>
-                $"{StationName(station)}_{fileNameStationSegment}_{safePo}_{safeBatch}_{datePart}_{timePart}.csv"
-        };
+        var safePo = CsvOutputFileNaming.SanitizeToken(state.PoNumber.Trim());
+        var safeBatch = CsvOutputFileNaming.SanitizeToken(state.NdtBatchNo);
+        var fileName = $"NDT process_{safePo}_{safeBatch}_{datePart}_{timePart}.csv";
         var path = Path.Combine(folder, fileName);
 
-        // Visual / Revisual: PO Number, NDT BATCH NO, NDT Pcs, OK, Reject, Work Station, Bundle Start, Bundle End
-        // Hydrotesting (+ Four Head / Big): same + trailing "Hydrotesting Type"
-        var header = "PO Number,NDT BATCH NO,NDT Pcs,OK,Reject,Work Station,Bundle Start,Bundle End";
-        if (IsHydroStation(station))
-            header += ",Hydrotesting Type";
-
+        const string header = "PO Number,NDT BATCH NO,NDT Pcs,OK,Visual Reject,Hydrotest Reject,Re visual Reject,Bundle Start,Bundle End";
         var row = string.Join(",",
-            Escape(poNumber.Trim()),
-            Escape(ndtBatchNo),
-            incomingPcs.ToString(CultureInfo.InvariantCulture),
-            okPcs.ToString(CultureInfo.InvariantCulture),
-            rejectedPcs.ToString(CultureInfo.InvariantCulture),
-            Escape(WorkStationColumnValue(station, operatorStationNumber)),
-            Escape(start.ToString("O", CultureInfo.InvariantCulture)),
-            Escape(end.ToString("O", CultureInfo.InvariantCulture)));
-        if (IsHydroStation(station))
-            row += "," + Escape(HydrotestingTypeValue(station));
+            Escape(state.PoNumber.Trim()),
+            Escape(state.NdtBatchNo),
+            state.InitialPcs.ToString(CultureInfo.InvariantCulture),
+            revisual.OkPcs.ToString(CultureInfo.InvariantCulture),
+            visual.RejectedPcs.ToString(CultureInfo.InvariantCulture),
+            hydro.RejectedPcs.ToString(CultureInfo.InvariantCulture),
+            revisual.RejectedPcs.ToString(CultureInfo.InvariantCulture),
+            Escape(FormatBundleDateTime(visual.StartTime)),
+            Escape(FormatBundleDateTime(revisual.EndTime)));
+
         await File.WriteAllLinesAsync(path, new[] { header, row }, cancellationToken).ConfigureAwait(false);
-        _logger.LogInformation("Wrote manual station CSV: {Path}", path);
+        _logger.LogInformation("Wrote consolidated NDT process CSV: {Path}", path);
         return path;
     }
 
-    private static void SetLastCsvPath(FlowState state, ManualTagStation station, string path)
-    {
-        switch (station)
-        {
-            case ManualTagStation.Visual:
-                state.LastCsvPathVisual = path;
-                break;
-            case ManualTagStation.Hydrotesting:
-            case ManualTagStation.FourHeadHydrotesting:
-            case ManualTagStation.BigHydrotesting:
-                state.LastCsvPathHydro = path;
-                break;
-            case ManualTagStation.Revisual:
-                state.LastCsvPathRevisual = path;
-                break;
-        }
-    }
+    private static string FormatBundleDateTime(DateTime dt) =>
+        dt.ToString("dd.MM.yyyy HH:mm:ss", CultureInfo.InvariantCulture);
 
     private void TryDeleteCsv(string? path)
     {
@@ -503,9 +454,15 @@ public sealed class ManualNdtTagService : IManualNdtTagService
     {
         try
         {
-            var folder = GetFolder(station);
-            if (string.IsNullOrWhiteSpace(folder))
+            string folder;
+            try
+            {
+                folder = GetNdtProcessOutputFolder();
+            }
+            catch (InvalidOperationException)
+            {
                 return;
+            }
 
             Directory.CreateDirectory(folder);
             var stationTag = station is ManualTagStation.Visual or ManualTagStation.Revisual
@@ -643,10 +600,8 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         public StationRecord? Hydrotesting { get; set; }
         public StationRecord? Revisual { get; set; }
 
-        /// <summary>Last written CSV for this station (for replace-on-reconcile).</summary>
-        public string? LastCsvPathVisual { get; set; }
-        public string? LastCsvPathHydro { get; set; }
-        public string? LastCsvPathRevisual { get; set; }
+        /// <summary>Last consolidated NDT process CSV (replace/delete on reconcile).</summary>
+        public string? LastNdtProcessCsvPath { get; set; }
 
         /// <summary>Set when Visual is reconciled until Hydro is saved again.</summary>
         public bool HydroInvalidatedByVisualReconcile { get; set; }
