@@ -1,6 +1,8 @@
 -- =============================================================================
 -- NDT Bundle traceability schema (SQL Server)
--- Run in SSMS after: CREATE DATABASE NDTBundle;  USE NDTBundle;
+-- Run in SSMS against the target database, e.g.:
+--   Dev:  CREATE DATABASE JazeeraMES_Dev;  USE JazeeraMES_Dev;   (requires permission; or use an existing DB)
+--   Prod: CREATE DATABASE JazeeraMES_Prod; USE JazeeraMES_Prod;
 -- Idempotent: skips tables that already exist.
 -- =============================================================================
 
@@ -219,5 +221,31 @@ BEGIN
     CREATE INDEX IX_Pipeline_Event_Bundle ON dbo.Pipeline_Event (Bundle_No);
     CREATE INDEX IX_Pipeline_Event_Time ON dbo.Pipeline_Event (OccurredAtUtc);
     CREATE INDEX IX_Pipeline_Event_Step ON dbo.Pipeline_Event (Step_Code, OccurredAtUtc);
+END
+GO
+
+-- -----------------------------------------------------------------------------
+-- 10. NDT_Process_Consolidated — one row per NDT process CSV (after Revisual)
+--     Matches file columns: PO, batch, NDT Pcs, OK, Visual/Hydro/Revisual rejects, bundle start/end.
+-- -----------------------------------------------------------------------------
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'NDT_Process_Consolidated' AND schema_id = SCHEMA_ID('dbo'))
+BEGIN
+    CREATE TABLE dbo.NDT_Process_Consolidated (
+        NDT_Process_Consolidated_ID BIGINT         IDENTITY(1,1) NOT NULL PRIMARY KEY,
+        PO_Number                 NVARCHAR(30)   NOT NULL,
+        NDT_Batch_No              NVARCHAR(20)   NOT NULL,
+        NDT_Pcs                   INT            NOT NULL,
+        OK_Pcs                    INT            NOT NULL,
+        Visual_Reject             INT            NOT NULL,
+        Hydrotest_Reject          INT            NOT NULL,
+        Revisual_Reject           INT            NOT NULL,
+        Bundle_Start              DATETIME2(2)   NOT NULL,
+        Bundle_End                DATETIME2(2)   NOT NULL,
+        Output_File               NVARCHAR(500)  NULL,
+        CreatedAtUtc              DATETIME2(2)   NOT NULL CONSTRAINT DF_NDT_Process_Consolidated_CreatedAtUtc DEFAULT (SYSUTCDATETIME())
+    );
+
+    CREATE INDEX IX_NDT_Process_Consolidated_Batch ON dbo.NDT_Process_Consolidated (NDT_Batch_No);
+    CREATE INDEX IX_NDT_Process_Consolidated_PO ON dbo.NDT_Process_Consolidated (PO_Number);
 END
 GO

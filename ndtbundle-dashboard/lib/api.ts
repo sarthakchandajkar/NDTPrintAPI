@@ -5,7 +5,7 @@ function getBaseUrl(): string {
     // Empty = same origin; Next.js rewrites /api/* to http://localhost:5000 (no CORS).
     return process.env.NEXT_PUBLIC_API_BASE ?? "";
   }
-  return process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:5000";
+  return process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:5000";
 }
 
 export function setApiBase(base: string): void {

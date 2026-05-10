@@ -1,0 +1,15 @@
+{
+  "name": "plc-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mill-3 Siemens S7-300 live read bridge (nodes7 + Socket.IO)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "nodes7": "^0.3.18",
+    "socket.io": "^4.8.1"
+  }
+}

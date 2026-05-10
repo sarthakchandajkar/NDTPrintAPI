@@ -4,7 +4,7 @@ const nextConfig = {
   async rewrites() {
     // Proxy /api to the backend so the browser makes same-origin requests (no CORS).
     return [
-      { source: "/api/:path*", destination: "http://localhost:5000/api/:path*" },
+      { source: "/api/:path*", destination: "http://127.0.0.1:5000/api/:path*" },
     ];
   },
 };

@@ -174,6 +174,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             csvPath = await WriteConsolidatedNdtProcessCsvAsync(state, cancellationToken).ConfigureAwait(false);
             state.LastNdtProcessCsvPath = csvPath;
             await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
+            await RecordConsolidatedTraceabilityAsync(state, csvPath, cancellationToken).ConfigureAwait(false);
         }
 
         // Best-effort SQL traceability; do not fail the station flow if SQL is down.
@@ -275,7 +276,21 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             csvPath = await WriteConsolidatedNdtProcessCsvAsync(state, cancellationToken).ConfigureAwait(false);
             state.LastNdtProcessCsvPath = csvPath;
             await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
+            await RecordConsolidatedTraceabilityAsync(state, csvPath, cancellationToken).ConfigureAwait(false);
         }
+
+        await _traceability.RecordManualStationRunAsync(
+            poNumber: state.PoNumber,
+            ndtBatchNo: batch,
+            ndtPcs: incoming,
+            okPcs: request.OkPcs,
+            rejectPcs: request.RejectedPcs,
+            workStation: WorkStationColumnValue(request.Station, opStation),
+            start: start,
+            end: end,
+            hydrotestingType: IsHydroStation(request.Station) ? HydrotestingTypeValue(request.Station) : null,
+            sourceFile: csvPath ?? string.Empty,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
 
         var printed = false;
         if (request.PrintTag)
@@ -376,8 +391,8 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         var fileName = $"NDT process_{safePo}_{safeBatch}_{datePart}_{timePart}.csv";
         var path = Path.Combine(folder, fileName);
 
-        const string header = "PO Number,NDT BATCH NO,NDT Pcs,OK,Visual Reject,Hydrotest Reject,Re visual Reject,Bundle Start,Bundle End";
-        var row = string.Join(",",
+        const string header = "PO Number, NDT BATCH NO, NDT Pcs, OK, Visual Reject, Hydrotest Reject, Re visual Reject, Bundle Start, Bundle End";
+        var row = string.Join(", ",
             Escape(state.PoNumber.Trim()),
             Escape(state.NdtBatchNo),
             state.InitialPcs.ToString(CultureInfo.InvariantCulture),
@@ -391,6 +406,25 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         await File.WriteAllLinesAsync(path, new[] { header, row }, cancellationToken).ConfigureAwait(false);
         _logger.LogInformation("Wrote consolidated NDT process CSV: {Path}", path);
         return path;
+    }
+
+    private Task RecordConsolidatedTraceabilityAsync(FlowState state, string csvPath, CancellationToken cancellationToken)
+    {
+        var visual = state.Visual!;
+        var hydro = state.Hydrotesting!;
+        var revisual = state.Revisual!;
+        return _traceability.RecordNdtProcessConsolidatedAsync(
+            poNumber: state.PoNumber.Trim(),
+            ndtBatchNo: state.NdtBatchNo,
+            ndtPcs: state.InitialPcs,
+            okPcs: revisual.OkPcs,
+            visualReject: visual.RejectedPcs,
+            hydrotestReject: hydro.RejectedPcs,
+            revisualReject: revisual.RejectedPcs,
+            bundleStart: visual.StartTime,
+            bundleEnd: revisual.EndTime,
+            outputFilePath: csvPath,
+            cancellationToken: cancellationToken);
     }
 
     private static string FormatBundleDateTime(DateTime dt) =>

@@ -14,8 +14,11 @@ public class NdtBundleOptions
     /// <summary>Folder where output bundle CSV files (with NDT_Batch_No) are written.</summary>
     public string OutputBundleFolder { get; set; } = string.Empty;
 
-    /// <summary>Folder for the single consolidated NDT process CSV (after Revisual) and ZPL previews for manual stations.</summary>
-    public string NdtProcessOutputFolder { get; set; } = @"D:\NDT\NDT Bundles";
+    /// <summary>
+    /// Folder for the single consolidated NDT process CSV (written only after Revisual completes) and optional ZPL previews.
+    /// Per-station Visual/Hydro/Revisual output folders are not used; one file combines all three steps.
+    /// </summary>
+    public string NdtProcessOutputFolder { get; set; } = @"Z:\To SAP\TM\NDT\NDT Final Output\Bundle";
 
     /// <summary>Folder where PO Plan (WIP) CSV files are dropped from SAP (e.g. D:\NDT\From SAP\TM). When set, one file is used as current PO plan; advance to next file only on PO End. If empty, single-file paths below are used.</summary>
     public string PoPlanFolder { get; set; } = string.Empty;

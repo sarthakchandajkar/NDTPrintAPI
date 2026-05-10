@@ -1,6 +1,6 @@
 -- Run this script in SQL Server Management Studio to create the NDT_Bundle table
 -- used for reconciliation (Reconcile Bundle feature).
--- Database: create or use existing, e.g. CREATE DATABASE NDTBundle; USE NDTBundle;
+-- Database: create or use existing, e.g. CREATE DATABASE JazeeraMES_Dev; USE JazeeraMES_Dev; (or JazeeraMES_Prod)
 
 IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'NDT_Bundle')
 BEGIN

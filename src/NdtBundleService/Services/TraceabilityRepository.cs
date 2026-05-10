@@ -23,6 +23,21 @@ public interface ITraceabilityRepository
         string? hydrotestingType,
         string sourceFile,
         CancellationToken cancellationToken);
+
+    /// <summary>One row per completed NDT process CSV (after Revisual), matching the consolidated export columns.</summary>
+    Task RecordNdtProcessConsolidatedAsync(
+        string poNumber,
+        string ndtBatchNo,
+        int ndtPcs,
+        int okPcs,
+        int visualReject,
+        int hydrotestReject,
+        int revisualReject,
+        DateTime bundleStart,
+        DateTime bundleEnd,
+        string outputFilePath,
+        CancellationToken cancellationToken);
+
     Task RecordUploadBundleRowsAsync(string generatedFile, IReadOnlyList<UploadBundleRow> rows, CancellationToken cancellationToken);
 
     /// <summary>
@@ -241,6 +256,52 @@ VALUES
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to record Manual_Station_Run for batch {BatchNo}.", ndtBatchNo);
+        }
+    }
+
+    public async Task RecordNdtProcessConsolidatedAsync(
+        string poNumber,
+        string ndtBatchNo,
+        int ndtPcs,
+        int okPcs,
+        int visualReject,
+        int hydrotestReject,
+        int revisualReject,
+        DateTime bundleStart,
+        DateTime bundleEnd,
+        string outputFilePath,
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled)
+            return;
+
+        try
+        {
+            await using var conn = CreateConnection();
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+            const string sql = @"
+INSERT INTO dbo.NDT_Process_Consolidated
+    (PO_Number, NDT_Batch_No, NDT_Pcs, OK_Pcs, Visual_Reject, Hydrotest_Reject, Revisual_Reject, Bundle_Start, Bundle_End, Output_File)
+VALUES
+    (@PoNumber, @BatchNo, @NdtPcs, @Ok, @VisualRej, @HydroRej, @RevisualRej, @BundleStart, @BundleEnd, @OutputFile);";
+
+            await using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@PoNumber", poNumber);
+            cmd.Parameters.AddWithValue("@BatchNo", ndtBatchNo);
+            cmd.Parameters.AddWithValue("@NdtPcs", ndtPcs);
+            cmd.Parameters.AddWithValue("@Ok", okPcs);
+            cmd.Parameters.AddWithValue("@VisualRej", visualReject);
+            cmd.Parameters.AddWithValue("@HydroRej", hydrotestReject);
+            cmd.Parameters.AddWithValue("@RevisualRej", revisualReject);
+            cmd.Parameters.AddWithValue("@BundleStart", bundleStart);
+            cmd.Parameters.AddWithValue("@BundleEnd", bundleEnd);
+            cmd.Parameters.AddWithValue("@OutputFile", (object?)NullIfEmpty(outputFilePath) ?? DBNull.Value);
+            await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to record NDT_Process_Consolidated for batch {BatchNo}.", ndtBatchNo);
         }
     }
 
