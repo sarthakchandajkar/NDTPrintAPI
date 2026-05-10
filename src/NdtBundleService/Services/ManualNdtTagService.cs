@@ -481,7 +481,8 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             StationTextForZpl(station, operatorStationNumber));
 
         await TrySaveZplPreviewAsync(station, operatorStationNumber, ndtBatchNo, zplBytes, cancellationToken).ConfigureAwait(false);
-        return await _sender.SendAsync(address, _options.NdtTagPrinterPort, zplBytes, cancellationToken).ConfigureAwait(false);
+        var sendResult = await _sender.SendAsync(address, _options.NdtTagPrinterPort, zplBytes, cancellationToken).ConfigureAwait(false);
+        return sendResult.Success;
     }
 
     private async Task TrySaveZplPreviewAsync(ManualTagStation station, int operatorStationNumber, string ndtBatchNo, byte[] zplBytes, CancellationToken cancellationToken)

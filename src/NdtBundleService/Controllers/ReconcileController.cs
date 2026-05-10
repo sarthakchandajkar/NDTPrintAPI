@@ -320,10 +320,10 @@ public sealed class ReconcileController : ControllerBase
 
         try
         {
-            var sent = await _printerSender.SendAsync(address, _options.NdtTagPrinterPort, zplBytes, cancellationToken).ConfigureAwait(false);
-            if (sent)
+            var sendResult = await _printerSender.SendAsync(address, _options.NdtTagPrinterPort, zplBytes, cancellationToken).ConfigureAwait(false);
+            if (sendResult.Success)
                 return Ok(new { Message = "Bundle tag (Reprint) sent to printer.", NdtBatchNo = batchNo, NdtPcs = bundle.TotalNdtPcs });
-            return StatusCode(500, new { Message = "Failed to send to printer. Check printer configuration (NdtTagPrinterAddress/Port)." });
+            return StatusCode(500, new { Message = "Failed to send to printer. Check NdtTagPrinterAddress/Port and optional NdtTagPrinterLocalBindAddress.", Detail = sendResult.ErrorDetail });
         }
         catch (Exception ex)
         {

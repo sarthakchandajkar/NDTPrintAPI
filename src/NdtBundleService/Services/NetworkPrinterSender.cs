@@ -19,7 +19,7 @@ public sealed class NetworkPrinterSender : INetworkPrinterSender
         _logger = logger;
     }
 
-    public async Task<bool> SendAsync(string host, int port, byte[] data, CancellationToken cancellationToken = default)
+    public async Task<PrinterSendResult> SendAsync(string host, int port, byte[] data, CancellationToken cancellationToken = default)
     {
         var bindAddress = (_options.NdtTagPrinterLocalBindAddress ?? "").Trim();
         _logger.LogInformation("Connecting to printer at {Host}:{Port} (local bind: {Bind}), sending {Bytes} bytes.",
@@ -50,12 +50,12 @@ public sealed class NetworkPrinterSender : INetworkPrinterSender
                 await Task.Delay(200, CancellationToken.None).ConfigureAwait(false);
             }
             _logger.LogInformation("Sent {Bytes} bytes to {Host}:{Port}.", data.Length, host, port);
-            return true;
+            return new PrinterSendResult(true);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Printer send failed to {Host}:{Port}. Error: {Message}", host, port, ex.Message);
-            return false;
+            return new PrinterSendResult(false, ex.Message);
         }
     }
 }

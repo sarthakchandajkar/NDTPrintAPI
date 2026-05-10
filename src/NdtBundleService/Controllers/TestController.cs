@@ -907,11 +907,17 @@ ORDER BY
                 pcsPerBundle: 10,
                 slitNo: "SLIT-01");
 
-            var sent = await _networkPrinterSender.SendAsync(address, _options.NdtTagPrinterPort, zplBytes, cancellationToken).ConfigureAwait(false);
+            var sendResult = await _networkPrinterSender.SendAsync(address, _options.NdtTagPrinterPort, zplBytes, cancellationToken).ConfigureAwait(false);
 
-            if (sent)
+            if (sendResult.Success)
                 return Ok(new { Message = "Dummy ZPL tag sent to printer. The physical label should print now (Honeywell PD45S uses ZPL).", Address = address, Port = _options.NdtTagPrinterPort });
-            return StatusCode(500, new { Message = "Failed to send ZPL to printer. Check that the printer is on, reachable, and port " + _options.NdtTagPrinterPort + " is open." });
+            return StatusCode(500, new
+            {
+                Message = "Failed to send ZPL to printer. Check printer power, IP " + address + ":" + _options.NdtTagPrinterPort + ", firewall, and NdtBundle:NdtTagPrinterLocalBindAddress (leave empty unless this PC needs a fixed egress IP).",
+                Detail = sendResult.ErrorDetail ?? string.Empty,
+                Address = address,
+                Port = _options.NdtTagPrinterPort
+            });
         }
         catch (Exception ex)
         {

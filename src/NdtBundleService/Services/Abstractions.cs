@@ -187,12 +187,15 @@ public interface ICurrentPoPlanService
     Task AdvanceToNextPoAsync(CancellationToken cancellationToken);
 }
 
+/// <summary>Outcome of sending raw bytes to a network printer.</summary>
+public readonly record struct PrinterSendResult(bool Success, string? ErrorDetail = null);
+
 /// <summary>
 /// Sends raw bytes to a network printer over TCP (e.g. port 9100 for ZPL). Used for ZPL-based label printers like Honeywell PD45S.
 /// </summary>
 public interface INetworkPrinterSender
 {
-    Task<bool> SendAsync(string host, int port, byte[] data, CancellationToken cancellationToken = default);
+    Task<PrinterSendResult> SendAsync(string host, int port, byte[] data, CancellationToken cancellationToken = default);
 }
 
 /// <summary>

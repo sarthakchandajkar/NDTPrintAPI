@@ -78,12 +78,12 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
         // can be visualized in an external ZPL viewer without depending on the printer.
         await TrySaveZplPreviewAsync(zplBytes, ndtBatchNoFormatted, cancellationToken).ConfigureAwait(false);
 
-        var sent = await _sender.SendAsync(address, _options.NdtTagPrinterPort, zplBytes, cancellationToken).ConfigureAwait(false);
-        if (sent)
+        var sendResult = await _sender.SendAsync(address, _options.NdtTagPrinterPort, zplBytes, cancellationToken).ConfigureAwait(false);
+        if (sendResult.Success)
             _logger.LogInformation("Printed NDT tag {BatchNo} ({Pcs} pcs) to {Address}.", ndtBatchNoFormatted, totalNdtPcs, address);
         else
-            _logger.LogWarning("Failed to send NDT tag {BatchNo} to printer.", ndtBatchNoFormatted);
-        return sent;
+            _logger.LogWarning("Failed to send NDT tag {BatchNo} to printer. {Detail}", ndtBatchNoFormatted, sendResult.ErrorDetail ?? "");
+        return sendResult.Success;
     }
 
     private async Task TrySaveZplPreviewAsync(byte[] zplBytes, string ndtBatchNoFormatted, CancellationToken cancellationToken)
