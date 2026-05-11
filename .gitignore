@@ -1,3 +1,6 @@
+# Agent / local publish output
+.agent-build-out/
+
 # Build
 [Dd]ebug/
 [Rr]elease/

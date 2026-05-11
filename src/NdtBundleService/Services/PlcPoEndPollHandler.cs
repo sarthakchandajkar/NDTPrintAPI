@@ -5,7 +5,7 @@ using NdtBundleService.Configuration;
 namespace NdtBundleService.Services;
 
 /// <summary>
-/// On each poll: PO end for each configured PLC entry (current deployment: Mill 4 Modbus coil + optional MES ack).
+/// On each poll: PO end for each configured PLC entry in <see cref="PlcPoEndOptions.Mills"/> (Modbus coil and/or PO_Id mode + optional MES ack).
 /// </summary>
 public sealed class PlcPoEndPollHandler
 {

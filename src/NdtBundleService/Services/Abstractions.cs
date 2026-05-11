@@ -153,6 +153,19 @@ public interface IActivePoPerMillService
     IReadOnlyList<string> GetInputSlitReadFolderPaths();
 }
 
+/// <summary>Running PO for a mill from latest <c>WIP_MM_…</c> file in the TM bundle folder.</summary>
+public interface IWipBundleRunningPoProvider
+{
+    Task<string?> TryGetRunningPoForMillAsync(int millNo, CancellationToken cancellationToken);
+}
+
+/// <summary>Live NDT pipe counter from the mill Siemens PLC (data block INT).</summary>
+public interface IMillNdtCountReader
+{
+    /// <summary>Null when disabled, misconfigured, or read failed.</summary>
+    Task<int?> TryReadNdtPipesCountAsync(CancellationToken cancellationToken);
+}
+
 /// <summary>
 /// Shared state for NDT batch number and running total per (PO, Mill).
 /// Batch increments when count reaches formation chart threshold or on PO End.

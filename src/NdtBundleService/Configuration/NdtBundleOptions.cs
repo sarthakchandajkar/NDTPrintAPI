@@ -92,5 +92,8 @@ public class NdtBundleOptions
 
     /// <summary>Optional per-mill PLC PO-end signals (Modbus TCP, etc.).</summary>
     public PlcPoEndOptions PlcPoEnd { get; set; } = new();
+
+    /// <summary>Optional live NDT count + running PO from WIP bundle folder for one mill (e.g. Mill-3 S7).</summary>
+    public MillSlitLiveOptions MillSlitLive { get; set; } = new();
 }
 

@@ -2,15 +2,19 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { api, type WipByMillRow, type RunningPoNdtSummary } from "@/lib/api";
+import { io, type Socket } from "socket.io-client";
+import { api, type WipByMillRow } from "@/lib/api";
+
+const SOCKET_URL =
+  process.env.NEXT_PUBLIC_PLC_SOCKET_URL || "http://localhost:3030";
 
 type MillRowState = {
   row: WipByMillRow;
-  ndtPipes: number | null;
 };
 
 export default function SummaryPage() {
   const [millRows, setMillRows] = useState<MillRowState[]>([]);
+  const [mill3PlcNdt, setMill3PlcNdt] = useState<number | null>(null);
   const [sourcePath, setSourcePath] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -23,35 +27,16 @@ export default function SummaryPage() {
     setLoading(true);
     setError(null);
     try {
-      const [byMills, runningSummary, zplStatus] = await Promise.all([
+      const [byMills, zplStatus] = await Promise.all([
         api.wipByMills(),
-        api.ndtSummaryRunningPo().catch(() => [] as RunningPoNdtSummary[]),
         api.zplGenerationStatus().catch(() => null),
       ]);
 
       setSourcePath(typeof byMills.sourcePath === "string" ? byMills.sourcePath : null);
       const mills = Array.isArray(byMills.mills) ? byMills.mills : [];
-      const ndtByMill = new Map<number, number>();
-      (Array.isArray(runningSummary) ? runningSummary : []).forEach((s) => {
-        const m = typeof s.millNo === "number" ? s.millNo : Number.NaN;
-        if (Number.isFinite(m) && m >= 1 && m <= 4) {
-          ndtByMill.set(m, typeof s.totalNdtPipes === "number" ? s.totalNdtPipes : 0);
-        }
-      });
 
       const withNdt: MillRowState[] = mills.map((row) => {
-        const po = (row.poNumber ?? "").trim();
-        const rawMill = row.millNo;
-        let ndtMill: number | null = null;
-        if (typeof rawMill === "number" && Number.isFinite(rawMill)) ndtMill = rawMill;
-        else if (typeof rawMill === "string" && rawMill.trim() !== "") {
-          const p = parseInt(rawMill.trim(), 10);
-          if (Number.isFinite(p)) ndtMill = p;
-        }
-        if (!po || ndtMill == null || ndtMill < 1 || ndtMill > 4) {
-          return { row, ndtPipes: null };
-        }
-        return { row, ndtPipes: ndtByMill.has(ndtMill) ? ndtByMill.get(ndtMill) ?? 0 : null };
+        return { row };
       });
 
       setMillRows(withNdt);
@@ -68,6 +53,35 @@ export default function SummaryPage() {
 
   useEffect(() => {
     refresh();
+  }, []);
+
+  useEffect(() => {
+    let socket: Socket | null = null;
+    try {
+      socket = io(SOCKET_URL, {
+        transports: ["websocket", "polling"],
+        reconnection: true,
+        reconnectionAttempts: Infinity,
+        reconnectionDelay: 2000,
+      });
+
+      socket.on("plc:mill3:update", (payload: { ndtCount?: number }) => {
+        const value =
+          typeof payload?.ndtCount === "number" && Number.isFinite(payload.ndtCount)
+            ? Math.trunc(payload.ndtCount)
+            : null;
+        setMill3PlcNdt(value);
+      });
+    } catch {
+      setMill3PlcNdt(null);
+    }
+
+    return () => {
+      if (socket) {
+        socket.removeAllListeners("plc:mill3:update");
+        socket.close();
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -165,8 +179,8 @@ export default function SummaryPage() {
           <h2 className="font-semibold text-gray-900">PO running by mill</h2>
           <p className="text-sm text-gray-600 mt-1">
             Each row is one mill (Mill-1 … Mill-4). When the TM folder is configured, PO details are merged from every WIP
-            CSV in that folder (newer files override per mill). NDT pipe counts use slit CSV rows for that PO and mill in
-            the input folder.
+            CSV in that folder (newer files override per mill). NDT pipe count currently comes from the live PLC stream for
+            Mill-3 only.
           </p>
         </div>
         <div className="overflow-x-auto">
@@ -208,8 +222,20 @@ export default function SummaryPage() {
                   </td>
                 </tr>
               ) : (
-                millRows.map(({ row, ndtPipes }) => {
+                millRows.map(({ row }) => {
                   const m = row.millNo ?? 0;
+                  const parsedMillNo =
+                    typeof m === "number"
+                      ? m
+                      : typeof m === "string"
+                        ? parseInt(m, 10)
+                        : Number.NaN;
+                  const displayNdt =
+                    Number.isFinite(parsedMillNo) && parsedMillNo === 3
+                      ? mill3PlcNdt == null
+                        ? "—"
+                        : mill3PlcNdt
+                      : "—";
                   return (
                     <tr key={m} className="hover:bg-gray-50">
                       <td className="px-4 py-3 font-semibold text-gray-900 whitespace-nowrap">
@@ -219,7 +245,7 @@ export default function SummaryPage() {
                         {(row.poNumber ?? "").trim() || "—"}
                       </td>
                       <td className="px-4 py-3 text-primary-600 font-semibold whitespace-nowrap">
-                        {ndtPipes == null ? "—" : ndtPipes}
+                        {displayNdt}
                       </td>
                       <td className="px-4 py-3 text-gray-700 hidden lg:table-cell whitespace-nowrap">
                         {row.pipeSize?.trim() || "—"}

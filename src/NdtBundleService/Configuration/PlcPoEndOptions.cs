@@ -39,7 +39,7 @@ public sealed class PlcPoEndOptions
     /// </summary>
     public bool ResyncPrevPoWhenCurrentInvalid { get; set; }
 
-    /// <summary>Modbus endpoints to poll (e.g. a single Mill 4 PLC).</summary>
+    /// <summary>Modbus endpoints to poll (one entry per mill that exposes PO-end / PO_Id registers).</summary>
     public List<MillModbusPoEndEndpoint> Mills { get; set; } = new();
 
     /// <summary>

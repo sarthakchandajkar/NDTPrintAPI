@@ -136,4 +136,36 @@ public static class InputSlitCsvParsing
 
         return false;
     }
+
+    /// <summary>Replaces one field (0-based) and re-encodes the line as CSV.</summary>
+    public static string ReplaceFieldAtIndex(string line, int fieldIndex, string newCellValue)
+    {
+        if (string.IsNullOrEmpty(line) || fieldIndex < 0)
+            return line;
+        var fields = SplitCsvFields(line);
+        if (fieldIndex >= fields.Length)
+            return line;
+        fields[fieldIndex] = newCellValue ?? string.Empty;
+        return JoinCsvLine(fields);
+    }
+
+    /// <summary>Joins fields with commas; quotes fields that contain delimiters.</summary>
+    public static string JoinCsvLine(IReadOnlyList<string> fields)
+    {
+        if (fields.Count == 0)
+            return string.Empty;
+        var parts = new string[fields.Count];
+        for (var i = 0; i < fields.Count; i++)
+            parts[i] = EscapeCsvField(fields[i] ?? string.Empty);
+        return string.Join(",", parts);
+    }
+
+    private static string EscapeCsvField(string s)
+    {
+        if (s.Length == 0)
+            return s;
+        if (s.IndexOfAny(new[] { ',', '"', '\r', '\n' }) < 0)
+            return s;
+        return "\"" + s.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
+    }
 }

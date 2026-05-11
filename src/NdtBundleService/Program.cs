@@ -33,6 +33,8 @@ builder.Services.AddSingleton<IWipLabelProvider, WipLabelProvider>();
 builder.Services.AddSingleton<INdtTagPrinter, NdtZplTagPrinter>();
 builder.Services.AddSingleton<IZplGenerationToggle, ZplGenerationToggle>();
 builder.Services.AddSingleton<IActivePoPerMillService, ActivePoPerMillService>();
+builder.Services.AddSingleton<IWipBundleRunningPoProvider, WipBundleRunningPoProvider>();
+builder.Services.AddSingleton<IMillNdtCountReader, S7MillNdtCountReader>();
 builder.Services.AddSingleton<IPoEndWorkflowService, PoEndWorkflowService>();
 builder.Services.AddSingleton<MillPoEndTransitionDetector>();
 builder.Services.AddSingleton<PoEndDetectionDiagnostics>();

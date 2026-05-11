@@ -55,7 +55,7 @@ public sealed class StatusController : ControllerBase
             ? "PLC PO-end polling uses Stub (all false) unless PlcPoEnd.Enabled=true and Driver=ModbusTcp."
             : poIdMode
                 ? "Modbus TCP PO_Id transition mode (NdtBundle:PlcPoEnd.DetectionMode and Mills register map)."
-                : "Modbus TCP PO-end coils from PlcPoEnd.Mills (e.g. Mill 4 POChangeTOMES / MES ack).";
+                : "Modbus TCP PO-end coils from PlcPoEnd.Mills (per-mill POChangeTOMES / MES ack).";
         return Ok(new
         {
             Connected = connected,

@@ -1,9 +1,12 @@
 -- =============================================================================
 -- NDT Bundle traceability schema (SQL Server)
 -- Run in SSMS against the target database, e.g.:
---   Dev:  CREATE DATABASE JazeeraMES_Dev;  USE JazeeraMES_Dev;   (requires permission; or use an existing DB)
---   Prod: CREATE DATABASE JazeeraMES_Prod; USE JazeeraMES_Prod;
+--   Dev:  USE JazeeraMES_Dev;
+--   Prod: USE JazeeraMES_Prod;
+-- Creates: NDT_Bundle, Input_Slit_Row, Output_Slit_Row, PO_Plan_WIP, Formation_Chart,
+--          Bundle_Label, Manual_Station_Run, Upload_Bundle_Row, Pipeline_Event, NDT_Process_Consolidated
 -- Idempotent: skips tables that already exist.
+-- Note: docs/NDT_Process_Consolidated_AddTable.sql is redundant if you run this full script (same table).
 -- =============================================================================
 
 SET ANSI_NULLS ON;

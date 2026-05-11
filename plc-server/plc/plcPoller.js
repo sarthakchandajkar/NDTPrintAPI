@@ -7,6 +7,7 @@ const {
   writeItemsPromise,
   dropConnectionPromise,
 } = require("./plcClient");
+const { PlcLabelOrchestrator } = require("./labelOrchestrator");
 
 function formatTimestamp(d = new Date()) {
   const p = (n) => String(n).padStart(2, "0");
@@ -50,6 +51,47 @@ function startPlcPoller(io) {
   const pollMs = Number(process.env.PLC_MILL3_POLL_MS || 2000);
   const retryMs = Number(process.env.PLC_MILL3_RETRY_MS || 5000);
 
+  const plcMillNumber = Number(process.env.PLC_MILL_NUMBER || 3);
+  const wipBundleFolder =
+    process.env.WIP_BUNDLE_FOLDER || "Z:\\To SAP\\TM\\Bundle";
+  const labelPrintFlag = (process.env.ENABLE_PLC_LABEL_PRINT || "1")
+    .trim()
+    .toLowerCase();
+  const labelPrintEnabled =
+    labelPrintFlag !== "0" &&
+    labelPrintFlag !== "false" &&
+    labelPrintFlag !== "no" &&
+    Boolean(wipBundleFolder && wipBundleFolder.trim());
+  const printerHost = (
+    process.env.PRINTER_HOST ||
+    process.env.NDT_TAG_PRINTER_HOST ||
+    "192.168.0.125"
+  ).trim();
+  const printerPort = Number(
+    process.env.PRINTER_PORT || process.env.NDT_TAG_PRINTER_PORT || 9100
+  );
+  const printerBind =
+    process.env.PRINTER_LOCAL_BIND ||
+    process.env.NDT_TAG_PRINTER_LOCAL_BIND ||
+    "";
+
+  let labelOrch = null;
+  if (labelPrintEnabled) {
+    labelOrch = new PlcLabelOrchestrator({
+      io,
+      bundleFolder: wipBundleFolder.trim(),
+      millNo: plcMillNumber,
+      printerHost: printerHost.trim(),
+      printerPort,
+      printerBind: printerBind.trim(),
+      stationText: (process.env.NDT_LABEL_STATION_TEXT || "").trim(),
+      millLabel: "Mill-3",
+    });
+    console.log(
+      `[${formatTimestamp()}] [LABEL] Auto-print enabled | WIP folder: ${wipBundleFolder} | Mill: ${plcMillNumber} | Printer: ${printerHost}:${printerPort}`
+    );
+  }
+
   let conn = null;
   let pollTimer = null;
   let retryTimer = null;
@@ -70,6 +112,7 @@ function startPlcPoller(io) {
     poEndHandled = false;
     suppressNdtUntilPoChange = false;
     poIdWhenSuppressed = 0;
+    if (labelOrch) labelOrch.reset();
   }
 
   function clearPoll() {
@@ -191,6 +234,19 @@ function startPlcPoller(io) {
       }
 
       const poEnd = toBool(values.poEndSignal);
+      const ndtRaw = toInt(values.ndtCount);
+      const poIdVal = toInt(values.poId);
+
+      if (labelOrch) {
+        try {
+          await labelOrch.processPoll(ndtRaw, poIdVal);
+        } catch (labelErr) {
+          console.error(
+            `[${formatTimestamp()}] [LABEL ERR]`,
+            labelErr && labelErr.message ? labelErr.message : String(labelErr)
+          );
+        }
+      }
 
       if (!poEndPrimed) {
         poEndPrimed = true;
@@ -198,10 +254,10 @@ function startPlcPoller(io) {
         if (!poEnd) {
           poEndHandled = false;
         }
-        let ndt0 = toInt(values.ndtCount);
-        if (suppressNdtUntilPoChange && toInt(values.poId) === poIdWhenSuppressed) {
+        let ndt0 = ndtRaw;
+        if (suppressNdtUntilPoChange && poIdVal === poIdWhenSuppressed) {
           ndt0 = 0;
-        } else if (suppressNdtUntilPoChange && toInt(values.poId) !== poIdWhenSuppressed) {
+        } else if (suppressNdtUntilPoChange && poIdVal !== poIdWhenSuppressed) {
           suppressNdtUntilPoChange = false;
         }
         emitPlcUpdate(values, ndt0);
@@ -217,11 +273,20 @@ function startPlcPoller(io) {
 
       if (risingEdge) {
         poEndHandled = true;
-        const poIdVal = toInt(values.poId);
-        const ndtFinal = toInt(values.ndtCount);
+        const ndtFinal = ndtRaw;
         console.log(
           `[${formatTimestamp()}] [PO END DETECTED] Mill-3 | PO ID: ${poIdVal} | NDT Count at end: ${ndtFinal}`
         );
+        if (labelOrch) {
+          try {
+            await labelOrch.onPoEnd(ndtFinal, poIdVal);
+          } catch (labelErr) {
+            console.error(
+              `[${formatTimestamp()}] [LABEL ERR PO END]`,
+              labelErr && labelErr.message ? labelErr.message : String(labelErr)
+            );
+          }
+        }
         suppressNdtUntilPoChange = true;
         poIdWhenSuppressed = poIdVal;
         emitPoEnd(poIdVal, ndtFinal);
@@ -238,7 +303,7 @@ function startPlcPoller(io) {
 
       prevPoEndSignal = poEnd;
 
-      let ndtForDisplay = toInt(values.ndtCount);
+      let ndtForDisplay = ndtRaw;
       if (suppressNdtUntilPoChange) {
         const curPo = toInt(values.poId);
         if (curPo !== poIdWhenSuppressed) {
