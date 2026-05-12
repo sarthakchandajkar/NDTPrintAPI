@@ -1,13 +1,14 @@
 namespace NdtBundleService.Configuration;
 
 /// <summary>
-/// When enabled for a mill (e.g. Mill-3), slit processing uses live NDT count from the Siemens PLC
-/// and the running PO from the TM WIP bundle folder instead of the Input Slit CSV cells for those values.
+/// When <see cref="Enabled"/> is true for <see cref="ApplyToMillNo"/> (e.g. Mill-3), slit processing uses live NDT count from the Siemens PLC
+/// for the output NDT Pipes column and the running PO from the TM WIP bundle folder instead of the Input Slit CSV cells for those values.
+/// Dashboard/API PLC reads use <see cref="S7"/> whenever the host is set; <c>Enabled</c> does not need to be true to poll NDT count.
 /// Pipe size / formation chart still come from <see cref="NdtBundleOptions.PoPlanFolder"/> / <see cref="NdtBundleOptions.PipeSizeCsvPath"/> keyed by that PO.
 /// </summary>
 public sealed class MillSlitLiveOptions
 {
-    /// <summary>When true, <see cref="ApplyToMillNo"/> uses <see cref="WipBundleFolder"/> + S7 NDT read.</summary>
+    /// <summary>When true, Input Slit processing for <see cref="ApplyToMillNo"/> uses live PLC NDT (display column) and WIP-bundle PO. PLC reads for the Summary API still work when false if <see cref="S7"/> host is set.</summary>
     public bool Enabled { get; set; }
 
     /// <summary>Mill number (1–4) whose slit rows use live data.</summary>

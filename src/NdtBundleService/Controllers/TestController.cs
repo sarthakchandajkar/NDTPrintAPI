@@ -349,7 +349,7 @@ namespace NdtBundleService.Controllers;
             }
 
             int? liveNdtCount = null;
-            if (liveOpts.Enabled && liveOpts.ApplyToMillNo is >= 1 and <= 4)
+            if (liveOpts.ApplyToMillNo is >= 1 and <= 4 && MillSlitLiveS7EndpointConfigured(liveOpts))
                 liveNdtCount = await _millNdtCountReader.TryReadNdtPipesCountAsync(cancellationToken).ConfigureAwait(false);
 
             var slitLocations = string.Join(" | ", _activePoPerMill.GetInputSlitReadFolderPaths().Where(static p => !string.IsNullOrWhiteSpace(p)));
@@ -381,7 +381,8 @@ namespace NdtBundleService.Controllers;
     }
 
     /// <summary>
-    /// Lightweight read of the live Siemens NDT counter for the mill configured in <c>MillSlitLive</c> (same DB read as the slit worker).
+    /// Lightweight read of the live Siemens NDT counter for <see cref="MillSlitLiveOptions.ApplyToMillNo"/> (same DB read as the slit worker).
+    /// Does not require <see cref="MillSlitLiveOptions.Enabled"/>; only the configured mill and S7 host must be set.
     /// Use for dashboard polling when Socket.IO is unavailable. Query <paramref name="millNo"/> defaults to <see cref="MillSlitLiveOptions.ApplyToMillNo"/> when 0.
     /// </summary>
     [HttpGet("live-mill-ndt")]
@@ -392,20 +393,34 @@ namespace NdtBundleService.Controllers;
         if (m is < 1 or > 4)
             return BadRequest(new { Message = "millNo must be 1..4 (or 0 to use MillSlitLive.ApplyToMillNo)." });
 
-        if (!live.Enabled || m != live.ApplyToMillNo)
+        if (m != live.ApplyToMillNo)
         {
             return Ok(new
             {
                 millNo = m,
                 ndtCount = (int?)null,
                 liveMillConfigured = live.ApplyToMillNo,
-                message = "MillSlitLive is not enabled for this mill.",
+                message = $"Live NDT PLC read is only wired for Mill {live.ApplyToMillNo} (NdtBundle:MillSlitLive:ApplyToMillNo).",
+            });
+        }
+
+        if (!MillSlitLiveS7EndpointConfigured(live))
+        {
+            return Ok(new
+            {
+                millNo = m,
+                ndtCount = (int?)null,
+                liveMillConfigured = live.ApplyToMillNo,
+                message = "MillSlitLive S7 Host is not configured; cannot read NDT count from PLC.",
             });
         }
 
         var ndt = await _millNdtCountReader.TryReadNdtPipesCountAsync(cancellationToken).ConfigureAwait(false);
         return Ok(new { millNo = m, ndtCount = ndt });
     }
+
+    private static bool MillSlitLiveS7EndpointConfigured(MillSlitLiveOptions live) =>
+        live.S7 is not null && !string.IsNullOrWhiteSpace(live.S7.Host);
 
     private static void CopyWipDetails(WipByMillRowDto target, WipByMillRowDto source)
     {

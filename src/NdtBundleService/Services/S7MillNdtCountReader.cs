@@ -21,7 +21,8 @@ public sealed class S7MillNdtCountReader : IMillNdtCountReader
     public Task<int?> TryReadNdtPipesCountAsync(CancellationToken cancellationToken)
     {
         var live = _options.Value.MillSlitLive;
-        if (!live.Enabled || live.S7 is null || string.IsNullOrWhiteSpace(live.S7.Host))
+        // PLC read is allowed whenever S7 is configured. MillSlitLive.Enabled gates slit CSV live overrides only.
+        if (live.S7 is null || string.IsNullOrWhiteSpace(live.S7.Host))
             return Task.FromResult<int?>(null);
 
         var s7 = live.S7;

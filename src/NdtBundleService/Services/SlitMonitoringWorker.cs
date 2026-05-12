@@ -10,6 +10,7 @@ namespace NdtBundleService.Services;
 /// <summary>
 /// Background service that periodically scans the Input Slit CSV folder,
 /// feeds records into the bundle engine, and reacts to PO-end signals.
+/// At startup, every CSV already in the folder is marked processed so only files that arrive after the service starts get NDT output CSVs.
 /// </summary>
 public sealed class SlitMonitoringWorker : BackgroundService
 {
@@ -66,6 +67,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
         _logger.LogInformation("SlitMonitoringWorker started. Watching folder {Folder}", _options.InputSlitFolder);
 
+        SeedPreExistingInputSlitCsvsAsProcessed();
+
         var outputFolder = (_options.OutputBundleFolder ?? string.Empty).Trim();
         if (string.IsNullOrEmpty(outputFolder))
         {
@@ -98,6 +101,37 @@ public sealed class SlitMonitoringWorker : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Treats every <c>*.csv</c> already in <see cref="NdtBundleOptions.InputSlitFolder"/> as handled so we do not backlog-generate
+    /// NDT Input Slit outputs for slits that completed before this process started. New paths discovered on later polls are processed.
+    /// </summary>
+    private void SeedPreExistingInputSlitCsvsAsProcessed()
+    {
+        var folder = _options.InputSlitFolder;
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+            return;
+
+        var added = 0;
+        foreach (var path in Directory.EnumerateFiles(folder, "*.csv"))
+        {
+            var full = Path.GetFullPath(path);
+            if (_processedFiles.Add(full))
+                added++;
+        }
+
+        if (added > 0)
+        {
+            _logger.LogInformation(
+                "Input Slit: {Count} CSV file(s) were already in {Folder} when the service started; they are skipped for this run. Any new CSV path that appears later will get an NDT Input Slit output with NDT Batch No.",
+                added,
+                folder);
+        }
+        else
+        {
+            _logger.LogInformation("Input Slit: no pre-existing CSV files in {Folder} at service start.", folder);
+        }
+    }
+
     private async Task ProcessNewSlitFilesAsync(CancellationToken cancellationToken)
     {
         var files = Directory.EnumerateFiles(_options.InputSlitFolder, "*.csv");
@@ -106,17 +140,18 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
         foreach (var file in files)
         {
-            if (_processedFiles.Contains(file))
+            var fileFull = Path.GetFullPath(file);
+            if (_processedFiles.Contains(fileFull))
                 continue;
 
-            if (!SourceFileEligibility.IncludeFileUtc(File.GetLastWriteTimeUtc(file), minUtc))
+            if (!SourceFileEligibility.IncludeFileUtc(File.GetLastWriteTimeUtc(fileFull), minUtc))
                 continue;
 
-            _logger.LogInformation("Processing Input Slit CSV file {File}", file);
+            _logger.LogInformation("Processing Input Slit CSV file {File}", fileFull);
 
             try
             {
-                var (headerLine, rows, ndtColumnIndex) = await ReadSlitFileWithRawLinesAsync(file, cancellationToken).ConfigureAwait(false);
+                var (headerLine, rows, ndtColumnIndex) = await ReadSlitFileWithRawLinesAsync(fileFull, cancellationToken).ConfigureAwait(false);
 
                 var qualifyingForLive = rows
                     .Select(r => r.Record)
@@ -133,7 +168,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 {
                     _logger.LogWarning(
                         "MillSlitLive: file {File} has {N} slit row(s) for mill {M}; PLC NDT applies only to a single slit row per file. Using CSV counts for this file.",
-                        file,
+                        fileFull,
                         qualifyingForLive.Count,
                         live.ApplyToMillNo);
                 }
@@ -149,14 +184,14 @@ public sealed class SlitMonitoringWorker : BackgroundService
                             plcNdt.Value,
                             wipPo ?? "(unchanged)",
                             live.ApplyToMillNo,
-                            Path.GetFileName(file));
+                            Path.GetFileName(fileFull));
                     }
                     else
                     {
                         _logger.LogWarning(
                             "MillSlitLive: PLC NDT read failed; using CSV NDT count for mill {Mill} (file {File}).",
                             live.ApplyToMillNo,
-                            Path.GetFileName(file));
+                            Path.GetFileName(fileFull));
                     }
 
                     if (string.IsNullOrWhiteSpace(wipPo))
@@ -164,7 +199,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                         _logger.LogWarning(
                             "MillSlitLive: no WIP bundle filename PO for mill {Mill}; using slit CSV PO (file {File}).",
                             live.ApplyToMillNo,
-                            Path.GetFileName(file));
+                            Path.GetFileName(fileFull));
                     }
                 }
 
@@ -251,7 +286,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, "Bundle engine failed for record in {File}; output CSV was already written.", file);
+                        _logger.LogError(ex, "Bundle engine failed for record in {File}; output CSV was already written.", fileFull);
                     }
 
                     var ndtBatchNoFormatted = FormatNdtBatchNo(batchNumber, effectiveRecord.MillNo);
@@ -272,7 +307,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 if (!string.IsNullOrWhiteSpace(outputFolder))
                 {
                     Directory.CreateDirectory(outputFolder);
-                    var outputFileName = BuildOutputSlitCsvFileName(file, rows, poOverrideForFileName);
+                    var outputFileName = BuildOutputSlitCsvFileName(fileFull, rows, poOverrideForFileName);
                     outputPath = Path.Combine(outputFolder, outputFileName);
                     if (File.Exists(outputPath))
                         outputPath = Path.Combine(outputFolder, Path.GetFileNameWithoutExtension(outputFileName) + "_" + DateTime.Now.ToString("HHmmss", CultureInfo.InvariantCulture) + ".csv");
@@ -281,14 +316,14 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 }
 
                 // Best-effort SQL traceability; CSV flow should not fail if SQL is down.
-                await _traceability.RecordInputSlitRowsAsync(file, inputRowsForSql, cancellationToken).ConfigureAwait(false);
-                await _traceability.RecordOutputSlitRowsAsync(outputPath ?? file, outputRowsForSql, cancellationToken).ConfigureAwait(false);
+                await _traceability.RecordInputSlitRowsAsync(fileFull, inputRowsForSql, cancellationToken).ConfigureAwait(false);
+                await _traceability.RecordOutputSlitRowsAsync(outputPath ?? fileFull, outputRowsForSql, cancellationToken).ConfigureAwait(false);
 
-                _processedFiles.Add(file);
+                _processedFiles.Add(fileFull);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to process Input Slit CSV file {File}", file);
+                _logger.LogError(ex, "Failed to process Input Slit CSV file {File}", fileFull);
             }
         }
     }
