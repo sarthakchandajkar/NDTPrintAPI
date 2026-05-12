@@ -9,7 +9,12 @@ using QuestPDF.Infrastructure;
 QuestPDF.Settings.License = LicenseType.Community;
 QuestPDF.Settings.EnableDebugging = true; // Better error location when layout constraints conflict
 
-var builder = WebApplication.CreateBuilder(args);
+// Production hosting loads appsettings.Production.json (e.g. Z:\ Input Slit) even when debugging from the repo.
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = args,
+    EnvironmentName = Environments.Production
+});
 
 builder.Services.AddWindowsService();
 
