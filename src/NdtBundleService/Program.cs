@@ -35,6 +35,7 @@ builder.Services.AddSingleton<IZplGenerationToggle, ZplGenerationToggle>();
 builder.Services.AddSingleton<IActivePoPerMillService, ActivePoPerMillService>();
 builder.Services.AddSingleton<IWipBundleRunningPoProvider, WipBundleRunningPoProvider>();
 builder.Services.AddSingleton<IMillNdtCountReader, S7MillNdtCountReader>();
+builder.Services.AddSingleton<IMillSlitLiveNdtAccumulator, MillSlitLiveNdtAccumulator>();
 builder.Services.AddSingleton<IPoEndWorkflowService, PoEndWorkflowService>();
 builder.Services.AddSingleton<MillPoEndTransitionDetector>();
 builder.Services.AddSingleton<PoEndDetectionDiagnostics>();

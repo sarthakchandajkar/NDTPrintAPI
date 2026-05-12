@@ -560,7 +560,9 @@ export default function ReconcilePage() {
                     <button
                       key={b.bundleNo}
                       type="button"
-                      onClick={() => setSelectedBatchNo(b.bundleNo)}
+                      onClick={() => {
+                        if (b.bundleNo) setSelectedBatchNo(b.bundleNo);
+                      }}
                       className={`w-full text-left px-4 py-3 hover:bg-gray-50 ${
                         active ? "bg-primary-50 border-l-4 border-primary-500 pl-3" : ""
                       }`}

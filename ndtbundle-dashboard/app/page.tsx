@@ -12,9 +12,22 @@ type MillRowState = {
   row: WipByMillRow;
 };
 
+function parseMillNo(row: WipByMillRow): number {
+  const m = row.millNo ?? 0;
+  if (typeof m === "number" && Number.isFinite(m)) return m;
+  if (typeof m === "string") {
+    const n = parseInt(m, 10);
+    return Number.isFinite(n) ? n : Number.NaN;
+  }
+  return Number.NaN;
+}
+
+/** Live NDT counter row: server uses MillSlitLive.ApplyToMillNo; socket bridge may still emit mill 3 only. */
+type LiveNdtState = { millNo: number; count: number | null };
+
 export default function SummaryPage() {
   const [millRows, setMillRows] = useState<MillRowState[]>([]);
-  const [mill3PlcNdt, setMill3PlcNdt] = useState<number | null>(null);
+  const [liveNdt, setLiveNdt] = useState<LiveNdtState | null>(null);
   const [sourcePath, setSourcePath] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -41,6 +54,16 @@ export default function SummaryPage() {
 
       setMillRows(withNdt);
       setZplEnabled(typeof zplStatus?.enabled === "boolean" ? zplStatus.enabled : null);
+
+      const lm = byMills.liveMillNdt;
+      if (lm && typeof lm.millNo === "number" && lm.millNo >= 1 && lm.millNo <= 4) {
+        const c = lm.ndtCount;
+        setLiveNdt({
+          millNo: lm.millNo,
+          count:
+            typeof c === "number" && Number.isFinite(c) ? Math.trunc(c) : null,
+        });
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
       setMillRows([]);
@@ -70,10 +93,10 @@ export default function SummaryPage() {
           typeof payload?.ndtCount === "number" && Number.isFinite(payload.ndtCount)
             ? Math.trunc(payload.ndtCount)
             : null;
-        setMill3PlcNdt(value);
+        setLiveNdt({ millNo: 3, count: value });
       });
     } catch {
-      setMill3PlcNdt(null);
+      // Socket optional; API poll still fills live NDT.
     }
 
     return () => {
@@ -81,6 +104,33 @@ export default function SummaryPage() {
         socket.removeAllListeners("plc:mill3:update");
         socket.close();
       }
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const r = await api.liveMillNdt(0);
+        if (cancelled) return;
+        const m =
+          typeof r.millNo === "number" && r.millNo >= 1 && r.millNo <= 4 ? r.millNo : null;
+        if (m == null) return;
+        const c = r.ndtCount;
+        setLiveNdt({
+          millNo: m,
+          count:
+            typeof c === "number" && Number.isFinite(c) ? Math.trunc(c) : null,
+        });
+      } catch {
+        // ignore transient API errors during poll
+      }
+    };
+    void tick();
+    const id = setInterval(() => void tick(), 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
     };
   }, []);
 
@@ -174,13 +224,59 @@ export default function SummaryPage() {
         </div>
       )}
 
+      {(() => {
+        const mill3Row = millRows.find(({ row }) => parseMillNo(row) === 3)?.row;
+        if (millRows.length === 0) return null;
+        const liveForM3 =
+          liveNdt?.millNo === 3
+            ? liveNdt.count != null
+              ? String(liveNdt.count)
+              : "—"
+            : liveNdt != null
+              ? `PLC live counter is on Mill-${liveNdt.millNo} (service config)`
+              : "—";
+        return (
+          <div className="rounded-lg border border-primary-200 bg-gradient-to-br from-primary-50 to-white p-5 shadow-sm">
+            <h2 className="text-lg font-semibold text-gray-900">Mill 3 — running job</h2>
+            <p className="text-xs text-gray-500 mt-1">
+              PO follows the same rules as the table (slits first, then TM WIP bundle file names). Pipe size is filled from
+              the PO plan, WIP CSV in bundle folders, or PO master lookup when available.
+            </p>
+            <dl className="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
+              <div className="rounded-md bg-white/80 border border-gray-100 px-3 py-2">
+                <dt className="text-gray-500 text-xs uppercase tracking-wide">PO</dt>
+                <dd className="font-semibold text-gray-900 tabular-nums">
+                  {(mill3Row?.poNumber ?? "").trim() || "—"}
+                </dd>
+              </div>
+              <div className="rounded-md bg-white/80 border border-gray-100 px-3 py-2">
+                <dt className="text-gray-500 text-xs uppercase tracking-wide">Pipe size</dt>
+                <dd className="font-semibold text-gray-900">{mill3Row?.pipeSize?.trim() || "—"}</dd>
+              </div>
+              <div className="rounded-md bg-white/80 border border-gray-100 px-3 py-2">
+                <dt className="text-gray-500 text-xs uppercase tracking-wide">NDT pcs / bundle</dt>
+                <dd className="font-semibold text-gray-900 tabular-nums">
+                  {mill3Row?.ndtPcsPerBundle == null ? "—" : mill3Row.ndtPcsPerBundle}
+                </dd>
+              </div>
+              <div className="rounded-md bg-white/80 border border-primary-100 px-3 py-2 ring-1 ring-primary-100/60">
+                <dt className="text-primary-700 text-xs uppercase tracking-wide">Live NDT count (PLC)</dt>
+                <dd className="text-xl font-bold text-primary-700 tabular-nums">{liveForM3}</dd>
+              </div>
+            </dl>
+          </div>
+        );
+      })()}
+
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
         <div className="px-5 py-3 bg-primary-50 border-b border-gray-200">
           <h2 className="font-semibold text-gray-900">PO running by mill</h2>
           <p className="text-sm text-gray-600 mt-1">
-            Each row is one mill (Mill-1 … Mill-4). When the TM folder is configured, PO details are merged from every WIP
-            CSV in that folder (newer files override per mill). NDT pipe count currently comes from the live PLC stream for
-            Mill-3 only.
+            Each row is one mill (Mill-1 … Mill-4). PO number is taken from the latest Input Slit row when present; otherwise
+            from the latest <code className="text-xs bg-gray-100 px-1 rounded">WIP_MM_…</code> file name in the TM Bundle /
+            Bundle Accepted folders (<code className="text-xs bg-gray-100 px-1 rounded">MillSlitLive</code> in service
+            config). Pipe details merge from the PO plan WIP folder when the PO matches. NDT pipe count for Mill-3 comes
+            from the PLC-backed counter (API poll every few seconds and optional Socket.IO when the PLC bridge is running).
           </p>
         </div>
         <div className="overflow-x-auto">
@@ -224,20 +320,16 @@ export default function SummaryPage() {
               ) : (
                 millRows.map(({ row }) => {
                   const m = row.millNo ?? 0;
-                  const parsedMillNo =
-                    typeof m === "number"
-                      ? m
-                      : typeof m === "string"
-                        ? parseInt(m, 10)
-                        : Number.NaN;
+                  const parsedMillNo = parseMillNo(row);
                   const displayNdt =
-                    Number.isFinite(parsedMillNo) && parsedMillNo === 3
-                      ? mill3PlcNdt == null
-                        ? "—"
-                        : mill3PlcNdt
+                    liveNdt != null &&
+                    Number.isFinite(parsedMillNo) &&
+                    parsedMillNo === liveNdt.millNo &&
+                    liveNdt.count != null
+                      ? liveNdt.count
                       : "—";
                   return (
-                    <tr key={m} className="hover:bg-gray-50">
+                    <tr key={Number.isFinite(parsedMillNo) ? `mill-${parsedMillNo}` : `mill-${String(m)}`} className="hover:bg-gray-50">
                       <td className="px-4 py-3 font-semibold text-gray-900 whitespace-nowrap">
                         Mill-{m}
                       </td>

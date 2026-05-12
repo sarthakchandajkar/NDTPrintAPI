@@ -8,20 +8,23 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
     private readonly IBundleOutputWriter _outputWriter;
     private readonly INdtBatchStateService _batchState;
     private readonly ICurrentPoPlanService? _currentPoPlanService;
+    private readonly IMillSlitLiveNdtAccumulator _liveNdtAccumulator;
     private readonly ILogger<PoEndWorkflowService> _logger;
 
     public PoEndWorkflowService(
         IBundleEngine bundleEngine,
         IBundleOutputWriter outputWriter,
         INdtBatchStateService batchState,
+        IMillSlitLiveNdtAccumulator liveNdtAccumulator,
         ILogger<PoEndWorkflowService> logger,
         ICurrentPoPlanService? currentPoPlanService = null)
     {
         _bundleEngine = bundleEngine;
         _outputWriter = outputWriter;
         _batchState = batchState;
-        _currentPoPlanService = currentPoPlanService;
+        _liveNdtAccumulator = liveNdtAccumulator;
         _logger = logger;
+        _currentPoPlanService = currentPoPlanService;
     }
 
     public async Task ExecuteAsync(string poNumber, int millNo, bool advancePoPlanFile, CancellationToken cancellationToken)
@@ -51,6 +54,8 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
             cancellationToken).ConfigureAwait(false);
 
         await _batchState.IncrementBatchOnPoEndAsync(po, millNo, cancellationToken).ConfigureAwait(false);
+
+        _liveNdtAccumulator.OnPoEndForMill(po, millNo);
 
         if (advancePoPlanFile && _currentPoPlanService != null)
             await _currentPoPlanService.AdvanceToNextPoAsync(cancellationToken).ConfigureAwait(false);

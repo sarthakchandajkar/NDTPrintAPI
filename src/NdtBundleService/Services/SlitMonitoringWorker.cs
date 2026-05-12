@@ -66,6 +66,20 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
         _logger.LogInformation("SlitMonitoringWorker started. Watching folder {Folder}", _options.InputSlitFolder);
 
+        var outputFolder = (_options.OutputBundleFolder ?? string.Empty).Trim();
+        if (string.IsNullOrEmpty(outputFolder))
+        {
+            _logger.LogWarning(
+                "NdtBundle:OutputBundleFolder is not set. NDT Input Slit CSV files (with NDT Batch No) will not be written. " +
+                "Set it to e.g. Z:\\To SAP\\TM\\NDT\\NDT Input Slit\\Input Slit.");
+        }
+        else
+        {
+            _logger.LogInformation(
+                "NDT Input Slit output CSV folder (NdtBundle:OutputBundleFolder): {Folder}",
+                outputFolder);
+        }
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -199,9 +213,47 @@ public sealed class SlitMonitoringWorker : BackgroundService
                         RejectedShortLengthPipe = record.RejectedShortLengthPipe,
                     };
 
-                    var (batchNumber, _, _) = await _batchState
-                        .GetBatchForRecordAsync(effectiveRecord.PoNumber, effectiveRecord.MillNo, effectiveRecord.NdtPipes, cancellationToken)
+                    // MillSlitLive: PLC value is for live display in the output NDT Pipes column only.
+                    // NDT Batch No, bundle state, and tag printing follow the Input Slit CSV row (slit end),
+                    // so thresholds apply to whole-slit totals (e.g. 9 + 6 → one label for 15), not PLC step deltas.
+                    var bundleNdtPipes = useLiveThisRow && plcNdt.HasValue ? record.NdtPipes : effectiveRecord.NdtPipes;
+                    var bundleRecord = CloneRecordWithNdt(effectiveRecord, bundleNdtPipes);
+
+                    var (bn, _, _) = await _batchState
+                        .GetBatchForRecordAsync(
+                            bundleRecord.PoNumber,
+                            bundleRecord.MillNo,
+                            bundleRecord.NdtPipes,
+                            cancellationToken)
                         .ConfigureAwait(false);
+                    var batchNumber = bn;
+
+                    try
+                    {
+                        await _bundleEngine.ProcessSlitRecordAsync(
+                            bundleRecord,
+                            async (contextRecord, batchNo, totalNdtPcs) =>
+                            {
+                                try
+                                {
+                                    await _outputWriter.WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken).ConfigureAwait(false);
+                                    _logger.LogInformation(
+                                        "Bundle output completed for {BatchNo} ({Pcs} pcs).",
+                                        FormatNdtBatchNo(batchNo, contextRecord.MillNo),
+                                        totalNdtPcs);
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.LogError(ex, "Tag print failed for bundle {BatchNo}.", FormatNdtBatchNo(batchNo, contextRecord.MillNo));
+                                }
+                            },
+                            cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Bundle engine failed for record in {File}; output CSV was already written.", file);
+                    }
+
                     var ndtBatchNoFormatted = FormatNdtBatchNo(batchNumber, effectiveRecord.MillNo);
 
                     var rawOut = row.RawLine;
@@ -212,34 +264,10 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     inputRowsForSql.Add((record, sourceRowNumber));
                     outputRowsForSql.Add((effectiveRecord, ndtBatchNoFormatted, sourceRowNumber));
                     sourceRowNumber++;
-
-                    // Let the bundle engine decide when a bundle is full; it calls the callback to write CSV and print tag.
-                    try
-                    {
-                        await _bundleEngine.ProcessSlitRecordAsync(effectiveRecord, async (contextRecord, batchNo, totalNdtPcs) =>
-                        {
-                            try
-                            {
-                                await _outputWriter.WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken).ConfigureAwait(false);
-                                _logger.LogInformation(
-                                    "Bundle output completed for {BatchNo} ({Pcs} pcs).",
-                                    FormatNdtBatchNo(batchNo, contextRecord.MillNo),
-                                    totalNdtPcs);
-                            }
-                            catch (Exception ex)
-                            {
-                                _logger.LogError(ex, "Tag print failed for bundle {BatchNo}.", FormatNdtBatchNo(batchNo, contextRecord.MillNo));
-                            }
-                        }, cancellationToken).ConfigureAwait(false);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Bundle engine failed for record in {File}; output CSV was already written.", file);
-                    }
                 }
 
                 // Write one output file: SlitNumber_Date_PONumber.csv (under OutputBundleFolder).
-                var outputFolder = _options.OutputBundleFolder;
+                var outputFolder = (_options.OutputBundleFolder ?? string.Empty).Trim();
                 string? outputPath = null;
                 if (!string.IsNullOrWhiteSpace(outputFolder))
                 {
@@ -282,6 +310,20 @@ public sealed class SlitMonitoringWorker : BackgroundService
         var safePo = CsvOutputFileNaming.SanitizeToken(po, "NA");
         return $"{safeSlit}_{date:yyyyMMdd}_{safePo}.csv";
     }
+
+    private static InputSlitRecord CloneRecordWithNdt(InputSlitRecord r, int ndtPipes) =>
+        new()
+        {
+            PoNumber = r.PoNumber,
+            SlitNo = r.SlitNo,
+            NdtPipes = ndtPipes,
+            RejectedPipes = r.RejectedPipes,
+            SlitStartTime = r.SlitStartTime,
+            SlitFinishTime = r.SlitFinishTime,
+            MillNo = r.MillNo,
+            NdtShortLengthPipe = r.NdtShortLengthPipe,
+            RejectedShortLengthPipe = r.RejectedShortLengthPipe,
+        };
 
     private static string FormatNdtBatchNo(int sequenceNumber, int millNo)
     {

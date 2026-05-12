@@ -11,12 +11,16 @@ public class NdtBundleOptions
     /// </summary>
     public string InputSlitAcceptedFolder { get; set; } = string.Empty;
 
-    /// <summary>Folder where output bundle CSV files (with NDT_Batch_No) are written.</summary>
+    /// <summary>
+    /// Folder for NDT Input Slit output CSVs: same columns as input plus <c>NDT Batch No</c> (written by <c>SlitMonitoringWorker</c>).
+    /// Production example: <c>Z:\To SAP\TM\NDT\NDT Input Slit\Input Slit</c>. When empty, those files are not written.
+    /// </summary>
     public string OutputBundleFolder { get; set; } = string.Empty;
 
     /// <summary>
-    /// Folder for the single consolidated NDT process CSV (written only after Revisual completes) and optional ZPL previews.
-    /// Per-station Visual/Hydro/Revisual output folders are not used; one file combines all three steps.
+    /// Folder for the single consolidated NDT process CSV (written after Revisual completes) and optional ZPL previews.
+    /// Also scanned as input when generating Upload NDT Bundle CSVs. Production example:
+    /// <c>Z:\To SAP\TM\NDT\NDT Final Output\Bundle</c> (folder must exist for the upload scheduler).
     /// </summary>
     public string NdtProcessOutputFolder { get; set; } = @"Z:\To SAP\TM\NDT\NDT Final Output\Bundle";
 
@@ -62,7 +66,10 @@ public class NdtBundleOptions
     /// <summary>When <see cref="EnableBundleSummaryCsvFiles"/> is true, folder for NDT_Bundle_*.csv summaries; when empty, falls back to <see cref="OutputBundleFolder"/>. Also used when scanning CSVs for bundle list if not using SQL.</summary>
     public string BundleSummaryOutputFolder { get; set; } = string.Empty;
 
-    /// <summary>Folder where Upload NDT Bundle Files CSV output is written.</summary>
+    /// <summary>
+    /// Folder where scheduled/manual <c>UploadNdtBundle__PO__…</c> CSV files are written.
+    /// Production example: <c>Z:\To SAP\TM\NDT\MES PAS NDT\Bundle</c>.
+    /// </summary>
     public string UploadNdtBundleFilesFolder { get; set; } = @"Z:\To SAP\TM\NDT\MES PAS NDT\Bundle";
 
     /// <summary>Folder where Slit Accepted files are written (used to map slit width by slit batch number).</summary>

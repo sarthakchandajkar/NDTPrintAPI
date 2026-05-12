@@ -167,6 +167,21 @@ public interface IMillNdtCountReader
 }
 
 /// <summary>
+/// MillSlitLive PLC counter tracking (legacy / diagnostics). Bundle CSV and tags use Input Slit CSV slit totals per
+/// <see cref="SlitMonitoringWorker"/>; PO end clears any cached PLC baseline via <see cref="OnPoEndForMill"/>.
+/// </summary>
+public interface IMillSlitLiveNdtAccumulator
+{
+    /// <summary>
+    /// Legacy hook: PLC deltas for bundle splitting (no longer used by <see cref="SlitMonitoringWorker"/> for tags/CSV batch).
+    /// </summary>
+    IReadOnlyList<int>? TryConsumeRawForBundleIncrements(string normalizedPoNumber, int millNo, int plcRawNdt);
+
+    /// <summary>Clears the PLC baseline for this PO/mill after PO end so counts do not carry incorrectly.</summary>
+    void OnPoEndForMill(string normalizedPoNumber, int millNo);
+}
+
+/// <summary>
 /// Shared state for NDT batch number and running total per (PO, Mill).
 /// Batch increments when count reaches formation chart threshold or on PO End.
 /// </summary>

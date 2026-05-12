@@ -25,6 +25,8 @@ namespace NdtBundleService.Controllers;
     private readonly IFormationChartProvider _formationChartProvider;
     private readonly IPipeSizeProvider _pipeSizeProvider;
     private readonly IActivePoPerMillService _activePoPerMill;
+    private readonly IWipBundleRunningPoProvider _wipBundleRunningPo;
+    private readonly IMillNdtCountReader _millNdtCountReader;
     private readonly IPoEndWorkflowService _poEndWorkflow;
     private readonly ILogger<TestController> _logger;
     private readonly NdtBundleOptions _options;
@@ -38,6 +40,8 @@ namespace NdtBundleService.Controllers;
         IFormationChartProvider formationChartProvider,
         IPipeSizeProvider pipeSizeProvider,
         IActivePoPerMillService activePoPerMill,
+        IWipBundleRunningPoProvider wipBundleRunningPo,
+        IMillNdtCountReader millNdtCountReader,
         IPoEndWorkflowService poEndWorkflow,
         ICurrentPoPlanService? currentPoPlanService = null)
     {
@@ -47,6 +51,8 @@ namespace NdtBundleService.Controllers;
         _formationChartProvider = formationChartProvider;
         _pipeSizeProvider = pipeSizeProvider;
         _activePoPerMill = activePoPerMill;
+        _wipBundleRunningPo = wipBundleRunningPo;
+        _millNdtCountReader = millNdtCountReader;
         _poEndWorkflow = poEndWorkflow;
         _currentPoPlanService = currentPoPlanService;
         _logger = logger;
@@ -226,7 +232,8 @@ namespace NdtBundleService.Controllers;
 
     /// <summary>
     /// Returns WIP plan rows grouped for mills 1–4.
-    /// <b>Current PO per mill</b> comes from the latest slit CSV rows in <see cref="NdtBundleOptions.InputSlitFolder"/> and, when set, <see cref="NdtBundleOptions.InputSlitAcceptedFolder"/> (read-only; real-time).
+    /// <b>Current PO per mill</b> comes first from the latest slit CSV rows in <see cref="NdtBundleOptions.InputSlitFolder"/> and, when set, <see cref="NdtBundleOptions.InputSlitAcceptedFolder"/> (read-only; real-time).
+    /// When a mill has no slit row yet, the PO is taken from the latest <c>WIP_MM_…</c> filename in <see cref="MillSlitLiveOptions.WipBundleFolder"/> / <see cref="MillSlitLiveOptions.WipBundleAcceptedFolder"/> (same as <see cref="IWipBundleRunningPoProvider"/>).
     /// Pipe size, planned month, and SAP pieces/bundle are enriched from merged WIP files in <see cref="NdtBundleOptions.PoPlanFolder"/> when the PO matches.
     /// When <see cref="NdtBundleOptions.PoPlanFolder"/> is set, WIP CSVs are merged (newer files override per mill) for enrichment only.
     /// </summary>
@@ -257,7 +264,7 @@ namespace NdtBundleService.Controllers;
                 foreach (var file in files)
                     await MergeWipFileIntoByMillAsync(file, wipByMill, wipByPo, cancellationToken).ConfigureAwait(false);
 
-                sourcePath = $"{planFolder} ({files.Length} WIP CSV file(s); PO per mill from Input Slit + Input Slit Accepted folders)";
+                sourcePath = $"{planFolder} ({files.Length} WIP CSV file(s); PO per mill from slits, else TM Bundle / Bundle Accepted WIP filenames)";
             }
             else
             {
@@ -284,12 +291,19 @@ namespace NdtBundleService.Controllers;
                 wipByMill.TryGetValue(m, out var wipRowForMill);
                 slitPoByMill.TryGetValue(m, out var slitPo);
 
-                if (!string.IsNullOrWhiteSpace(slitPo))
+                var bundleFilePo = string.IsNullOrWhiteSpace(slitPo)
+                    ? await _wipBundleRunningPo.TryGetRunningPoForMillAsync(m, cancellationToken).ConfigureAwait(false)
+                    : null;
+                var resolvedPo = !string.IsNullOrWhiteSpace(slitPo)
+                    ? slitPo
+                    : bundleFilePo;
+
+                if (!string.IsNullOrWhiteSpace(resolvedPo))
                 {
-                    var row = new WipByMillRowDto { MillNo = m, PoNumber = slitPo };
-                    if (wipByPo.TryGetValue(slitPo, out var byPo))
+                    var row = new WipByMillRowDto { MillNo = m, PoNumber = resolvedPo };
+                    if (wipByPo.TryGetValue(resolvedPo, out var byPo))
                         CopyWipDetails(row, byPo);
-                    else if (wipRowForMill != null && InputSlitCsvParsing.PoEquals(wipRowForMill.PoNumber, slitPo))
+                    else if (wipRowForMill != null && InputSlitCsvParsing.PoEquals(wipRowForMill.PoNumber, resolvedPo))
                         CopyWipDetails(row, wipRowForMill);
 
                     mills.Add(row);
@@ -302,6 +316,23 @@ namespace NdtBundleService.Controllers;
                 {
                     mills.Add(new WipByMillRowDto { MillNo = m, PoNumber = string.Empty });
                 }
+            }
+
+            var liveOpts = _options.MillSlitLive;
+            foreach (var row in mills)
+            {
+                if (string.IsNullOrWhiteSpace(row.PoNumber) || !string.IsNullOrWhiteSpace(row.PipeSize))
+                    continue;
+                await WipBundleWipCsvEnricher.TryEnrichRowAsync(row, liveOpts, _logger, cancellationToken).ConfigureAwait(false);
+            }
+
+            var pipeSizeByPo = await _pipeSizeProvider.GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
+            foreach (var row in mills)
+            {
+                if (string.IsNullOrWhiteSpace(row.PoNumber) || !string.IsNullOrWhiteSpace(row.PipeSize))
+                    continue;
+                if (pipeSizeByPo.TryGetValue(row.PoNumber, out var ps) && !string.IsNullOrWhiteSpace(ps))
+                    row.PipeSize = ps.Trim();
             }
 
             var formation = await _formationChartProvider.GetFormationChartAsync(cancellationToken).ConfigureAwait(false);
@@ -317,9 +348,25 @@ namespace NdtBundleService.Controllers;
                 row.NdtPcsPerBundle = ResolveNdtPcsPerBundleFromChart(formation, pipeSize);
             }
 
+            int? liveNdtCount = null;
+            if (liveOpts.Enabled && liveOpts.ApplyToMillNo is >= 1 and <= 4)
+                liveNdtCount = await _millNdtCountReader.TryReadNdtPipesCountAsync(cancellationToken).ConfigureAwait(false);
+
             var slitLocations = string.Join(" | ", _activePoPerMill.GetInputSlitReadFolderPaths().Where(static p => !string.IsNullOrWhiteSpace(p)));
-            var detail = $"WIP: {sourcePath}; current PO per mill from slit CSVs in: {slitLocations}";
-            return Ok(new { Mills = mills, SourcePath = detail });
+            var bundleLoc = string.Join(
+                " | ",
+                new[] { liveOpts.WipBundleFolder, liveOpts.WipBundleAcceptedFolder }
+                    .Where(static s => !string.IsNullOrWhiteSpace(s))
+                    .Distinct(StringComparer.OrdinalIgnoreCase));
+            var detail = string.IsNullOrEmpty(bundleLoc)
+                ? $"WIP: {sourcePath}; current PO per mill from slit CSVs in: {slitLocations}"
+                : $"WIP: {sourcePath}; PO from slits: {slitLocations}; when missing, from TM WIP bundle filenames in: {bundleLoc}";
+            return Ok(new
+            {
+                Mills = mills,
+                SourcePath = detail,
+                LiveMillNdt = new { millNo = liveOpts.ApplyToMillNo, ndtCount = liveNdtCount },
+            });
         }
         catch (OperationCanceledException)
         {
@@ -331,6 +378,33 @@ namespace NdtBundleService.Controllers;
             _logger.LogError(ex, "GetWipByMills failed.");
             return StatusCode(500, new { Message = "Failed to load WIP by mills.", Error = ex.Message });
         }
+    }
+
+    /// <summary>
+    /// Lightweight read of the live Siemens NDT counter for the mill configured in <c>MillSlitLive</c> (same DB read as the slit worker).
+    /// Use for dashboard polling when Socket.IO is unavailable. Query <paramref name="millNo"/> defaults to <see cref="MillSlitLiveOptions.ApplyToMillNo"/> when 0.
+    /// </summary>
+    [HttpGet("live-mill-ndt")]
+    public async Task<IActionResult> GetLiveMillNdt(CancellationToken cancellationToken, [FromQuery] int millNo = 0)
+    {
+        var live = _options.MillSlitLive;
+        var m = millNo <= 0 ? live.ApplyToMillNo : millNo;
+        if (m is < 1 or > 4)
+            return BadRequest(new { Message = "millNo must be 1..4 (or 0 to use MillSlitLive.ApplyToMillNo)." });
+
+        if (!live.Enabled || m != live.ApplyToMillNo)
+        {
+            return Ok(new
+            {
+                millNo = m,
+                ndtCount = (int?)null,
+                liveMillConfigured = live.ApplyToMillNo,
+                message = "MillSlitLive is not enabled for this mill.",
+            });
+        }
+
+        var ndt = await _millNdtCountReader.TryReadNdtPipesCountAsync(cancellationToken).ConfigureAwait(false);
+        return Ok(new { millNo = m, ndtCount = ndt });
     }
 
     private static void CopyWipDetails(WipByMillRowDto target, WipByMillRowDto source)

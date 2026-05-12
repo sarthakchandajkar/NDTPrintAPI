@@ -59,9 +59,24 @@ export interface WipByMillRow {
   totalPieces?: string;
 }
 
+/** Present on wip-by-mills when MillSlitLive is enabled for a mill (1–4); ndtCount from same PLC DB read as the slit worker. */
+export interface LiveMillNdtPayload {
+  millNo?: number;
+  ndtCount?: number | null;
+}
+
 export interface WipByMillsResponse {
   mills?: WipByMillRow[];
   sourcePath?: string;
+  liveMillNdt?: LiveMillNdtPayload;
+}
+
+/** GET /api/Test/live-mill-ndt — lightweight poll; millNo 0 uses MillSlitLive.ApplyToMillNo on the server. */
+export interface LiveMillNdtPollResponse {
+  millNo?: number;
+  ndtCount?: number | null;
+  liveMillConfigured?: number;
+  message?: string;
 }
 
 export interface NdtSummary {
@@ -170,6 +185,8 @@ export interface UploadBundleGenerationResponse {
 export const api = {
   wipInfo: () => fetchApi<WipInfo>("/api/Test/wip-info"),
   wipByMills: () => fetchApi<WipByMillsResponse>("/api/Test/wip-by-mills"),
+  liveMillNdt: (millNo = 0) =>
+    fetchApi<LiveMillNdtPollResponse>(`/api/Test/live-mill-ndt?millNo=${encodeURIComponent(String(millNo))}`),
   ndtSummary: (poNumber: string, millNo: number) =>
     fetchApi<NdtSummary>(`/api/Test/ndt-summary?poNumber=${encodeURIComponent(poNumber)}&millNo=${millNo}`),
   ndtSummaryRunningPo: () => fetchApi<RunningPoNdtSummary[]>("/api/Test/ndt-summary-running-po"),
