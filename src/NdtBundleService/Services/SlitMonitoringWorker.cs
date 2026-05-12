@@ -12,10 +12,11 @@ namespace NdtBundleService.Services;
 /// feeds records into the bundle engine, and reacts to PO-end signals.
 /// At startup, each CSV already in the inbox is recorded with its current LastWriteTimeUtc so we do not backlog-generate outputs.
 /// When the same path is written again (newer LastWriteTimeUtc), it is processed. Brand-new paths are processed when they appear.
+/// Inbox files may have no extension (SAP) or <c>.csv</c>; only reads them—never moves or deletes source files in <see cref="NdtBundleOptions.InputSlitFolder"/>.
 /// </summary>
 public sealed class SlitMonitoringWorker : BackgroundService
 {
-    private readonly NdtBundleOptions _options;
+    private readonly IOptionsMonitor<NdtBundleOptions> _optionsMonitor;
     private readonly IBundleEngine _bundleEngine;
     private readonly IBundleOutputWriter _outputWriter;
     private readonly INdtBatchStateService _batchState;
@@ -30,7 +31,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
     private readonly Dictionary<string, DateTime> _inputSlitLastHandledWriteUtc = new(StringComparer.OrdinalIgnoreCase);
 
     public SlitMonitoringWorker(
-        IOptions<NdtBundleOptions> options,
+        IOptionsMonitor<NdtBundleOptions> optionsMonitor,
         IBundleEngine bundleEngine,
         IBundleOutputWriter outputWriter,
         INdtBatchStateService batchState,
@@ -40,7 +41,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         IMillNdtCountReader millNdtCountReader,
         ILogger<SlitMonitoringWorker> logger)
     {
-        _options = options.Value;
+        _optionsMonitor = optionsMonitor;
         _bundleEngine = bundleEngine;
         _outputWriter = outputWriter;
         _batchState = batchState;
@@ -53,25 +54,18 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (string.IsNullOrWhiteSpace(_options.InputSlitFolder))
-        {
-            _logger.LogWarning("InputSlitFolder is not configured. Worker will not process any files.");
+        if (!await WaitForInputSlitFolderExistsAsync(stoppingToken).ConfigureAwait(false))
             return;
-        }
 
-        if (!Directory.Exists(_options.InputSlitFolder))
-        {
-            _logger.LogWarning(
-                "InputSlitFolder does not exist or is not reachable (service will not create it): {Folder}",
-                _options.InputSlitFolder);
+        if (stoppingToken.IsCancellationRequested)
             return;
-        }
 
-        _logger.LogInformation("SlitMonitoringWorker started. Watching folder {Folder}", _options.InputSlitFolder);
+        var inbox = (_optionsMonitor.CurrentValue.InputSlitFolder ?? string.Empty).Trim();
+        _logger.LogInformation("SlitMonitoringWorker started. Watching folder {Folder}", inbox);
 
         SeedPreExistingInputSlitCsvsAsProcessed();
 
-        var outputFolder = (_options.OutputBundleFolder ?? string.Empty).Trim();
+        var outputFolder = (_optionsMonitor.CurrentValue.OutputBundleFolder ?? string.Empty).Trim();
         if (string.IsNullOrEmpty(outputFolder))
         {
             _logger.LogWarning(
@@ -98,22 +92,56 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 _logger.LogError(ex, "Error while processing slit files or PLC signals.");
             }
 
-            var delaySeconds = Math.Max(1, _options.PollIntervalSeconds);
+            var delaySeconds = Math.Max(1, _optionsMonitor.CurrentValue.PollIntervalSeconds);
             await Task.Delay(TimeSpan.FromSeconds(delaySeconds), stoppingToken).ConfigureAwait(false);
         }
     }
 
     /// <summary>
-    /// Records each existing <c>*.csv</c> with its current LastWriteTimeUtc so we do not backlog-generate NDT outputs for slits
+    /// Waits until <see cref="NdtBundleOptions.InputSlitFolder"/> exists. Mapped drives (e.g. Z:\) often appear only after
+    /// user logon; Local System never sees them—use a service account with the drive or a UNC path.
+    /// </summary>
+    private async Task<bool> WaitForInputSlitFolderExistsAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            var folder = (_optionsMonitor.CurrentValue.InputSlitFolder ?? string.Empty).Trim();
+            if (string.IsNullOrEmpty(folder))
+            {
+                _logger.LogWarning("InputSlitFolder is not configured. SlitMonitoringWorker will not process files.");
+                return false;
+            }
+
+            try
+            {
+                if (Directory.Exists(folder))
+                    return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error while checking Input Slit folder {Folder}.", folder);
+            }
+
+            _logger.LogWarning(
+                "InputSlitFolder is not reachable: {Folder}. Mapped drives (Z:\\) are per-user—run the service under that user or switch to a UNC path. Retrying in 10s.",
+                folder);
+            await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken).ConfigureAwait(false);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Records each existing slit inbox file (no extension or <c>.csv</c>) with its current LastWriteTimeUtc so we do not backlog-generate NDT outputs for slits
     /// that completed before this process started. Overwrites of the same path (newer timestamp) are picked up on later polls.
     /// </summary>
     private void SeedPreExistingInputSlitCsvsAsProcessed()
     {
-        var folder = _options.InputSlitFolder;
+        var folder = (_optionsMonitor.CurrentValue.InputSlitFolder ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
             return;
 
-        foreach (var path in Directory.EnumerateFiles(folder, "*.csv"))
+        foreach (var path in InputSlitInboxEnumeration.EnumerateFiles(folder))
         {
             var full = Path.GetFullPath(path);
             try
@@ -130,23 +158,43 @@ public sealed class SlitMonitoringWorker : BackgroundService
         if (n > 0)
         {
             _logger.LogInformation(
-                "Input Slit: recorded {Count} CSV file(s) already in {Folder} at service start (no NDT output for those versions). New paths or same path with a newer LastWriteTimeUtc will be processed.",
+                "Input Slit: recorded {Count} slit file(s) already in {Folder} at service start (no NDT output for those versions). New paths or same path with a newer LastWriteTimeUtc will be processed.",
                 n,
                 folder);
         }
         else
         {
-            _logger.LogInformation("Input Slit: no pre-existing CSV files in {Folder} at service start.", folder);
+            _logger.LogInformation("Input Slit: no pre-existing slit files in {Folder} at service start.", folder);
         }
     }
 
     private async Task ProcessNewSlitFilesAsync(CancellationToken cancellationToken)
     {
-        var files = Directory.EnumerateFiles(_options.InputSlitFolder, "*.csv");
-        var minUtc = SourceFileEligibility.ParseMinUtc(_options);
-        var live = _options.MillSlitLive;
+        var o = _optionsMonitor.CurrentValue;
+        var inputFolder = (o.InputSlitFolder ?? string.Empty).Trim();
+        if (string.IsNullOrEmpty(inputFolder) || !Directory.Exists(inputFolder))
+        {
+            _logger.LogWarning(
+                "Input Slit folder is not available this poll cycle: {Folder}. Skipping until it is reachable again.",
+                string.IsNullOrEmpty(inputFolder) ? "(not configured)" : inputFolder);
+            return;
+        }
 
-        foreach (var file in files)
+        IEnumerable<string> filesEnumerable;
+        try
+        {
+            filesEnumerable = InputSlitInboxEnumeration.EnumerateFiles(inputFolder);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Cannot enumerate slit files in Input Slit folder {Folder}.", inputFolder);
+            return;
+        }
+
+        var minUtc = SourceFileEligibility.ParseMinUtc(o);
+        var live = o.MillSlitLive;
+
+        foreach (var file in filesEnumerable)
         {
             var fileFull = Path.GetFullPath(file);
             DateTime lwUtc;
@@ -168,7 +216,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 if (minUtc.HasValue)
                 {
                     _logger.LogWarning(
-                        "Skipping Input Slit CSV {File}: LastWriteUtc {LastWrite:o} is before NdtBundle:MinSourceFileLastWriteUtc {Min:o}. Clear or update MinSourceFileLastWriteUtc if this file should be processed.",
+                        "Skipping Input Slit file {File}: LastWriteUtc {LastWrite:o} is before NdtBundle:MinSourceFileLastWriteUtc {Min:o}. Clear or update MinSourceFileLastWriteUtc if this file should be processed.",
                         fileFull,
                         lwUtc,
                         minUtc.Value);
@@ -177,7 +225,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 continue;
             }
 
-            _logger.LogInformation("Processing Input Slit CSV file {File}", fileFull);
+            _logger.LogInformation("Processing Input Slit file {File}", fileFull);
 
             try
             {
@@ -332,7 +380,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 }
 
                 // Write one output file: SlitNumber_Date_PONumber.csv (under OutputBundleFolder).
-                var outputFolder = (_options.OutputBundleFolder ?? string.Empty).Trim();
+                var outputFolder = (o.OutputBundleFolder ?? string.Empty).Trim();
                 string? outputPath = null;
                 if (!string.IsNullOrWhiteSpace(outputFolder))
                 {
@@ -353,7 +401,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to process Input Slit CSV file {File}", fileFull);
+                _logger.LogError(ex, "Failed to process Input Slit file {File}", fileFull);
             }
         }
     }

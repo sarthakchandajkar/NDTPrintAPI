@@ -593,7 +593,7 @@ namespace NdtBundleService.Controllers;
             if (!Directory.Exists(folder))
                 continue;
 
-            foreach (var file in Directory.EnumerateFiles(folder, "*.csv"))
+            foreach (var file in InputSlitInboxEnumeration.EnumerateFiles(folder))
             {
                 if (!SourceFileEligibility.IncludeFileUtc(System.IO.File.GetLastWriteTimeUtc(file), minUtc))
                     continue;
@@ -705,7 +705,7 @@ namespace NdtBundleService.Controllers;
                     if (!Directory.Exists(folder))
                         continue;
 
-                    foreach (var file in Directory.EnumerateFiles(folder, "*.csv"))
+                    foreach (var file in InputSlitInboxEnumeration.EnumerateFiles(folder))
                     {
                         if (!SourceFileEligibility.IncludeFileUtc(System.IO.File.GetLastWriteTimeUtc(file), minUtc))
                             continue;

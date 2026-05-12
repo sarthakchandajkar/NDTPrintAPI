@@ -97,7 +97,7 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
         {
             if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
                 continue;
-            foreach (var file in Directory.EnumerateFiles(folder, "*.csv"))
+            foreach (var file in InputSlitInboxEnumeration.EnumerateFiles(folder))
             {
                 var fi = new FileInfo(file);
                 if (SourceFileEligibility.IncludeFileUtc(fi.LastWriteTimeUtc, minUtc))
@@ -237,7 +237,7 @@ WHERE rn = 1;";
         {
             if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
                 continue;
-            foreach (var file in Directory.EnumerateFiles(folder, "*.csv"))
+            foreach (var file in InputSlitInboxEnumeration.EnumerateFiles(folder))
             {
                 if (SourceFileEligibility.IncludeFileUtc(File.GetLastWriteTimeUtc(file), minUtc))
                     acc.Add(file);

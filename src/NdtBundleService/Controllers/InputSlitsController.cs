@@ -7,7 +7,7 @@ using NdtBundleService.Services;
 namespace NdtBundleService.Controllers;
 
 /// <summary>
-/// List and read input slit CSV files from the configured InputSlitFolder.
+/// List and read input slit files (extensionless SAP exports or <c>.csv</c>) from the configured InputSlitFolder.
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
@@ -24,7 +24,7 @@ public sealed class InputSlitsController : ControllerBase
     }
 
     /// <summary>
-    /// List CSV files in the input slit folder (name, lastModified).
+    /// List slit inbox files in the input slit folder (name, lastModified)—extensionless SAP exports or <c>.csv</c>.
     /// </summary>
     [HttpGet("files")]
     public IActionResult ListFiles()
@@ -34,7 +34,7 @@ public sealed class InputSlitsController : ControllerBase
             return Ok(Array.Empty<object>());
 
         var minUtc = SourceFileEligibility.ParseMinUtc(_options);
-        var files = Directory.EnumerateFiles(folder, "*.csv")
+        var files = InputSlitInboxEnumeration.EnumerateFiles(folder)
             .Select(path =>
             {
                 var fi = new FileInfo(path);
@@ -53,7 +53,7 @@ public sealed class InputSlitsController : ControllerBase
     }
 
     /// <summary>
-    /// Get parsed content of an input slit CSV file. FileName must be the base name (no path).
+    /// Get parsed content of an input slit file (extensionless or <c>.csv</c>). FileName must be the base name (no path).
     /// </summary>
     [HttpGet("files/{fileName}/content")]
     public async Task<IActionResult> GetFileContent(string fileName, CancellationToken cancellationToken)

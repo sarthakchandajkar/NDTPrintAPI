@@ -63,7 +63,7 @@ Copy the published folder (e.g. `C:\Deploy\NdtBundleService`) to the production 
 
    Set **`ASPNETCORE_ENVIRONMENT=Production`** so this file merges with `appsettings.json`. **Physical labels** require `EnableNdtTagZplAndPrint=true`, a real **`NdtTagPrinterAddress`** (Honeywell PD45S–style ZPL on TCP **9100**), and the service account must reach that IP (firewall). **SQL traceability and `NDT_Bundle`** require `UseSqlServerForBundles=true` and a valid **`ConnectionString`** to `JazeeraMES_Prod` (often set via environment variable `NdtBundle__ConnectionString` on the VM instead of storing secrets in JSON). If someone calls `POST /api/Status/zpl-generation` with `enabled:false`, printing stays off until set back to `true` or the service restarts (override vs config: see `ZplGenerationToggle`).
 
-2. **Folders:** Create the paths used above and grant the service account **Read** on input/config and **Read/Write** on output.
+2. **Folders:** Create the paths used above and grant the service account **Read** on input/config and **Read/Write** on output. **Mapped drives (`Z:\`) are not visible to `Local System`:** run the service as a user that has those drives, or set `InputSlitFolder` / `OutputBundleFolder` to **UNC paths** (e.g. `\\fileserver\share\...`). `SlitMonitoringWorker` waits and retries every 10s until the input folder exists so a late-mounted `Z:\` is picked up after reboot.
 
 3. **URLs:** By default the app listens on `http://localhost:5000`. To change it, set `ASPNETCORE_URLS` (e.g. `http://*:5000`) or add `urls` in config.
 
