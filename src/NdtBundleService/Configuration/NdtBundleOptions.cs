@@ -72,8 +72,8 @@ public class NdtBundleOptions
     /// </summary>
     public string UploadNdtBundleFilesFolder { get; set; } = @"Z:\To SAP\TM\NDT\MES PAS NDT\Bundle";
 
-    /// <summary>Folder where Slit Accepted files are written (used to map slit width by slit batch number).</summary>
-    public string SlitAcceptedFolder { get; set; } = @"D:\NDT\To SAP\Slitting\Slit Accepted";
+    /// <summary>Folder where Slit Accepted files are written (used to map slit width by slit batch number). Production example: <c>Z:\To SAP\TM\Slitting\Slit Accepted</c>.</summary>
+    public string SlitAcceptedFolder { get; set; } = @"Z:\To SAP\TM\Slitting\Slit Accepted";
 
     /// <summary>When true, the upload bundle CSV generator runs on a timer.</summary>
     public bool EnableUploadNdtBundleScheduler { get; set; } = true;

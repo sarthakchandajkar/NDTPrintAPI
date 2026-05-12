@@ -67,19 +67,21 @@ public sealed class UploadBundleRow
 
 public sealed class TraceabilityRepository : ITraceabilityRepository
 {
-    private readonly NdtBundleOptions _options;
+    private readonly IOptionsMonitor<NdtBundleOptions> _optionsMonitor;
     private readonly ILogger<TraceabilityRepository> _logger;
 
-    public TraceabilityRepository(IOptions<NdtBundleOptions> options, ILogger<TraceabilityRepository> logger)
+    public TraceabilityRepository(IOptionsMonitor<NdtBundleOptions> optionsMonitor, ILogger<TraceabilityRepository> logger)
     {
-        _options = options.Value;
+        _optionsMonitor = optionsMonitor;
         _logger = logger;
     }
 
-    private bool Enabled =>
-        _options.UseSqlServerForBundles && !string.IsNullOrWhiteSpace(_options.ConnectionString);
+    private NdtBundleOptions Opt => _optionsMonitor.CurrentValue;
 
-    private SqlConnection CreateConnection() => new(_options.ConnectionString);
+    private bool Enabled =>
+        Opt.UseSqlServerForBundles && !string.IsNullOrWhiteSpace(Opt.ConnectionString);
+
+    private SqlConnection CreateConnection() => new(Opt.ConnectionString);
 
     public async Task RecordInputSlitRowsAsync(
         string sourceFile,

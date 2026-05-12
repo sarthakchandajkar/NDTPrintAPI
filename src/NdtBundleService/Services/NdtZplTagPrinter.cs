@@ -12,20 +12,20 @@ namespace NdtBundleService.Services;
 /// </summary>
 public sealed class NdtZplTagPrinter : INdtTagPrinter
 {
-    private readonly NdtBundleOptions _options;
+    private readonly IOptionsMonitor<NdtBundleOptions> _options;
     private readonly IZplGenerationToggle _zplToggle;
     private readonly IWipLabelProvider _wipLabelProvider;
     private readonly INetworkPrinterSender _sender;
     private readonly ILogger<NdtZplTagPrinter> _logger;
 
     public NdtZplTagPrinter(
-        IOptions<NdtBundleOptions> options,
+        IOptionsMonitor<NdtBundleOptions> options,
         IZplGenerationToggle zplToggle,
         IWipLabelProvider wipLabelProvider,
         INetworkPrinterSender sender,
         ILogger<NdtZplTagPrinter> logger)
     {
-        _options = options.Value;
+        _options = options;
         _zplToggle = zplToggle;
         _wipLabelProvider = wipLabelProvider;
         _sender = sender;
@@ -36,15 +36,17 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
     {
         if (!_zplToggle.IsEnabled)
         {
-            _logger.LogDebug("NDT tag ZPL and network print are disabled (runtime toggle).");
+            _logger.LogWarning(
+                "NDT tag not sent to printer: ZPL/print is off (NdtBundle:EnableNdtTagZplAndPrint=false or disabled via POST /api/Status/zpl-generation).");
             return false;
         }
 
-        var address = (_options.NdtTagPrinterAddress ?? "").Trim();
+        var opt = _options.CurrentValue;
+        var address = (opt.NdtTagPrinterAddress ?? "").Trim();
         var useAddress = !string.IsNullOrEmpty(address) && !address.Equals("0.0.0.0", StringComparison.OrdinalIgnoreCase);
         if (!useAddress)
         {
-            _logger.LogDebug("NdtTagPrinterAddress not configured; skipping ZPL print.");
+            _logger.LogWarning("NDT tag not sent: NdtBundle:NdtTagPrinterAddress is not set (or is 0.0.0.0). Set the label printer IP, e.g. 192.168.0.125.");
             return false;
         }
 
@@ -78,7 +80,7 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
         // can be visualized in an external ZPL viewer without depending on the printer.
         await TrySaveZplPreviewAsync(zplBytes, ndtBatchNoFormatted, cancellationToken).ConfigureAwait(false);
 
-        var sendResult = await _sender.SendAsync(address, _options.NdtTagPrinterPort, zplBytes, cancellationToken).ConfigureAwait(false);
+        var sendResult = await _sender.SendAsync(address, opt.NdtTagPrinterPort, zplBytes, cancellationToken).ConfigureAwait(false);
         if (sendResult.Success)
             _logger.LogInformation("Printed NDT tag {BatchNo} ({Pcs} pcs) to {Address}.", ndtBatchNoFormatted, totalNdtPcs, address);
         else
@@ -90,7 +92,7 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
     {
         try
         {
-            var folder = (_options.OutputBundleFolder ?? string.Empty).Trim();
+            var folder = (_options.CurrentValue.OutputBundleFolder ?? string.Empty).Trim();
             if (string.IsNullOrEmpty(folder))
                 return;
 

@@ -10,7 +10,8 @@ namespace NdtBundleService.Services;
 /// <summary>
 /// Background service that periodically scans the Input Slit CSV folder,
 /// feeds records into the bundle engine, and reacts to PO-end signals.
-/// At startup, every CSV already in the folder is marked processed so only files that arrive after the service starts get NDT output CSVs.
+/// At startup, each CSV already in the inbox is recorded with its current LastWriteTimeUtc so we do not backlog-generate outputs.
+/// When the same path is written again (newer LastWriteTimeUtc), it is processed. Brand-new paths are processed when they appear.
 /// </summary>
 public sealed class SlitMonitoringWorker : BackgroundService
 {
@@ -24,8 +25,9 @@ public sealed class SlitMonitoringWorker : BackgroundService
     private readonly IMillNdtCountReader _millNdtCountReader;
     private readonly ILogger<SlitMonitoringWorker> _logger;
 
-    // Simple in-memory set to avoid reprocessing files during one runtime.
-    private readonly HashSet<string> _processedFiles = new(StringComparer.OrdinalIgnoreCase);
+    // Per input path: last LastWriteTimeUtc we treated as fully handled (seed baseline or successful run).
+    // Same path with a newer timestamp (SAP overwrite / same-name export) is processed again; unchanged files are skipped.
+    private readonly Dictionary<string, DateTime> _inputSlitLastHandledWriteUtc = new(StringComparer.OrdinalIgnoreCase);
 
     public SlitMonitoringWorker(
         IOptions<NdtBundleOptions> options,
@@ -102,8 +104,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
     }
 
     /// <summary>
-    /// Treats every <c>*.csv</c> already in <see cref="NdtBundleOptions.InputSlitFolder"/> as handled so we do not backlog-generate
-    /// NDT Input Slit outputs for slits that completed before this process started. New paths discovered on later polls are processed.
+    /// Records each existing <c>*.csv</c> with its current LastWriteTimeUtc so we do not backlog-generate NDT outputs for slits
+    /// that completed before this process started. Overwrites of the same path (newer timestamp) are picked up on later polls.
     /// </summary>
     private void SeedPreExistingInputSlitCsvsAsProcessed()
     {
@@ -111,19 +113,25 @@ public sealed class SlitMonitoringWorker : BackgroundService
         if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
             return;
 
-        var added = 0;
         foreach (var path in Directory.EnumerateFiles(folder, "*.csv"))
         {
             var full = Path.GetFullPath(path);
-            if (_processedFiles.Add(full))
-                added++;
+            try
+            {
+                _inputSlitLastHandledWriteUtc[full] = File.GetLastWriteTimeUtc(full);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Input Slit seed: could not read LastWriteTimeUtc for {File}", full);
+            }
         }
 
-        if (added > 0)
+        var n = _inputSlitLastHandledWriteUtc.Count;
+        if (n > 0)
         {
             _logger.LogInformation(
-                "Input Slit: {Count} CSV file(s) were already in {Folder} when the service started; they are skipped for this run. Any new CSV path that appears later will get an NDT Input Slit output with NDT Batch No.",
-                added,
+                "Input Slit: recorded {Count} CSV file(s) already in {Folder} at service start (no NDT output for those versions). New paths or same path with a newer LastWriteTimeUtc will be processed.",
+                n,
                 folder);
         }
         else
@@ -141,11 +149,33 @@ public sealed class SlitMonitoringWorker : BackgroundService
         foreach (var file in files)
         {
             var fileFull = Path.GetFullPath(file);
-            if (_processedFiles.Contains(fileFull))
+            DateTime lwUtc;
+            try
+            {
+                lwUtc = File.GetLastWriteTimeUtc(fileFull);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Input Slit: could not read LastWriteTimeUtc for {File}", fileFull);
+                continue;
+            }
+
+            if (_inputSlitLastHandledWriteUtc.TryGetValue(fileFull, out var lastHandledUtc) && lwUtc <= lastHandledUtc)
                 continue;
 
-            if (!SourceFileEligibility.IncludeFileUtc(File.GetLastWriteTimeUtc(fileFull), minUtc))
+            if (!SourceFileEligibility.IncludeFileUtc(lwUtc, minUtc))
+            {
+                if (minUtc.HasValue)
+                {
+                    _logger.LogWarning(
+                        "Skipping Input Slit CSV {File}: LastWriteUtc {LastWrite:o} is before NdtBundle:MinSourceFileLastWriteUtc {Min:o}. Clear or update MinSourceFileLastWriteUtc if this file should be processed.",
+                        fileFull,
+                        lwUtc,
+                        minUtc.Value);
+                }
+
                 continue;
+            }
 
             _logger.LogInformation("Processing Input Slit CSV file {File}", fileFull);
 
@@ -319,7 +349,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 await _traceability.RecordInputSlitRowsAsync(fileFull, inputRowsForSql, cancellationToken).ConfigureAwait(false);
                 await _traceability.RecordOutputSlitRowsAsync(outputPath ?? fileFull, outputRowsForSql, cancellationToken).ConfigureAwait(false);
 
-                _processedFiles.Add(fileFull);
+                _inputSlitLastHandledWriteUtc[fileFull] = File.GetLastWriteTimeUtc(fileFull);
             }
             catch (Exception ex)
             {

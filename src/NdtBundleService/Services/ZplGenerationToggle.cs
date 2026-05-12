@@ -5,18 +5,20 @@ namespace NdtBundleService.Services;
 
 public sealed class ZplGenerationToggle : IZplGenerationToggle
 {
-    private volatile bool _enabled;
+    private readonly IOptionsMonitor<NdtBundleOptions> _options;
+    private bool? _manualOverride;
 
-    public ZplGenerationToggle(IOptions<NdtBundleOptions> options)
+    public ZplGenerationToggle(IOptionsMonitor<NdtBundleOptions> options)
     {
-        _enabled = options.Value.EnableNdtTagZplAndPrint;
+        _options = options;
     }
 
-    public bool IsEnabled => _enabled;
+    /// <summary>Effective ZPL/print flag: dashboard override if set, otherwise <see cref="NdtBundleOptions.EnableNdtTagZplAndPrint"/> from configuration.</summary>
+    public bool IsEnabled => _manualOverride ?? _options.CurrentValue.EnableNdtTagZplAndPrint;
 
     public bool SetEnabled(bool enabled)
     {
-        _enabled = enabled;
-        return _enabled;
+        _manualOverride = enabled;
+        return enabled;
     }
 }
