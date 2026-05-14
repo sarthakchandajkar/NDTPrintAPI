@@ -375,7 +375,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
                     outputLines.Add(rawOut.TrimEnd() + "," + ndtBatchNoFormatted);
                     inputRowsForSql.Add((record, sourceRowNumber));
-                    outputRowsForSql.Add((effectiveRecord, ndtBatchNoFormatted, sourceRowNumber));
+                    outputRowsForSql.Add((bundleRecord, ndtBatchNoFormatted, sourceRowNumber));
                     sourceRowNumber++;
                 }
 

@@ -137,6 +137,7 @@ public sealed class ReconcileController : ControllerBase
             return NotFound(new { Message = $"Bundle {batchNo} not found." });
 
         await _bundleRepository.UpdateBundlePipesAsync(batchNo, request.NewNdtPipes, cancellationToken).ConfigureAwait(false);
+        var summaryUpdated = await _bundleRepository.UpdateBundleSummaryCsvAsync(batchNo, request.NewNdtPipes, cancellationToken).ConfigureAwait(false);
         var filesUpdated = await _bundleRepository.UpdateOutputCsvFilesForBundleAsync(batchNo, request.NewNdtPipes, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation("Reconciled bundle {BatchNo}: NewNdtPipes={NewPipes}, CsvFilesUpdated={Count}.", batchNo, request.NewNdtPipes, filesUpdated);
@@ -145,7 +146,8 @@ public sealed class ReconcileController : ControllerBase
             Message = "Bundle reconciled. CSV(s) updated.",
             NdtBatchNo = batchNo,
             NewNdtPipes = request.NewNdtPipes,
-            CsvFilesUpdated = filesUpdated
+            CsvFilesUpdated = filesUpdated,
+            BundleSummaryUpdated = summaryUpdated
         });
     }
 
@@ -204,24 +206,20 @@ public sealed class ReconcileController : ControllerBase
             return NotFound(new { Message = $"No output CSV row found for bundle {batchNo} and slit {slitNo}." });
 
         var slits = await _bundleRepository.GetSlitsForBatchAsync(batchNo, cancellationToken).ConfigureAwait(false);
-        var newTotal = slits.Sum(s => s.NdtPipes);
-
-        await _bundleRepository.UpdateBundleTotalInDatabaseAsync(batchNo, newTotal, cancellationToken).ConfigureAwait(false);
-        var summaryUpdated = await _bundleRepository.UpdateBundleSummaryCsvAsync(batchNo, newTotal, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation(
-            "Reconciled slit {SlitNo} for bundle {BatchNo}: NewNdtPipes={NewPipes}, FilesUpdated={FilesUpdated}, NewTotal={NewTotal}, SummaryUpdated={SummaryUpdated}.",
-            slitNo, batchNo, request.NewNdtPipes, filesUpdated, newTotal, summaryUpdated);
+            "Reconciled slit {SlitNo} for bundle {BatchNo}: NewNdtPipes={NewPipes}, FilesUpdated={FilesUpdated}, BundleTotalNdtPcs={BundleTotal}.",
+            slitNo, batchNo, request.NewNdtPipes, filesUpdated, bundle.TotalNdtPcs);
 
         return Ok(new
         {
-            Message = "Slit reconciled. Output CSV updated and bundle total recomputed.",
+            Message = "Slit reconciled. Per-slit output CSV updated; bundle total (printed tag count) is unchanged. Use POST /api/Reconcile/reconcile to change the bundle total.",
             NdtBatchNo = batchNo,
             SlitNo = slitNo,
             NewNdtPipes = request.NewNdtPipes,
             FilesUpdated = filesUpdated,
-            NewBundleTotalNdtPcs = newTotal,
-            BundleSummaryUpdated = summaryUpdated,
+            NewBundleTotalNdtPcs = bundle.TotalNdtPcs,
+            BundleSummaryUpdated = false,
             Slits = slits.Select(s => new { SlitNo = s.SlitNo, NdtPipes = s.NdtPipes }).ToList()
         });
     }
@@ -252,22 +250,18 @@ public sealed class ReconcileController : ControllerBase
         await _traceability.DeleteOutputSlitRowsForRemovedOutputLinesAsync(batchNo, traceRefs, cancellationToken).ConfigureAwait(false);
 
         var slits = await _bundleRepository.GetSlitsForBatchAsync(batchNo, cancellationToken).ConfigureAwait(false);
-        var newTotal = slits.Sum(s => s.NdtPipes);
-
-        await _bundleRepository.UpdateBundleTotalInDatabaseAsync(batchNo, newTotal, cancellationToken).ConfigureAwait(false);
-        var summaryUpdated = await _bundleRepository.UpdateBundleSummaryCsvAsync(batchNo, newTotal, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation(
-            "Deleted {RowsRemoved} slit output row(s) for bundle {BatchNo}; trace refs {TraceCount}; new total {NewTotal}.",
-            rowsRemoved, batchNo, traceRefs.Count, newTotal);
+            "Deleted {RowsRemoved} slit output row(s) for bundle {BatchNo}; trace refs {TraceCount}; bundle total {BundleTotal}.",
+            rowsRemoved, batchNo, traceRefs.Count, bundle.TotalNdtPcs);
 
         return Ok(new
         {
-            Message = "Selected slit row(s) removed from output CSV(s); Output_Slit_Row entries removed where configured (Input_Slit_Row unchanged); bundle total updated.",
+            Message = "Selected slit row(s) removed from output CSV(s); Output_Slit_Row entries removed where configured (Input_Slit_Row unchanged). Bundle total (printed tag count) is unchanged; use POST /api/Reconcile/reconcile to change it.",
             NdtBatchNo = batchNo,
             RowsRemoved = rowsRemoved,
-            NewBundleTotalNdtPcs = newTotal,
-            BundleSummaryUpdated = summaryUpdated,
+            NewBundleTotalNdtPcs = bundle.TotalNdtPcs,
+            BundleSummaryUpdated = false,
             Slits = slits.Select(s => new { SlitNo = s.SlitNo, NdtPipes = s.NdtPipes }).ToList()
         });
     }

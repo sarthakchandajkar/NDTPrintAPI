@@ -117,6 +117,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         var opStation = NormalizeOperatorStationNumber(station, operatorStationNumber);
         var batch = ndtBatchNo.Trim();
         var state = await LoadOrCreateStateAsync(batch, cancellationToken).ConfigureAwait(false);
+        await RefreshInitialPcsFromBundleAsync(state, station, cancellationToken).ConfigureAwait(false);
         var incoming = GetIncomingForStation(state, station);
         var existing = GetExistingForStation(state, station);
 
@@ -377,22 +378,15 @@ public sealed class ManualNdtTagService : IManualNdtTagService
     private async Task<string> CompleteRevisualExportAsync(FlowState state, CancellationToken cancellationToken)
     {
         var csvPath = await WriteConsolidatedNdtProcessCsvAsync(state, cancellationToken).ConfigureAwait(false);
-        await RecordConsolidatedTraceabilityAsync(state, csvPath, cancellationToken).ConfigureAwait(false);
-
-        var finalOk = state.Revisual?.OkPcs ?? 0;
         try
         {
-            await _bundleRepository.UpdateBundleTotalInDatabaseAsync(state.NdtBatchNo, finalOk, cancellationToken).ConfigureAwait(false);
-            _logger.LogInformation(
-                "Updated NDT_Bundle total to {FinalOk} for batch {BatchNo} after Revisual.",
-                finalOk,
-                state.NdtBatchNo);
+            await RecordConsolidatedTraceabilityAsync(state, csvPath, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(
                 ex,
-                "NDT process CSV {Path} was written but NDT_Bundle total update failed for batch {BatchNo}.",
+                "NDT process CSV {Path} was written but SQL traceability failed for batch {BatchNo}.",
                 csvPath,
                 state.NdtBatchNo);
         }
@@ -571,6 +565,19 @@ public sealed class ManualNdtTagService : IManualNdtTagService
     }
 
     private string GetStatePath(string ndtBatchNo) => Path.Combine(GetStateFolder(), $"{ndtBatchNo}.json");
+
+    private async Task RefreshInitialPcsFromBundleAsync(FlowState state, ManualTagStation station, CancellationToken cancellationToken)
+    {
+        if (station != ManualTagStation.Visual || state.Visual != null)
+            return;
+
+        var bundle = await _bundleRepository.GetByBatchNoAsync(state.NdtBatchNo, cancellationToken).ConfigureAwait(false);
+        if (bundle is null || bundle.TotalNdtPcs <= 0 || bundle.TotalNdtPcs == state.InitialPcs)
+            return;
+
+        state.InitialPcs = bundle.TotalNdtPcs;
+        await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
+    }
 
     private async Task<FlowState> LoadOrCreateStateAsync(string ndtBatchNo, CancellationToken cancellationToken)
     {

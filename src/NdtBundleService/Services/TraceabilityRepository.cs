@@ -38,6 +38,16 @@ public interface ITraceabilityRepository
         string outputFilePath,
         CancellationToken cancellationToken);
 
+    /// <summary>Upserts label fields for (PO, Mill) when a bundle tag is formed or printed.</summary>
+    Task RecordBundleLabelAsync(
+        string poNumber,
+        int millNo,
+        string? specification,
+        string? type,
+        string? pipeSize,
+        string? length,
+        CancellationToken cancellationToken);
+
     Task RecordUploadBundleRowsAsync(string generatedFile, IReadOnlyList<UploadBundleRow> rows, CancellationToken cancellationToken);
 
     /// <summary>
@@ -81,7 +91,10 @@ public sealed class TraceabilityRepository : ITraceabilityRepository
     private bool Enabled =>
         Opt.UseSqlServerForBundles && !string.IsNullOrWhiteSpace(Opt.ConnectionString);
 
-    private SqlConnection CreateConnection() => new(Opt.ConnectionString);
+    private SqlConnection CreateConnection() => SqlTraceabilityConnection.Create(Opt.ConnectionString);
+
+    private Task OpenConnectionAsync(SqlConnection connection, string operation, CancellationToken cancellationToken) =>
+        SqlTraceabilityConnection.OpenAsync(connection, _logger, operation, cancellationToken);
 
     public async Task RecordInputSlitRowsAsync(
         string sourceFile,
@@ -94,7 +107,7 @@ public sealed class TraceabilityRepository : ITraceabilityRepository
         try
         {
             await using var conn = CreateConnection();
-            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await OpenConnectionAsync(conn, "Input_Slit_Row insert", cancellationToken).ConfigureAwait(false);
 
             const string sql = @"
 INSERT INTO dbo.Input_Slit_Row
@@ -136,7 +149,7 @@ VALUES
         try
         {
             await using var conn = CreateConnection();
-            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await OpenConnectionAsync(conn, "Output_Slit_Row insert", cancellationToken).ConfigureAwait(false);
 
             const string sql = @"
 INSERT INTO dbo.Output_Slit_Row
@@ -182,7 +195,7 @@ VALUES
         try
         {
             await using var conn = CreateConnection();
-            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await OpenConnectionAsync(conn, "Output_Slit_Row delete", cancellationToken).ConfigureAwait(false);
 
             const string delOutput = @"
 DELETE FROM dbo.Output_Slit_Row
@@ -234,7 +247,7 @@ WHERE NDT_Batch_No = @BatchNo
         try
         {
             await using var conn = CreateConnection();
-            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await OpenConnectionAsync(conn, "Manual_Station_Run insert", cancellationToken).ConfigureAwait(false);
 
             const string sql = @"
 INSERT INTO dbo.Manual_Station_Run
@@ -280,7 +293,7 @@ VALUES
         try
         {
             await using var conn = CreateConnection();
-            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await OpenConnectionAsync(conn, "NDT_Process_Consolidated upsert", cancellationToken).ConfigureAwait(false);
 
             const string sql = @"
 IF EXISTS (SELECT 1 FROM dbo.NDT_Process_Consolidated WHERE NDT_Batch_No = @BatchNo)
@@ -324,8 +337,63 @@ END";
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to record NDT_Process_Consolidated for batch {BatchNo}.", ndtBatchNo);
-            throw;
+            _logger.LogWarning(
+                ex,
+                "Failed to record NDT_Process_Consolidated for batch {BatchNo}. Revisual CSV was still written; fix SQL connectivity to persist traceability.",
+                ndtBatchNo);
+        }
+    }
+
+    public async Task RecordBundleLabelAsync(
+        string poNumber,
+        int millNo,
+        string? specification,
+        string? type,
+        string? pipeSize,
+        string? length,
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled || millNo is < 1 or > 4)
+            return;
+
+        var po = InputSlitCsvParsing.NormalizePo(poNumber);
+        if (string.IsNullOrWhiteSpace(po))
+            return;
+
+        try
+        {
+            await using var conn = CreateConnection();
+            await OpenConnectionAsync(conn, "Bundle_Label upsert", cancellationToken).ConfigureAwait(false);
+
+            const string sql = @"
+IF EXISTS (SELECT 1 FROM dbo.Bundle_Label WHERE PO_Number = @PoNumber AND Mill_No = @MillNo)
+BEGIN
+    UPDATE dbo.Bundle_Label
+    SET Specification = @Specification,
+        Type = @Type,
+        Pipe_Size = @PipeSize,
+        Length = @Length
+    WHERE PO_Number = @PoNumber AND Mill_No = @MillNo;
+END
+ELSE
+BEGIN
+    INSERT INTO dbo.Bundle_Label (PO_Number, Mill_No, Specification, Type, Pipe_Size, Length)
+    VALUES (@PoNumber, @MillNo, @Specification, @Type, @PipeSize, @Length);
+END";
+
+            await using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@PoNumber", po);
+            cmd.Parameters.AddWithValue("@MillNo", millNo);
+            cmd.Parameters.AddWithValue("@Specification", (object?)NullIfEmpty(specification) ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@Type", (object?)NullIfEmpty(type) ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@PipeSize", (object?)NullIfEmpty(pipeSize) ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@Length", (object?)NullIfEmpty(length) ?? DBNull.Value);
+            await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation("Recorded Bundle_Label for PO {PoNumber} mill {MillNo}.", po, millNo);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to record Bundle_Label for PO {PoNumber} mill {MillNo}.", po, millNo);
         }
     }
 
@@ -337,7 +405,7 @@ END";
         try
         {
             await using var conn = CreateConnection();
-            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await OpenConnectionAsync(conn, "Upload_Bundle_Row insert", cancellationToken).ConfigureAwait(false);
 
             const string sql = @"
 INSERT INTO dbo.Upload_Bundle_Row

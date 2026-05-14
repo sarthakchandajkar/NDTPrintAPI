@@ -38,7 +38,7 @@ public sealed class NdtBundleRepository : INdtBundleRepository
 
         try
         {
-            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(Opt.ConnectionString);
+            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlTraceabilityConnection.NormalizeConnectionString(Opt.ConnectionString));
             await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
             // Upsert so other flows can create a stub row early (e.g. FK from Output_Slit_Row).
             const string sql = @"
@@ -81,7 +81,7 @@ END";
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to record bundle {BundleNo} in database.", record.BundleNo);
+            _logger.LogError(ex, "Failed to record bundle {BundleNo} in database; Printed Tags and Visual incoming count may not match the label.", record.BundleNo);
         }
     }
 
@@ -91,7 +91,7 @@ END";
         {
             try
             {
-                await using var conn = new Microsoft.Data.SqlClient.SqlConnection(Opt.ConnectionString);
+                await using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlTraceabilityConnection.NormalizeConnectionString(Opt.ConnectionString));
                 await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
                 const string sql = "SELECT Bundle_No AS BundleNo, PO_Number AS PoNumber, Mill_No AS MillNo, Total_NDT_Pcs AS TotalNdtPcs, Context_Slit_No AS SlitNo, Slit_Start_Time AS SlitStartTime, Slit_Finish_Time AS SlitFinishTime, Rejected_P AS RejectedPipes, NDT_Short_Length_Pipe AS NdtShortLengthPipe, Rejected_Short_Length_Pipe AS RejectedShortLengthPipe FROM dbo.NDT_Bundle ORDER BY PrintedAt DESC";
                 await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
@@ -121,14 +121,14 @@ END";
         {
             try
             {
-                await using var conn = new Microsoft.Data.SqlClient.SqlConnection(Opt.ConnectionString);
+                await using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlTraceabilityConnection.NormalizeConnectionString(Opt.ConnectionString));
                 await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
                 const string sql = "SELECT TOP 1 Bundle_No AS BundleNo, PO_Number AS PoNumber, Mill_No AS MillNo, Total_NDT_Pcs AS TotalNdtPcs, Context_Slit_No AS SlitNo, Slit_Start_Time AS SlitStartTime, Slit_Finish_Time AS SlitFinishTime, Rejected_P AS RejectedPipes, NDT_Short_Length_Pipe AS NdtShortLengthPipe, Rejected_Short_Length_Pipe AS RejectedShortLengthPipe FROM dbo.NDT_Bundle WHERE Bundle_No = @BatchNo ORDER BY PrintedAt DESC";
                 await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
                 cmd.Parameters.AddWithValue("@BatchNo", batchNo.Trim());
                 await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
                 if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                    return ReadBundleFromReader(reader);
+                    return await ApplyFormedBundleTotalAsync(ReadBundleFromReader(reader), batchNo.Trim(), cancellationToken).ConfigureAwait(false);
                 return null;
             }
             catch (Exception ex)
@@ -138,7 +138,76 @@ END";
         }
 
         var bundles = await GetBundlesFromCsvAsync(cancellationToken).ConfigureAwait(false);
-        return bundles.FirstOrDefault(b => b.BundleNo.Equals(batchNo.Trim(), StringComparison.OrdinalIgnoreCase));
+        var match = bundles.FirstOrDefault(b => b.BundleNo.Equals(batchNo.Trim(), StringComparison.OrdinalIgnoreCase));
+        if (match is null)
+            return null;
+        return await ApplyFormedBundleTotalAsync(match, batchNo.Trim(), cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<NdtBundleRecord> ApplyFormedBundleTotalAsync(NdtBundleRecord record, string batchNo, CancellationToken cancellationToken)
+    {
+        var formedTotal = await TryReadBundleSummaryTotalAsync(batchNo, cancellationToken).ConfigureAwait(false);
+        if (formedTotal is not > 0 || formedTotal.Value <= record.TotalNdtPcs)
+            return record;
+
+        return new NdtBundleRecord
+        {
+            BundleNo = record.BundleNo,
+            PoNumber = record.PoNumber,
+            MillNo = record.MillNo,
+            TotalNdtPcs = formedTotal.Value,
+            SlitNo = record.SlitNo,
+            SlitStartTime = record.SlitStartTime,
+            SlitFinishTime = record.SlitFinishTime,
+            RejectedPipes = record.RejectedPipes,
+            NdtShortLengthPipe = record.NdtShortLengthPipe,
+            RejectedShortLengthPipe = record.RejectedShortLengthPipe
+        };
+    }
+
+    private async Task<int?> TryReadBundleSummaryTotalAsync(string batchNo, CancellationToken cancellationToken)
+    {
+        var folder = GetBundleSummaryFolder();
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+            return null;
+
+        var path = Path.Combine(folder, $"NDT_Bundle_{batchNo}.csv");
+        if (!File.Exists(path))
+            return null;
+
+        try
+        {
+            await using var stream = File.OpenRead(path);
+            using var reader = new StreamReader(stream);
+            var headerLine = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            if (headerLine is null)
+                return null;
+            if (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is not { } line)
+                return null;
+
+            headerLine = InputSlitCsvParsing.StripBom(headerLine);
+            var headers = InputSlitCsvParsing.SplitCsvFields(headerLine);
+            var cols = InputSlitCsvParsing.SplitCsvFields(line);
+            var idxNd = InputSlitCsvParsing.HeaderIndex(headers, "NDT Pipes");
+            if (idxNd < 0)
+            {
+                if (cols.Length <= ColNdtPipes)
+                    return null;
+                idxNd = ColNdtPipes;
+            }
+
+            if (idxNd >= cols.Length)
+                return null;
+
+            return InputSlitCsvParsing.TryParseIntFlexible(cols[idxNd].Trim(), out var ndtPipes)
+                ? ndtPipes
+                : null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to read bundle summary total for {BatchNo}.", batchNo);
+            return null;
+        }
     }
 
     public async Task UpdateBundlePipesAsync(string batchNo, int newPipes, CancellationToken cancellationToken)
@@ -150,7 +219,7 @@ END";
         {
             try
             {
-                await using var conn = new Microsoft.Data.SqlClient.SqlConnection(Opt.ConnectionString);
+                await using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlTraceabilityConnection.NormalizeConnectionString(Opt.ConnectionString));
                 await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
                 const string sql = "UPDATE dbo.NDT_Bundle SET Total_NDT_Pcs = @NewPipes WHERE Bundle_No = @BatchNo";
                 await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
@@ -487,7 +556,7 @@ END";
 
         try
         {
-            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(Opt.ConnectionString);
+            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlTraceabilityConnection.NormalizeConnectionString(Opt.ConnectionString));
             await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
             const string sql = "UPDATE dbo.NDT_Bundle SET Total_NDT_Pcs = @NewPipes WHERE Bundle_No = @BatchNo";
             await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);

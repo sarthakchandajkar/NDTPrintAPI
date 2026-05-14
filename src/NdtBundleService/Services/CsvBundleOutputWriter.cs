@@ -14,17 +14,23 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
     private readonly NdtBundleOptions _options;
     private readonly INdtBundleRepository _bundleRepository;
     private readonly INdtTagPrinter? _tagPrinter;
+    private readonly ITraceabilityRepository? _traceability;
+    private readonly IWipLabelProvider? _wipLabelProvider;
     private readonly ILogger<CsvBundleOutputWriter> _logger;
 
     public CsvBundleOutputWriter(
         IOptions<NdtBundleOptions> options,
         INdtBundleRepository bundleRepository,
         ILogger<CsvBundleOutputWriter> logger,
-        INdtTagPrinter? tagPrinter = null)
+        INdtTagPrinter? tagPrinter = null,
+        ITraceabilityRepository? traceability = null,
+        IWipLabelProvider? wipLabelProvider = null)
     {
         _options = options.Value;
         _bundleRepository = bundleRepository;
         _tagPrinter = tagPrinter;
+        _traceability = traceability;
+        _wipLabelProvider = wipLabelProvider;
         _logger = logger;
     }
 
@@ -94,6 +100,7 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
             RejectedShortLengthPipe = contextRecord.RejectedShortLengthPipe
         };
         await _bundleRepository.RecordBundleAsync(record, cancellationToken).ConfigureAwait(false);
+        await TryRecordBundleLabelAsync(contextRecord.PoNumber, contextRecord.MillNo, cancellationToken).ConfigureAwait(false);
 
         if (_tagPrinter != null)
         {
@@ -105,6 +112,32 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
             {
                 _logger.LogError(ex, "Auto-print failed for bundle {BatchNo}.", ndtBatchNoFormatted);
             }
+        }
+    }
+
+    private async Task TryRecordBundleLabelAsync(string poNumber, int millNo, CancellationToken cancellationToken)
+    {
+        if (_traceability is null || _wipLabelProvider is null)
+            return;
+
+        try
+        {
+            var wip = await _wipLabelProvider.GetWipLabelAsync(poNumber, millNo, cancellationToken).ConfigureAwait(false);
+            if (wip is null)
+                return;
+
+            await _traceability.RecordBundleLabelAsync(
+                poNumber,
+                millNo,
+                specification: wip.PipeGrade,
+                type: wip.PipeType,
+                pipeSize: wip.PipeSize,
+                length: wip.PipeLength,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to persist Bundle_Label for PO {PoNumber} mill {MillNo}.", poNumber, millNo);
         }
     }
 

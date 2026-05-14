@@ -64,6 +64,8 @@ builder.Services.AddSingleton<IManualNdtTagService, ManualNdtTagService>();
 builder.Services.AddSingleton<IUploadNdtBundleFileService, UploadNdtBundleFileService>();
 builder.Services.AddSingleton<ITraceabilityRepository, TraceabilityRepository>();
 
+builder.Services.AddHostedService<SqlTraceabilityStartupCheck>();
+
 builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy =>
