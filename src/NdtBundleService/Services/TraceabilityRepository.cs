@@ -283,10 +283,27 @@ VALUES
             await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
 
             const string sql = @"
-INSERT INTO dbo.NDT_Process_Consolidated
-    (PO_Number, NDT_Batch_No, NDT_Pcs, OK_Pcs, Visual_Reject, Hydrotest_Reject, Revisual_Reject, Bundle_Start, Bundle_End, Output_File)
-VALUES
-    (@PoNumber, @BatchNo, @NdtPcs, @Ok, @VisualRej, @HydroRej, @RevisualRej, @BundleStart, @BundleEnd, @OutputFile);";
+IF EXISTS (SELECT 1 FROM dbo.NDT_Process_Consolidated WHERE NDT_Batch_No = @BatchNo)
+BEGIN
+    UPDATE dbo.NDT_Process_Consolidated
+    SET PO_Number = @PoNumber,
+        NDT_Pcs = @NdtPcs,
+        OK_Pcs = @Ok,
+        Visual_Reject = @VisualRej,
+        Hydrotest_Reject = @HydroRej,
+        Revisual_Reject = @RevisualRej,
+        Bundle_Start = @BundleStart,
+        Bundle_End = @BundleEnd,
+        Output_File = @OutputFile
+    WHERE NDT_Batch_No = @BatchNo;
+END
+ELSE
+BEGIN
+    INSERT INTO dbo.NDT_Process_Consolidated
+        (PO_Number, NDT_Batch_No, NDT_Pcs, OK_Pcs, Visual_Reject, Hydrotest_Reject, Revisual_Reject, Bundle_Start, Bundle_End, Output_File)
+    VALUES
+        (@PoNumber, @BatchNo, @NdtPcs, @Ok, @VisualRej, @HydroRej, @RevisualRej, @BundleStart, @BundleEnd, @OutputFile);
+END";
 
             await using var cmd = new SqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("@PoNumber", poNumber);
@@ -300,10 +317,15 @@ VALUES
             cmd.Parameters.AddWithValue("@BundleEnd", bundleEnd);
             cmd.Parameters.AddWithValue("@OutputFile", (object?)NullIfEmpty(outputFilePath) ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation(
+                "Recorded NDT_Process_Consolidated for batch {BatchNo} (output {OutputFile}).",
+                ndtBatchNo,
+                outputFilePath);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to record NDT_Process_Consolidated for batch {BatchNo}.", ndtBatchNo);
+            _logger.LogError(ex, "Failed to record NDT_Process_Consolidated for batch {BatchNo}.", ndtBatchNo);
+            throw;
         }
     }
 

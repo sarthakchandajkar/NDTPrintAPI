@@ -84,7 +84,9 @@ public sealed class ManualTagsController : ControllerBase
 
             return Ok(new
             {
-                Message = "Station recorded and CSV generated.",
+                Message = st == ManualTagStation.Revisual
+                    ? "Station recorded; consolidated NDT process CSV generated."
+                    : "Station recorded.",
                 Station = station,
                 result.NdtBatchNo,
                 result.IncomingPcs,
@@ -136,7 +138,9 @@ public sealed class ManualTagsController : ControllerBase
 
             return Ok(new
             {
-                Message = "Station reconciled and CSV replaced. Downstream steps may need to be re-entered if the flow was reset.",
+                Message = st == ManualTagStation.Revisual
+                    ? "Station reconciled; consolidated NDT process CSV replaced."
+                    : "Station reconciled. Downstream steps may need to be re-entered if the flow was reset.",
                 Station = station,
                 result.NdtBatchNo,
                 result.IncomingPcs,

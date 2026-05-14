@@ -78,7 +78,7 @@ public sealed class ManualStationRecordResult
 /// </summary>
 public sealed class ManualNdtTagService : IManualNdtTagService
 {
-    private readonly NdtBundleOptions _options;
+    private readonly IOptionsMonitor<NdtBundleOptions> _optionsMonitor;
     private readonly IZplGenerationToggle _zplToggle;
     private readonly INdtBundleRepository _bundleRepository;
     private readonly IWipLabelProvider _wipLabelProvider;
@@ -90,7 +90,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
     private static readonly ConcurrentDictionary<string, FlowState> InMemoryState = new(StringComparer.OrdinalIgnoreCase);
 
     public ManualNdtTagService(
-        IOptions<NdtBundleOptions> options,
+        IOptionsMonitor<NdtBundleOptions> optionsMonitor,
         IZplGenerationToggle zplToggle,
         INdtBundleRepository bundleRepository,
         IWipLabelProvider wipLabelProvider,
@@ -98,7 +98,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         ITraceabilityRepository traceability,
         ILogger<ManualNdtTagService> logger)
     {
-        _options = options.Value;
+        _optionsMonitor = optionsMonitor;
         _zplToggle = zplToggle;
         _bundleRepository = bundleRepository;
         _wipLabelProvider = wipLabelProvider;
@@ -106,6 +106,8 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         _traceability = traceability;
         _logger = logger;
     }
+
+    private NdtBundleOptions Options => _optionsMonitor.CurrentValue;
 
     public async Task<ManualStationContext> GetContextAsync(ManualTagStation station, string ndtBatchNo, int operatorStationNumber, CancellationToken cancellationToken)
     {
@@ -171,10 +173,9 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         string? csvPath = null;
         if (request.Station == ManualTagStation.Revisual)
         {
-            csvPath = await WriteConsolidatedNdtProcessCsvAsync(state, cancellationToken).ConfigureAwait(false);
+            csvPath = await CompleteRevisualExportAsync(state, cancellationToken).ConfigureAwait(false);
             state.LastNdtProcessCsvPath = csvPath;
             await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
-            await RecordConsolidatedTraceabilityAsync(state, csvPath, cancellationToken).ConfigureAwait(false);
         }
 
         // Best-effort SQL traceability; do not fail the station flow if SQL is down.
@@ -273,10 +274,9 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         string? csvPath = null;
         if (request.Station == ManualTagStation.Revisual)
         {
-            csvPath = await WriteConsolidatedNdtProcessCsvAsync(state, cancellationToken).ConfigureAwait(false);
+            csvPath = await CompleteRevisualExportAsync(state, cancellationToken).ConfigureAwait(false);
             state.LastNdtProcessCsvPath = csvPath;
             await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
-            await RecordConsolidatedTraceabilityAsync(state, csvPath, cancellationToken).ConfigureAwait(false);
         }
 
         await _traceability.RecordManualStationRunAsync(
@@ -322,7 +322,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
 
     private string GetNdtProcessOutputFolder()
     {
-        var folder = (_options.NdtProcessOutputFolder ?? string.Empty).Trim();
+        var folder = (Options.NdtProcessOutputFolder ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(folder))
             throw new InvalidOperationException("NdtProcessOutputFolder is not configured.");
         return folder;
@@ -372,6 +372,33 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             ManualTagStation.Hydrotesting => "",
             _ => ""
         };
+
+    /// <summary>Writes NDT process CSV to <see cref="NdtBundleOptions.NdtProcessOutputFolder"/> and persists consolidated SQL + final bundle total.</summary>
+    private async Task<string> CompleteRevisualExportAsync(FlowState state, CancellationToken cancellationToken)
+    {
+        var csvPath = await WriteConsolidatedNdtProcessCsvAsync(state, cancellationToken).ConfigureAwait(false);
+        await RecordConsolidatedTraceabilityAsync(state, csvPath, cancellationToken).ConfigureAwait(false);
+
+        var finalOk = state.Revisual?.OkPcs ?? 0;
+        try
+        {
+            await _bundleRepository.UpdateBundleTotalInDatabaseAsync(state.NdtBatchNo, finalOk, cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation(
+                "Updated NDT_Bundle total to {FinalOk} for batch {BatchNo} after Revisual.",
+                finalOk,
+                state.NdtBatchNo);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "NDT process CSV {Path} was written but NDT_Bundle total update failed for batch {BatchNo}.",
+                csvPath,
+                state.NdtBatchNo);
+        }
+
+        return csvPath;
+    }
 
     /// <summary>Single CSV after Revisual with Visual/Hydro/Revisual metrics; PO and batch tokens sanitized for the filename.</summary>
     private async Task<string> WriteConsolidatedNdtProcessCsvAsync(FlowState state, CancellationToken cancellationToken)
@@ -456,7 +483,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             return false;
         }
 
-        var address = (_options.NdtTagPrinterAddress ?? "").Trim();
+        var address = (Options.NdtTagPrinterAddress ?? "").Trim();
         var useAddress = !string.IsNullOrEmpty(address) && !address.Equals("0.0.0.0", StringComparison.OrdinalIgnoreCase);
         if (!useAddress)
         {
@@ -481,7 +508,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             StationTextForZpl(station, operatorStationNumber));
 
         await TrySaveZplPreviewAsync(station, operatorStationNumber, ndtBatchNo, zplBytes, cancellationToken).ConfigureAwait(false);
-        var sendResult = await _sender.SendAsync(address, _options.NdtTagPrinterPort, zplBytes, cancellationToken).ConfigureAwait(false);
+        var sendResult = await _sender.SendAsync(address, Options.NdtTagPrinterPort, zplBytes, cancellationToken).ConfigureAwait(false);
         return sendResult.Success;
     }
 
@@ -522,7 +549,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
 
     private string GetStateFolder()
     {
-        var folder = (_options.OutputBundleFolder ?? string.Empty).Trim();
+        var folder = (Options.OutputBundleFolder ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(folder))
             folder = AppContext.BaseDirectory;
         var stateFolder = Path.Combine(folder, "ManualStationState");
@@ -534,10 +561,10 @@ public sealed class ManualNdtTagService : IManualNdtTagService
 
     private async Task<FlowState> LoadOrCreateStateAsync(string ndtBatchNo, CancellationToken cancellationToken)
     {
-        if (!_options.EnableManualStationStateFiles && InMemoryState.TryGetValue(ndtBatchNo, out var memoryState))
+        if (!Options.EnableManualStationStateFiles && InMemoryState.TryGetValue(ndtBatchNo, out var memoryState))
             return memoryState;
 
-        if (_options.EnableManualStationStateFiles)
+        if (Options.EnableManualStationStateFiles)
         {
             var path = GetStatePath(ndtBatchNo);
             lock (StateLock)
@@ -574,7 +601,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
     private Task SaveStateAsync(FlowState state, CancellationToken cancellationToken)
     {
         InMemoryState[state.NdtBatchNo] = state;
-        if (!_options.EnableManualStationStateFiles)
+        if (!Options.EnableManualStationStateFiles)
             return Task.CompletedTask;
 
         var path = GetStatePath(state.NdtBatchNo);
