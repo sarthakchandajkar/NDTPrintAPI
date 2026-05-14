@@ -16,7 +16,7 @@ public sealed class FormationChartCsvProvider : IFormationChartProvider
         new Dictionary<string, FormationChartEntry>(StringComparer.OrdinalIgnoreCase)
         {
             { "Default", new FormationChartEntry { PipeSize = "Default", RequiredNdtPcs = 20 } },
-            { "0.5", new FormationChartEntry { PipeSize = "0.5", RequiredNdtPcs = 10 } },
+            { "0.5", new FormationChartEntry { PipeSize = "0.5", RequiredNdtPcs = 2 } },
             { "0.75", new FormationChartEntry { PipeSize = "0.75", RequiredNdtPcs = 180 } },
             { "1", new FormationChartEntry { PipeSize = "1", RequiredNdtPcs = 150 } },
             { "1.25", new FormationChartEntry { PipeSize = "1.25", RequiredNdtPcs = 140 } },
@@ -43,19 +43,21 @@ public sealed class FormationChartCsvProvider : IFormationChartProvider
 
     public async Task<IReadOnlyDictionary<string, FormationChartEntry>> GetFormationChartAsync(CancellationToken cancellationToken)
     {
-        var path = _options.FormationChartCsvPath;
+        var path = ResolveFormationChartPath();
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
         {
-            _logger.LogInformation("Using built-in NDT Bundle Formation Chart (no CSV configured).");
+            _logger.LogInformation(
+                "Using built-in NDT Bundle Formation Chart (configured path {Path} is missing or empty).",
+                string.IsNullOrWhiteSpace(path) ? "(none)" : path);
             return BuiltInFormationChart;
         }
 
-        var result = new Dictionary<string, FormationChartEntry>(StringComparer.OrdinalIgnoreCase);
+        var result = CopyBuiltInFormationChart();
 
         await using var stream = File.OpenRead(path);
         using var reader = new StreamReader(stream);
 
-        string? headerLine = await reader.ReadLineAsync();
+        string? headerLine = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
         if (headerLine is null)
             return result;
 
@@ -69,13 +71,15 @@ public sealed class FormationChartCsvProvider : IFormationChartProvider
 
         if (sizeIndex < 0 || pcsIndex < 0)
         {
-            _logger.LogWarning("Formation chart CSV does not contain expected columns (PipeSize or Size, RequiredNdtPcs or Pcs/Bundle).");
-            return new Dictionary<string, FormationChartEntry>(BuiltInFormationChart);
+            _logger.LogWarning(
+                "Formation chart CSV {Path} does not contain expected columns (PipeSize or Size, RequiredNdtPcs or Pcs/Bundle); using built-in chart.",
+                path);
+            return BuiltInFormationChart;
         }
 
         while (!reader.EndOfStream)
         {
-            var line = await reader.ReadLineAsync();
+            var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(line))
                 continue;
 
@@ -97,11 +101,41 @@ public sealed class FormationChartCsvProvider : IFormationChartProvider
             };
         }
 
-        // If CSV did not define Default, add built-in default so engine can fall back
         if (!result.ContainsKey("Default"))
             result["Default"] = new FormationChartEntry { PipeSize = "Default", RequiredNdtPcs = 20 };
 
+        if (result.TryGetValue("0.5", out var halfInch))
+        {
+            _logger.LogInformation(
+                "Loaded NDT Bundle Formation Chart from {Path}; pipe size 0.5 threshold is {Threshold} pcs.",
+                path,
+                halfInch.RequiredNdtPcs);
+        }
+        else
+        {
+            _logger.LogInformation("Loaded NDT Bundle Formation Chart from {Path}.", path);
+        }
+
         return result;
+    }
+
+    private string? ResolveFormationChartPath()
+    {
+        var configured = (_options.FormationChartCsvPath ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(configured))
+            return null;
+
+        return Path.IsPathRooted(configured)
+            ? configured
+            : Path.Combine(AppContext.BaseDirectory, configured);
+    }
+
+    private static Dictionary<string, FormationChartEntry> CopyBuiltInFormationChart()
+    {
+        var copy = new Dictionary<string, FormationChartEntry>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in BuiltInFormationChart)
+            copy[entry.Key] = entry.Value;
+        return copy;
     }
 }
 

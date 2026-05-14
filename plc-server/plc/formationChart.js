@@ -3,7 +3,7 @@
 /** Mirrors NdtBundleService FormationChartCsvProvider built-in chart + FormationChartLookup rules. */
 const BUILT_IN = {
   Default: 20,
-  "0.5": 10,
+  "0.5": 2,
   "0.75": 180,
   "1": 150,
   "1.25": 140,

@@ -25,5 +25,11 @@
     <Compile Remove="Services\TelerikNdtLabelPrinter.cs" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="FormationChart.csv">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>
 
