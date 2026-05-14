@@ -164,46 +164,20 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
         int? millNo,
         CancellationToken cancellationToken)
     {
-        var path = ResolvePoPlanPath();
-        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        if (!millNo.HasValue || millNo.Value is < 1 or > 4)
             return ("", "", "", "");
 
-        var lines = await ReadAllLinesSharedAsync(path, cancellationToken).ConfigureAwait(false);
-        if (lines.Length < 2)
+        var wip = await WipCsvLabelLookup.ResolveAsync(
+            _options,
+            ResolvePoPlanPath(),
+            poNo,
+            millNo.Value,
+            _logger,
+            cancellationToken).ConfigureAwait(false);
+        if (wip is null)
             return ("", "", "", "");
 
-        var headers = SplitCsvLine(lines[0]);
-        int Idx(string name) => headers.FindIndex(h => h.Equals(name, StringComparison.OrdinalIgnoreCase));
-        var poIdx = Idx("PO_No");
-        var millIdx = Idx("Mill Number");
-        var gradeIdx = Idx("Pipe Grade");
-        var thickIdx = Idx("Pipe Thickness");
-        var lengthIdx = Idx("Pipe Length");
-        var weightIdx = Idx("Pipe Weight Per Meter");
-        if (poIdx < 0)
-            return ("", "", "", "");
-
-        foreach (var line in lines.Skip(1))
-        {
-            if (string.IsNullOrWhiteSpace(line))
-                continue;
-            var cols = SplitCsvLine(line);
-            if (poIdx >= cols.Count)
-                continue;
-            if (!cols[poIdx].Trim().Equals(poNo.Trim(), StringComparison.OrdinalIgnoreCase))
-                continue;
-            if (millNo.HasValue && millIdx >= 0 && millIdx < cols.Count)
-            {
-                var m = cols[millIdx].Trim();
-                if (int.TryParse(m, out var parsedMill) && parsedMill != millNo.Value)
-                    continue;
-            }
-
-            string Get(int idx) => idx >= 0 && idx < cols.Count ? cols[idx].Trim() : "";
-            return (Get(gradeIdx), Get(thickIdx), Get(lengthIdx), Get(weightIdx));
-        }
-
-        return ("", "", "", "");
+        return (wip.PipeGrade, wip.PipeThickness, wip.PipeLength, wip.PipeWeightPerMeter);
     }
 
     private string ResolvePoPlanPath()

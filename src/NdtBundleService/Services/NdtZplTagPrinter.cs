@@ -60,6 +60,19 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
         var pipeWeight = wip?.PipeWeightPerMeter ?? "";
         var pipeType = wip?.PipeType ?? "";
 
+        if (wip is null
+            || (string.IsNullOrWhiteSpace(pipeGrade)
+                && string.IsNullOrWhiteSpace(pipeSize)
+                && string.IsNullOrWhiteSpace(pipeLength)
+                && string.IsNullOrWhiteSpace(pipeWeight)))
+        {
+            _logger.LogWarning(
+                "NDT tag for batch {BatchNo} PO {PoNumber} mill {MillNo} is missing WIP label fields (grade/size/length/weight). Check PO plan and WIP bundle CSVs.",
+                ndtBatchNoFormatted,
+                record.PoNumber,
+                record.MillNo);
+        }
+
         var date = record.SlitStartTime ?? DateTime.Now;
 
         var zplBytes = ZplNdtLabelBuilder.BuildNdtTagZpl(

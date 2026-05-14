@@ -492,6 +492,19 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         }
 
         var wip = await _wipLabelProvider.GetWipLabelAsync(poNumber, millNo, cancellationToken).ConfigureAwait(false);
+        if (wip is null
+            || (string.IsNullOrWhiteSpace(wip.PipeGrade)
+                && string.IsNullOrWhiteSpace(wip.PipeSize)
+                && string.IsNullOrWhiteSpace(wip.PipeLength)
+                && string.IsNullOrWhiteSpace(wip.PipeWeightPerMeter)))
+        {
+            _logger.LogWarning(
+                "Manual NDT tag for batch {BatchNo} PO {PoNumber} mill {MillNo} is missing WIP label fields (grade/size/length/weight).",
+                ndtBatchNo,
+                poNumber,
+                millNo);
+        }
+
         var zplBytes = ZplNdtLabelBuilder.BuildNdtTagZpl(
             ndtBatchNo,
             millNo,
