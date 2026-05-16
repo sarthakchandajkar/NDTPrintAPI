@@ -90,6 +90,12 @@ public class NdtBundleOptions
     /// <summary>SQL Server connection string for NDT_Bundle and reconciliation. Ignored unless <see cref="UseSqlServerForBundles"/> is true. If empty, bundle list comes from output CSVs.</summary>
     public string ConnectionString { get; set; } = string.Empty;
 
+    /// <summary>When <see cref="ConnectionString"/> is empty, builds Trusted_Connection string from Server + Database (e.g. production env vars).</summary>
+    public string SqlServer { get; set; } = string.Empty;
+
+    /// <summary>Database name when using <see cref="SqlServer"/> instead of <see cref="ConnectionString"/> (default target: JazeeraMES_Prod).</summary>
+    public string SqlDatabase { get; set; } = "JazeeraMES_Prod";
+
     /// <summary>
     /// Optional UTC cutoff (ISO-8601, e.g. <c>2026-04-05T00:00:00Z</c>). When set, only CSV files whose last write time (UTC)
     /// is on or after this instant are read for input slits, WIP merge, PO plan rotation, Input Slit Accepted, and bundle-output CSVs used for ndt-summary.

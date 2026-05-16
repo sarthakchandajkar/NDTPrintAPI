@@ -22,6 +22,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
     private readonly INdtBatchStateService _batchState;
     private readonly PlcPoEndPollHandler _plcPoEndPollHandler;
     private readonly ITraceabilityRepository _traceability;
+    private readonly ISqlTraceabilityWriteTracker _sqlWriteTracker;
     private readonly IWipBundleRunningPoProvider _wipRunningPo;
     private readonly IMillNdtCountReader _millNdtCountReader;
     private readonly ILogger<SlitMonitoringWorker> _logger;
@@ -37,6 +38,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         INdtBatchStateService batchState,
         PlcPoEndPollHandler plcPoEndPollHandler,
         ITraceabilityRepository traceability,
+        ISqlTraceabilityWriteTracker sqlWriteTracker,
         IWipBundleRunningPoProvider wipRunningPo,
         IMillNdtCountReader millNdtCountReader,
         ILogger<SlitMonitoringWorker> logger)
@@ -47,6 +49,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         _batchState = batchState;
         _plcPoEndPollHandler = plcPoEndPollHandler;
         _traceability = traceability;
+        _sqlWriteTracker = sqlWriteTracker;
         _wipRunningPo = wipRunningPo;
         _millNdtCountReader = millNdtCountReader;
         _logger = logger;
@@ -374,7 +377,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                         rawOut = InputSlitCsvParsing.ReplaceFieldAtIndex(row.RawLine, ndtColumnIndex, effectiveNdt.ToString(CultureInfo.InvariantCulture));
 
                     outputLines.Add(rawOut.TrimEnd() + "," + ndtBatchNoFormatted);
-                    inputRowsForSql.Add((record, sourceRowNumber));
+                    inputRowsForSql.Add((effectiveRecord, sourceRowNumber));
                     outputRowsForSql.Add((bundleRecord, ndtBatchNoFormatted, sourceRowNumber));
                     sourceRowNumber++;
                 }
@@ -397,6 +400,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 await _traceability.RecordInputSlitRowsAsync(fileFull, inputRowsForSql, cancellationToken).ConfigureAwait(false);
                 await _traceability.RecordOutputSlitRowsAsync(outputPath ?? fileFull, outputRowsForSql, cancellationToken).ConfigureAwait(false);
 
+                LogSqlWriteFailuresIfAny(fileFull);
+
                 _inputSlitLastHandledWriteUtc[fileFull] = File.GetLastWriteTimeUtc(fileFull);
             }
             catch (Exception ex)
@@ -404,6 +409,29 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 _logger.LogError(ex, "Failed to process Input Slit file {File}", fileFull);
             }
         }
+    }
+
+    private void LogSqlWriteFailuresIfAny(string sourceFile)
+    {
+        if (!SqlTraceabilityConnection.IsSqlEnabled(_optionsMonitor.CurrentValue))
+        {
+            _logger.LogWarning(
+                "SQL traceability is not configured; slit file {File} was written to CSV only (no JazeeraMES_Prod rows). Set NdtBundle:ConnectionString or NdtBundle__ConnectionString.",
+                sourceFile);
+            return;
+        }
+
+        var failures = _sqlWriteTracker.GetRecentResults()
+            .Where(r => !r.Success && r.Utc > DateTime.UtcNow.AddMinutes(-2))
+            .Take(5)
+            .ToList();
+        if (failures.Count == 0)
+            return;
+
+        _logger.LogError(
+            "JazeeraMES_Prod SQL writes failed after processing slit file {File}. Labels/CSV succeeded but database rows were not saved. Latest errors: {Errors}",
+            sourceFile,
+            string.Join(" | ", failures.Select(f => $"{f.Operation}: {f.Error}")));
     }
 
     /// <summary>SlitNumber_Date_PONumber.csv using the first data row with a PO (date from slit times or file mtime).</summary>

@@ -20,6 +20,7 @@ public sealed class StatusController : ControllerBase
     private readonly PoEndDetectionDiagnostics _poEndDiagnostics;
     private readonly PlcConnectionHealth _plcHealth;
     private readonly ISqlTraceabilityHealth _sqlHealth;
+    private readonly ISqlTraceabilityWriteTracker _sqlWriteTracker;
     private readonly ILogger<StatusController> _logger;
 
     public StatusController(
@@ -29,6 +30,7 @@ public sealed class StatusController : ControllerBase
         PoEndDetectionDiagnostics poEndDiagnostics,
         PlcConnectionHealth plcHealth,
         ISqlTraceabilityHealth sqlHealth,
+        ISqlTraceabilityWriteTracker sqlWriteTracker,
         ILogger<StatusController> logger)
     {
         _plcClient = plcClient;
@@ -37,6 +39,7 @@ public sealed class StatusController : ControllerBase
         _poEndDiagnostics = poEndDiagnostics;
         _plcHealth = plcHealth;
         _sqlHealth = sqlHealth;
+        _sqlWriteTracker = sqlWriteTracker;
         _logger = logger;
     }
 
@@ -47,6 +50,7 @@ public sealed class StatusController : ControllerBase
     public async Task<IActionResult> GetSqlTraceabilityStatus(CancellationToken cancellationToken)
     {
         var report = await _sqlHealth.GetReportAsync(cancellationToken).ConfigureAwait(false);
+        var recentWrites = _sqlWriteTracker.GetRecentResults();
         var healthy = report.Enabled
             && report.Connected
             && report.IsExpectedDatabase
@@ -59,12 +63,15 @@ public sealed class StatusController : ControllerBase
             ExpectedDatabase = SqlTraceabilityHealth.ExpectedDatabaseName,
             report.Enabled,
             report.Connected,
+            report.ConfiguredServer,
+            report.ConfiguredDatabase,
             report.Database,
             report.DataSource,
             report.IsExpectedDatabase,
             report.MissingTables,
             report.RowCounts,
             report.RecentBundles,
+            RecentWrites = recentWrites,
             report.Error,
             Message = !report.Enabled
                 ? "SQL traceability disabled in config."

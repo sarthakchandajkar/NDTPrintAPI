@@ -20,11 +20,18 @@ public sealed class SqlTraceabilityStartupCheck : IHostedService
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         var report = await _health.GetReportAsync(cancellationToken).ConfigureAwait(false);
+
         if (!report.Enabled)
         {
-            _logger.LogInformation("SQL traceability is disabled (NdtBundle:UseSqlServerForBundles=false).");
+            _logger.LogInformation("SQL traceability is disabled (NdtBundle:UseSqlServerForBundles=false or no connection string).");
             return;
         }
+
+        _logger.LogInformation(
+            "SQL traceability configured for Server={Server} Database={Database} (expected {Expected}).",
+            report.ConfiguredServer ?? "(unknown)",
+            report.ConfiguredDatabase ?? "(unknown)",
+            SqlTraceabilityHealth.ExpectedDatabaseName);
 
         if (!string.IsNullOrWhiteSpace(report.Error) && !report.Connected)
         {

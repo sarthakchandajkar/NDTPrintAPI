@@ -78,20 +78,22 @@ public sealed class UploadBundleRow
 public sealed class TraceabilityRepository : ITraceabilityRepository
 {
     private readonly IOptionsMonitor<NdtBundleOptions> _optionsMonitor;
+    private readonly ISqlTraceabilityWriteTracker _writeTracker;
     private readonly ILogger<TraceabilityRepository> _logger;
 
-    public TraceabilityRepository(IOptionsMonitor<NdtBundleOptions> optionsMonitor, ILogger<TraceabilityRepository> logger)
+    public TraceabilityRepository(
+        IOptionsMonitor<NdtBundleOptions> optionsMonitor,
+        ISqlTraceabilityWriteTracker writeTracker,
+        ILogger<TraceabilityRepository> logger)
     {
         _optionsMonitor = optionsMonitor;
+        _writeTracker = writeTracker;
         _logger = logger;
     }
 
     private NdtBundleOptions Opt => _optionsMonitor.CurrentValue;
 
-    private bool Enabled =>
-        Opt.UseSqlServerForBundles && !string.IsNullOrWhiteSpace(Opt.ConnectionString);
-
-    private SqlConnection CreateConnection() => SqlTraceabilityConnection.Create(Opt.ConnectionString);
+    private bool Enabled => SqlTraceabilityConnection.IsSqlEnabled(Opt);
 
     private Task OpenConnectionAsync(SqlConnection connection, string operation, CancellationToken cancellationToken) =>
         SqlTraceabilityConnection.OpenAsync(connection, _logger, operation, cancellationToken);
@@ -102,11 +104,19 @@ public sealed class TraceabilityRepository : ITraceabilityRepository
         CancellationToken cancellationToken)
     {
         if (!Enabled || rows.Count == 0)
+        {
+            if (rows.Count > 0 && !Enabled)
+                _logger.LogWarning(
+                    "SQL disabled: {Count} Input_Slit_Row row(s) from {File} were not saved to JazeeraMES_Prod.",
+                    rows.Count,
+                    sourceFile);
             return;
+        }
 
+        var inserted = 0;
         try
         {
-            await using var conn = CreateConnection();
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
             await OpenConnectionAsync(conn, "Input_Slit_Row insert", cancellationToken).ConfigureAwait(false);
 
             const string sql = @"
@@ -117,28 +127,53 @@ VALUES
 
             foreach (var (r, rowNo) in rows)
             {
-                await using var cmd = new SqlCommand(sql, conn);
-                cmd.Parameters.AddWithValue("@PoNumber", r.PoNumber);
-                cmd.Parameters.AddWithValue("@SlitNo", (object?)NullIfEmpty(r.SlitNo) ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@NdtPipes", r.NdtPipes);
-                cmd.Parameters.AddWithValue("@RejectedP", r.RejectedPipes);
-                cmd.Parameters.AddWithValue("@StartTime", (object?)r.SlitStartTime ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@FinishTime", (object?)r.SlitFinishTime ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@MillNo", r.MillNo == 0 ? (object)DBNull.Value : r.MillNo);
-                cmd.Parameters.AddWithValue("@NdtShort", (object?)NullIfEmpty(r.NdtShortLengthPipe) ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@RejShort", (object?)NullIfEmpty(r.RejectedShortLengthPipe) ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@SourceFile", (object?)NullIfEmpty(sourceFile) ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@SourceRowNumber", rowNo);
-                await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                if (string.IsNullOrWhiteSpace(r.PoNumber))
+                    continue;
+
+                try
+                {
+                    await using var cmd = new SqlCommand(sql, conn);
+                    cmd.Parameters.AddWithValue("@PoNumber", InputSlitCsvParsing.NormalizePo(r.PoNumber));
+                    cmd.Parameters.AddWithValue("@SlitNo", (object?)NullIfEmpty(r.SlitNo) ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@NdtPipes", r.NdtPipes);
+                    cmd.Parameters.AddWithValue("@RejectedP", r.RejectedPipes);
+                    cmd.Parameters.AddWithValue("@StartTime", (object?)r.SlitStartTime ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@FinishTime", (object?)r.SlitFinishTime ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@MillNo", r.MillNo == 0 ? (object)DBNull.Value : r.MillNo);
+                    cmd.Parameters.AddWithValue("@NdtShort", (object?)NullIfEmpty(r.NdtShortLengthPipe) ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@RejShort", (object?)NullIfEmpty(r.RejectedShortLengthPipe) ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@SourceFile", (object?)NullIfEmpty(sourceFile) ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@SourceRowNumber", rowNo);
+                    await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                    inserted++;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(
+                        ex,
+                        "Failed Input_Slit_Row insert for PO {Po} row {RowNo} file {File}.",
+                        r.PoNumber,
+                        rowNo,
+                        sourceFile);
+                }
             }
 
-            _logger.LogInformation(
-                "Recorded {Count} Input_Slit_Row row(s) for file {File} in JazeeraMES_Prod.",
-                rows.Count,
-                sourceFile);
+            if (inserted > 0)
+            {
+                _writeTracker.RecordSuccess("Input_Slit_Row", $"{inserted} row(s) from {Path.GetFileName(sourceFile)}");
+                _logger.LogInformation(
+                    "Recorded {Count} Input_Slit_Row row(s) for file {File} in JazeeraMES_Prod.",
+                    inserted,
+                    sourceFile);
+            }
+            else
+            {
+                _writeTracker.RecordFailure("Input_Slit_Row", "No rows inserted.", sourceFile);
+            }
         }
         catch (Exception ex)
         {
+            _writeTracker.RecordFailure("Input_Slit_Row", ex.Message, sourceFile);
             _logger.LogError(ex, "Failed to record Input_Slit_Row for file {File} in JazeeraMES_Prod.", sourceFile);
         }
     }
@@ -149,11 +184,19 @@ VALUES
         CancellationToken cancellationToken)
     {
         if (!Enabled || rows.Count == 0)
+        {
+            if (rows.Count > 0 && !Enabled)
+                _logger.LogWarning(
+                    "SQL disabled: {Count} Output_Slit_Row row(s) from {File} were not saved to JazeeraMES_Prod.",
+                    rows.Count,
+                    sourceFile);
             return;
+        }
 
+        var inserted = 0;
         try
         {
-            await using var conn = CreateConnection();
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
             await OpenConnectionAsync(conn, "Output_Slit_Row insert", cancellationToken).ConfigureAwait(false);
 
             const string sql = @"
@@ -164,32 +207,57 @@ VALUES
 
             foreach (var (r, batchNo, rowNo) in rows)
             {
-                // If Output_Slit_Row has an FK to NDT_Bundle(Bundle_No), create a stub bundle row early.
-                await EnsureBundleRowExistsAsync(conn, r, batchNo, cancellationToken).ConfigureAwait(false);
+                if (string.IsNullOrWhiteSpace(r.PoNumber) || string.IsNullOrWhiteSpace(batchNo))
+                    continue;
 
-                await using var cmd = new SqlCommand(sql, conn);
-                cmd.Parameters.AddWithValue("@PoNumber", r.PoNumber);
-                cmd.Parameters.AddWithValue("@SlitNo", (object?)NullIfEmpty(r.SlitNo) ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@NdtPipes", r.NdtPipes);
-                cmd.Parameters.AddWithValue("@RejectedP", r.RejectedPipes);
-                cmd.Parameters.AddWithValue("@StartTime", (object?)r.SlitStartTime ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@FinishTime", (object?)r.SlitFinishTime ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@MillNo", r.MillNo == 0 ? (object)DBNull.Value : r.MillNo);
-                cmd.Parameters.AddWithValue("@NdtShort", (object?)NullIfEmpty(r.NdtShortLengthPipe) ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@RejShort", (object?)NullIfEmpty(r.RejectedShortLengthPipe) ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@BatchNo", batchNo);
-                cmd.Parameters.AddWithValue("@SourceFile", (object?)NullIfEmpty(sourceFile) ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@SourceRowNumber", rowNo);
-                await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await EnsureBundleRowExistsAsync(conn, r, batchNo, cancellationToken).ConfigureAwait(false);
+
+                    await using var cmd = new SqlCommand(sql, conn);
+                    cmd.Parameters.AddWithValue("@PoNumber", InputSlitCsvParsing.NormalizePo(r.PoNumber));
+                    cmd.Parameters.AddWithValue("@SlitNo", (object?)NullIfEmpty(r.SlitNo) ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@NdtPipes", r.NdtPipes);
+                    cmd.Parameters.AddWithValue("@RejectedP", r.RejectedPipes);
+                    cmd.Parameters.AddWithValue("@StartTime", (object?)r.SlitStartTime ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@FinishTime", (object?)r.SlitFinishTime ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@MillNo", r.MillNo == 0 ? (object)DBNull.Value : r.MillNo);
+                    cmd.Parameters.AddWithValue("@NdtShort", (object?)NullIfEmpty(r.NdtShortLengthPipe) ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@RejShort", (object?)NullIfEmpty(r.RejectedShortLengthPipe) ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@BatchNo", batchNo);
+                    cmd.Parameters.AddWithValue("@SourceFile", (object?)NullIfEmpty(sourceFile) ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@SourceRowNumber", rowNo);
+                    await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                    inserted++;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(
+                        ex,
+                        "Failed Output_Slit_Row insert for batch {BatchNo} PO {Po} row {RowNo} file {File}.",
+                        batchNo,
+                        r.PoNumber,
+                        rowNo,
+                        sourceFile);
+                }
             }
 
-            _logger.LogInformation(
-                "Recorded {Count} Output_Slit_Row row(s) for file {File} in JazeeraMES_Prod.",
-                rows.Count,
-                sourceFile);
+            if (inserted > 0)
+            {
+                _writeTracker.RecordSuccess("Output_Slit_Row", $"{inserted} row(s) from {Path.GetFileName(sourceFile)}");
+                _logger.LogInformation(
+                    "Recorded {Count} Output_Slit_Row row(s) for file {File} in JazeeraMES_Prod.",
+                    inserted,
+                    sourceFile);
+            }
+            else
+            {
+                _writeTracker.RecordFailure("Output_Slit_Row", "No rows inserted.", sourceFile);
+            }
         }
         catch (Exception ex)
         {
+            _writeTracker.RecordFailure("Output_Slit_Row", ex.Message, sourceFile);
             _logger.LogError(ex, "Failed to record Output_Slit_Row for file {File} in JazeeraMES_Prod.", sourceFile);
         }
     }
@@ -204,7 +272,7 @@ VALUES
 
         try
         {
-            await using var conn = CreateConnection();
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
             await OpenConnectionAsync(conn, "Output_Slit_Row delete", cancellationToken).ConfigureAwait(false);
 
             const string delOutput = @"
@@ -256,7 +324,7 @@ WHERE NDT_Batch_No = @BatchNo
 
         try
         {
-            await using var conn = CreateConnection();
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
             await OpenConnectionAsync(conn, "Manual_Station_Run insert", cancellationToken).ConfigureAwait(false);
 
             const string sql = @"
@@ -277,6 +345,7 @@ VALUES
             cmd.Parameters.AddWithValue("@HydroType", (object?)NullIfEmpty(hydrotestingType ?? string.Empty) ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@SourceFile", (object?)NullIfEmpty(sourceFile) ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            _writeTracker.RecordSuccess("Manual_Station_Run", $"{ndtBatchNo} {workStation}");
             _logger.LogInformation(
                 "Recorded Manual_Station_Run for batch {BatchNo} station {Station} in JazeeraMES_Prod.",
                 ndtBatchNo,
@@ -284,6 +353,7 @@ VALUES
         }
         catch (Exception ex)
         {
+            _writeTracker.RecordFailure("Manual_Station_Run", ex.Message, ndtBatchNo);
             _logger.LogError(ex, "Failed to record Manual_Station_Run for batch {BatchNo} in JazeeraMES_Prod.", ndtBatchNo);
         }
     }
@@ -306,7 +376,7 @@ VALUES
 
         try
         {
-            await using var conn = CreateConnection();
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
             await OpenConnectionAsync(conn, "NDT_Process_Consolidated upsert", cancellationToken).ConfigureAwait(false);
 
             const string sql = @"
@@ -344,6 +414,7 @@ END";
             cmd.Parameters.AddWithValue("@BundleEnd", bundleEnd);
             cmd.Parameters.AddWithValue("@OutputFile", (object?)NullIfEmpty(outputFilePath) ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            _writeTracker.RecordSuccess("NDT_Process_Consolidated", ndtBatchNo);
             _logger.LogInformation(
                 "Recorded NDT_Process_Consolidated for batch {BatchNo} in JazeeraMES_Prod (output {OutputFile}).",
                 ndtBatchNo,
@@ -351,6 +422,7 @@ END";
         }
         catch (Exception ex)
         {
+            _writeTracker.RecordFailure("NDT_Process_Consolidated", ex.Message, ndtBatchNo);
             _logger.LogError(
                 ex,
                 "Failed to record NDT_Process_Consolidated for batch {BatchNo} in JazeeraMES_Prod. Revisual CSV was still written; fix SQL connectivity.",
@@ -376,7 +448,7 @@ END";
 
         try
         {
-            await using var conn = CreateConnection();
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
             await OpenConnectionAsync(conn, "Bundle_Label upsert", cancellationToken).ConfigureAwait(false);
 
             const string sql = @"
@@ -403,10 +475,12 @@ END";
             cmd.Parameters.AddWithValue("@PipeSize", (object?)NullIfEmpty(pipeSize) ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@Length", (object?)NullIfEmpty(length) ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            _writeTracker.RecordSuccess("Bundle_Label", $"PO {po} mill {millNo}");
             _logger.LogInformation("Recorded Bundle_Label for PO {PoNumber} mill {MillNo} in JazeeraMES_Prod.", po, millNo);
         }
         catch (Exception ex)
         {
+            _writeTracker.RecordFailure("Bundle_Label", ex.Message, $"PO {po} mill {millNo}");
             _logger.LogError(ex, "Failed to record Bundle_Label for PO {PoNumber} mill {MillNo} in JazeeraMES_Prod.", po, millNo);
         }
     }
@@ -418,7 +492,7 @@ END";
 
         try
         {
-            await using var conn = CreateConnection();
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
             await OpenConnectionAsync(conn, "Upload_Bundle_Row insert", cancellationToken).ConfigureAwait(false);
 
             const string sql = @"
@@ -471,8 +545,8 @@ BEGIN
 END";
 
         await using var cmd = new SqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("@PoNumber", record.PoNumber);
-        cmd.Parameters.AddWithValue("@MillNo", record.MillNo);
+        cmd.Parameters.AddWithValue("@PoNumber", InputSlitCsvParsing.NormalizePo(record.PoNumber));
+        cmd.Parameters.AddWithValue("@MillNo", record.MillNo is >= 1 and <= 4 ? record.MillNo : 1);
         cmd.Parameters.AddWithValue("@BundleNo", batchNo);
         cmd.Parameters.AddWithValue("@SlitNo", (object?)NullIfEmpty(record.SlitNo) ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@SlitStartTime", (object?)record.SlitStartTime ?? DBNull.Value);

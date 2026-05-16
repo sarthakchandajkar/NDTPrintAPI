@@ -18,23 +18,32 @@ public sealed class NdtBundleRepository : INdtBundleRepository
     private const int MinColumns = 10;
 
     private readonly IOptionsMonitor<NdtBundleOptions> _optionsMonitor;
+    private readonly ISqlTraceabilityWriteTracker _writeTracker;
     private readonly ILogger<NdtBundleRepository> _logger;
 
-    public NdtBundleRepository(IOptionsMonitor<NdtBundleOptions> optionsMonitor, ILogger<NdtBundleRepository> logger)
+    public NdtBundleRepository(
+        IOptionsMonitor<NdtBundleOptions> optionsMonitor,
+        ISqlTraceabilityWriteTracker writeTracker,
+        ILogger<NdtBundleRepository> logger)
     {
         _optionsMonitor = optionsMonitor;
+        _writeTracker = writeTracker;
         _logger = logger;
     }
 
     private NdtBundleOptions Opt => _optionsMonitor.CurrentValue;
 
-    private bool UseDatabase =>
-        Opt.UseSqlServerForBundles && !string.IsNullOrWhiteSpace(Opt.ConnectionString);
+    private bool UseDatabase => SqlTraceabilityConnection.IsSqlEnabled(Opt);
 
     public async Task RecordBundleAsync(NdtBundleRecord record, CancellationToken cancellationToken)
     {
         if (!UseDatabase)
+        {
+            _logger.LogWarning(
+                "NDT_Bundle SQL write skipped for {BundleNo}: set NdtBundle:UseSqlServerForBundles=true and ConnectionString (or SqlServer+SqlDatabase) to JazeeraMES_Prod.",
+                record.BundleNo);
             return;
+        }
 
         const int maxAttempts = 3;
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
@@ -42,6 +51,7 @@ public sealed class NdtBundleRepository : INdtBundleRepository
             try
             {
                 await UpsertBundleAsync(record, cancellationToken).ConfigureAwait(false);
+                _writeTracker.RecordSuccess("NDT_Bundle", $"{record.BundleNo} ({record.TotalNdtPcs} pcs)");
                 _logger.LogInformation(
                     "Recorded bundle {BundleNo} ({Total} NDT pcs) in JazeeraMES_Prod.dbo.NDT_Bundle.",
                     record.BundleNo,
@@ -60,6 +70,7 @@ public sealed class NdtBundleRepository : INdtBundleRepository
             }
             catch (Exception ex)
             {
+                _writeTracker.RecordFailure("NDT_Bundle", ex.Message, record.BundleNo);
                 _logger.LogError(
                     ex,
                     "Failed to record bundle {BundleNo} in JazeeraMES_Prod after {Max} attempts; Printed Tags and Visual incoming count may not match the label.",
@@ -71,7 +82,7 @@ public sealed class NdtBundleRepository : INdtBundleRepository
 
     private async Task UpsertBundleAsync(NdtBundleRecord record, CancellationToken cancellationToken)
     {
-        await using var conn = SqlTraceabilityConnection.Create(Opt.ConnectionString);
+        await using var conn = SqlTraceabilityConnection.Create(Opt);
         await SqlTraceabilityConnection.OpenAsync(conn, _logger, "NDT_Bundle upsert", cancellationToken).ConfigureAwait(false);
         const string sql = @"
 IF EXISTS (SELECT 1 FROM dbo.NDT_Bundle WHERE Bundle_No = @BundleNo)
@@ -117,7 +128,7 @@ END";
         {
             try
             {
-                await using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlTraceabilityConnection.NormalizeConnectionString(Opt.ConnectionString));
+                await using var conn = SqlTraceabilityConnection.Create(Opt);
                 await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
                 const string sql = "SELECT Bundle_No AS BundleNo, PO_Number AS PoNumber, Mill_No AS MillNo, Total_NDT_Pcs AS TotalNdtPcs, Context_Slit_No AS SlitNo, Slit_Start_Time AS SlitStartTime, Slit_Finish_Time AS SlitFinishTime, Rejected_P AS RejectedPipes, NDT_Short_Length_Pipe AS NdtShortLengthPipe, Rejected_Short_Length_Pipe AS RejectedShortLengthPipe FROM dbo.NDT_Bundle ORDER BY PrintedAt DESC";
                 await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
@@ -147,7 +158,7 @@ END";
         {
             try
             {
-                await using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlTraceabilityConnection.NormalizeConnectionString(Opt.ConnectionString));
+                await using var conn = SqlTraceabilityConnection.Create(Opt);
                 await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
                 const string sql = "SELECT TOP 1 Bundle_No AS BundleNo, PO_Number AS PoNumber, Mill_No AS MillNo, Total_NDT_Pcs AS TotalNdtPcs, Context_Slit_No AS SlitNo, Slit_Start_Time AS SlitStartTime, Slit_Finish_Time AS SlitFinishTime, Rejected_P AS RejectedPipes, NDT_Short_Length_Pipe AS NdtShortLengthPipe, Rejected_Short_Length_Pipe AS RejectedShortLengthPipe FROM dbo.NDT_Bundle WHERE Bundle_No = @BatchNo ORDER BY PrintedAt DESC";
                 await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
@@ -245,7 +256,7 @@ END";
         {
             try
             {
-                await using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlTraceabilityConnection.NormalizeConnectionString(Opt.ConnectionString));
+                await using var conn = SqlTraceabilityConnection.Create(Opt);
                 await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
                 const string sql = "UPDATE dbo.NDT_Bundle SET Total_NDT_Pcs = @NewPipes WHERE Bundle_No = @BatchNo";
                 await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
@@ -582,7 +593,7 @@ END";
 
         try
         {
-            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlTraceabilityConnection.NormalizeConnectionString(Opt.ConnectionString));
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
             await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
             const string sql = "UPDATE dbo.NDT_Bundle SET Total_NDT_Pcs = @NewPipes WHERE Bundle_No = @BatchNo";
             await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);

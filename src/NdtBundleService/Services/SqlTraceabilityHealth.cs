@@ -14,12 +14,15 @@ public sealed class SqlTraceabilityHealthReport
 {
     public bool Enabled { get; init; }
     public bool Connected { get; init; }
+    public string? ConfiguredServer { get; init; }
+    public string? ConfiguredDatabase { get; init; }
     public string? Database { get; init; }
     public string? DataSource { get; init; }
     public bool IsExpectedDatabase { get; init; }
     public IReadOnlyList<string> MissingTables { get; init; } = Array.Empty<string>();
     public IReadOnlyDictionary<string, long> RowCounts { get; init; } = new Dictionary<string, long>();
     public IReadOnlyList<SqlTraceabilityBundleSample> RecentBundles { get; init; } = Array.Empty<SqlTraceabilityBundleSample>();
+    public IReadOnlyList<SqlTraceabilityWriteResult> RecentWrites { get; init; } = Array.Empty<SqlTraceabilityWriteResult>();
     public string? Error { get; init; }
 }
 
@@ -47,38 +50,49 @@ public sealed class SqlTraceabilityHealth : ISqlTraceabilityHealth
     };
 
     private readonly IOptionsMonitor<NdtBundleOptions> _optionsMonitor;
+    private readonly ISqlTraceabilityWriteTracker _writeTracker;
     private readonly ILogger<SqlTraceabilityHealth> _logger;
 
-    public SqlTraceabilityHealth(IOptionsMonitor<NdtBundleOptions> optionsMonitor, ILogger<SqlTraceabilityHealth> logger)
+    public SqlTraceabilityHealth(
+        IOptionsMonitor<NdtBundleOptions> optionsMonitor,
+        ISqlTraceabilityWriteTracker writeTracker,
+        ILogger<SqlTraceabilityHealth> logger)
     {
         _optionsMonitor = optionsMonitor;
+        _writeTracker = writeTracker;
         _logger = logger;
     }
 
     public async Task<SqlTraceabilityHealthReport> GetReportAsync(CancellationToken cancellationToken)
     {
         var opt = _optionsMonitor.CurrentValue;
+        var resolvedCs = SqlTraceabilityConnection.ResolveConnectionString(opt);
+        var (configuredServer, configuredDatabase) = SqlTraceabilityConnection.DescribeConnectionString(resolvedCs);
+        var recentWrites = _writeTracker.GetRecentResults();
+
         if (!opt.UseSqlServerForBundles)
         {
             return new SqlTraceabilityHealthReport
             {
                 Enabled = false,
+                RecentWrites = recentWrites,
                 Error = "NdtBundle:UseSqlServerForBundles is false."
             };
         }
 
-        if (string.IsNullOrWhiteSpace(opt.ConnectionString))
+        if (string.IsNullOrWhiteSpace(resolvedCs))
         {
             return new SqlTraceabilityHealthReport
             {
                 Enabled = true,
-                Error = "NdtBundle:ConnectionString is empty. Set NdtBundle__ConnectionString on the server."
+                RecentWrites = recentWrites,
+                Error = "No SQL connection configured. Set NdtBundle:ConnectionString or NdtBundle:SqlServer + SqlDatabase (JazeeraMES_Prod), or env NdtBundle__ConnectionString."
             };
         }
 
         try
         {
-            await using var conn = SqlTraceabilityConnection.Create(opt.ConnectionString);
+            await using var conn = SqlTraceabilityConnection.Create(opt);
             await SqlTraceabilityConnection.OpenAsync(conn, _logger, "health check", cancellationToken).ConfigureAwait(false);
 
             var database = conn.Database;
@@ -108,12 +122,15 @@ public sealed class SqlTraceabilityHealth : ISqlTraceabilityHealth
             {
                 Enabled = true,
                 Connected = true,
+                ConfiguredServer = configuredServer,
+                ConfiguredDatabase = configuredDatabase,
                 Database = database,
                 DataSource = conn.DataSource,
                 IsExpectedDatabase = isExpectedDb,
                 MissingTables = missingTables,
                 RowCounts = rowCounts,
-                RecentBundles = recentBundles
+                RecentBundles = recentBundles,
+                RecentWrites = recentWrites
             };
         }
         catch (Exception ex)
@@ -123,6 +140,9 @@ public sealed class SqlTraceabilityHealth : ISqlTraceabilityHealth
             {
                 Enabled = true,
                 Connected = false,
+                ConfiguredServer = configuredServer,
+                ConfiguredDatabase = configuredDatabase,
+                RecentWrites = recentWrites,
                 Error = ex.Message
             };
         }
