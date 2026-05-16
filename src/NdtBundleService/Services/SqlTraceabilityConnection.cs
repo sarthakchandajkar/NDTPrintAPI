@@ -56,7 +56,7 @@ internal static class SqlTraceabilityConnection
 
         var trimmed = connectionString.Trim();
         if (ServerDot.IsMatch(trimmed))
-            trimmed = ServerDot.Replace(trimmed, "Server=localhost");
+            trimmed = ServerDot.Replace(trimmed, "Server=localhost\\SQLEXPRESS");
 
         var builder = new SqlConnectionStringBuilder(trimmed);
         if (builder.ConnectTimeout < 15)
