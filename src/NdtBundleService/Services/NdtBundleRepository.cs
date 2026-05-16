@@ -36,12 +36,44 @@ public sealed class NdtBundleRepository : INdtBundleRepository
         if (!UseDatabase)
             return;
 
-        try
+        const int maxAttempts = 3;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            await using var conn = new Microsoft.Data.SqlClient.SqlConnection(SqlTraceabilityConnection.NormalizeConnectionString(Opt.ConnectionString));
-            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
-            // Upsert so other flows can create a stub row early (e.g. FK from Output_Slit_Row).
-            const string sql = @"
+            try
+            {
+                await UpsertBundleAsync(record, cancellationToken).ConfigureAwait(false);
+                _logger.LogInformation(
+                    "Recorded bundle {BundleNo} ({Total} NDT pcs) in JazeeraMES_Prod.dbo.NDT_Bundle.",
+                    record.BundleNo,
+                    record.TotalNdtPcs);
+                return;
+            }
+            catch (Exception ex) when (attempt < maxAttempts)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Failed to record bundle {BundleNo} in database (attempt {Attempt}/{Max}); retrying.",
+                    record.BundleNo,
+                    attempt,
+                    maxAttempts);
+                await Task.Delay(TimeSpan.FromMilliseconds(400 * attempt), cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(
+                    ex,
+                    "Failed to record bundle {BundleNo} in JazeeraMES_Prod after {Max} attempts; Printed Tags and Visual incoming count may not match the label.",
+                    record.BundleNo,
+                    maxAttempts);
+            }
+        }
+    }
+
+    private async Task UpsertBundleAsync(NdtBundleRecord record, CancellationToken cancellationToken)
+    {
+        await using var conn = SqlTraceabilityConnection.Create(Opt.ConnectionString);
+        await SqlTraceabilityConnection.OpenAsync(conn, _logger, "NDT_Bundle upsert", cancellationToken).ConfigureAwait(false);
+        const string sql = @"
 IF EXISTS (SELECT 1 FROM dbo.NDT_Bundle WHERE Bundle_No = @BundleNo)
 BEGIN
     UPDATE dbo.NDT_Bundle
@@ -65,24 +97,18 @@ BEGIN
     VALUES
         (@PoNumber, @MillNo, @BundleNo, @TotalNdtPcs, @SlitNo, @SlitStartTime, @SlitFinishTime, @RejectedPipes, @NdtShortLengthPipe, @RejectedShortLengthPipe, 0);
 END";
-            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("@PoNumber", record.PoNumber);
-            cmd.Parameters.AddWithValue("@MillNo", record.MillNo);
-            cmd.Parameters.AddWithValue("@BundleNo", record.BundleNo);
-            cmd.Parameters.AddWithValue("@TotalNdtPcs", record.TotalNdtPcs);
-            cmd.Parameters.AddWithValue("@SlitNo", (object?)record.SlitNo ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@SlitStartTime", (object?)record.SlitStartTime ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@SlitFinishTime", (object?)record.SlitFinishTime ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@RejectedPipes", record.RejectedPipes);
-            cmd.Parameters.AddWithValue("@NdtShortLengthPipe", (object?)record.NdtShortLengthPipe ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@RejectedShortLengthPipe", (object?)record.RejectedShortLengthPipe ?? DBNull.Value);
-            await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            _logger.LogInformation("Recorded bundle {BundleNo} in SQL (NDT_Bundle).", record.BundleNo);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to record bundle {BundleNo} in database; Printed Tags and Visual incoming count may not match the label.", record.BundleNo);
-        }
+        await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@PoNumber", record.PoNumber);
+        cmd.Parameters.AddWithValue("@MillNo", record.MillNo);
+        cmd.Parameters.AddWithValue("@BundleNo", record.BundleNo);
+        cmd.Parameters.AddWithValue("@TotalNdtPcs", record.TotalNdtPcs);
+        cmd.Parameters.AddWithValue("@SlitNo", (object?)record.SlitNo ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@SlitStartTime", (object?)record.SlitStartTime ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@SlitFinishTime", (object?)record.SlitFinishTime ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@RejectedPipes", record.RejectedPipes);
+        cmd.Parameters.AddWithValue("@NdtShortLengthPipe", (object?)record.NdtShortLengthPipe ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@RejectedShortLengthPipe", (object?)record.RejectedShortLengthPipe ?? DBNull.Value);
+        await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<IReadOnlyList<NdtBundleRecord>> GetBundlesAsync(CancellationToken cancellationToken)

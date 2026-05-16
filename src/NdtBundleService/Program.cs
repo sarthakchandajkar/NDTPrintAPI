@@ -63,6 +63,7 @@ builder.Services.AddSingleton<IPlcClient>(sp =>
 builder.Services.AddSingleton<IManualNdtTagService, ManualNdtTagService>();
 builder.Services.AddSingleton<IUploadNdtBundleFileService, UploadNdtBundleFileService>();
 builder.Services.AddSingleton<ITraceabilityRepository, TraceabilityRepository>();
+builder.Services.AddSingleton<ISqlTraceabilityHealth, SqlTraceabilityHealth>();
 
 builder.Services.AddHostedService<SqlTraceabilityStartupCheck>();
 

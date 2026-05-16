@@ -5,45 +5,64 @@ using NdtBundleService.Configuration;
 
 namespace NdtBundleService.Services;
 
-/// <summary>Logs once at startup whether JazeeraMES traceability SQL is reachable.</summary>
+/// <summary>Logs once at startup whether JazeeraMES_Prod traceability SQL is reachable and tables exist.</summary>
 public sealed class SqlTraceabilityStartupCheck : IHostedService
 {
-    private readonly IOptionsMonitor<NdtBundleOptions> _optionsMonitor;
+    private readonly ISqlTraceabilityHealth _health;
     private readonly ILogger<SqlTraceabilityStartupCheck> _logger;
 
-    public SqlTraceabilityStartupCheck(IOptionsMonitor<NdtBundleOptions> optionsMonitor, ILogger<SqlTraceabilityStartupCheck> logger)
+    public SqlTraceabilityStartupCheck(ISqlTraceabilityHealth health, ILogger<SqlTraceabilityStartupCheck> logger)
     {
-        _optionsMonitor = optionsMonitor;
+        _health = health;
         _logger = logger;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        var opt = _optionsMonitor.CurrentValue;
-        if (!opt.UseSqlServerForBundles)
+        var report = await _health.GetReportAsync(cancellationToken).ConfigureAwait(false);
+        if (!report.Enabled)
         {
             _logger.LogInformation("SQL traceability is disabled (NdtBundle:UseSqlServerForBundles=false).");
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(opt.ConnectionString))
+        if (!string.IsNullOrWhiteSpace(report.Error) && !report.Connected)
         {
-            _logger.LogWarning("SQL traceability is enabled but NdtBundle:ConnectionString is empty.");
+            _logger.LogError(
+                "SQL traceability is enabled but not reachable: {Error}. Set NdtBundle:ConnectionString (or NdtBundle__ConnectionString) to a working Server with Database={Database}.",
+                report.Error,
+                SqlTraceabilityHealth.ExpectedDatabaseName);
             return;
         }
 
-        try
+        if (!report.Connected)
+            return;
+
+        _logger.LogInformation(
+            "SQL traceability connected to {DataSource}, database {Database} (expected {Expected}).",
+            report.DataSource,
+            report.Database,
+            SqlTraceabilityHealth.ExpectedDatabaseName);
+
+        if (!report.IsExpectedDatabase)
         {
-            await using var conn = SqlTraceabilityConnection.Create(opt.ConnectionString);
-            await SqlTraceabilityConnection.OpenAsync(conn, _logger, "startup connectivity check", cancellationToken).ConfigureAwait(false);
-            _logger.LogInformation("SQL traceability connected to {DataSource} (database {Database}).", conn.DataSource, conn.Database);
+            _logger.LogWarning(
+                "Connection is open but database is {Actual}, not {Expected}. Traceability writes may go to the wrong database.",
+                report.Database,
+                SqlTraceabilityHealth.ExpectedDatabaseName);
         }
-        catch (Exception ex)
+
+        if (report.MissingTables.Count > 0)
         {
             _logger.LogError(
-                ex,
-                "SQL traceability is enabled but the database is not reachable at startup. Input_Slit_Row, Bundle_Label, and Revisual SQL writes will fail until NdtBundle:ConnectionString (or NdtBundle__ConnectionString) is corrected.");
+                "SQL traceability tables missing in {Database}: {Tables}. Run docs/NDT_Traceability_Schema.sql against JazeeraMES_Prod.",
+                report.Database,
+                string.Join(", ", report.MissingTables));
+            return;
         }
+
+        foreach (var kv in report.RowCounts)
+            _logger.LogInformation("SQL traceability table {Table}: {Count} row(s).", kv.Key, kv.Value);
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;

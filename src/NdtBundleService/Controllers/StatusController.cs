@@ -19,6 +19,7 @@ public sealed class StatusController : ControllerBase
     private readonly IZplGenerationToggle _zplToggle;
     private readonly PoEndDetectionDiagnostics _poEndDiagnostics;
     private readonly PlcConnectionHealth _plcHealth;
+    private readonly ISqlTraceabilityHealth _sqlHealth;
     private readonly ILogger<StatusController> _logger;
 
     public StatusController(
@@ -27,6 +28,7 @@ public sealed class StatusController : ControllerBase
         IZplGenerationToggle zplToggle,
         PoEndDetectionDiagnostics poEndDiagnostics,
         PlcConnectionHealth plcHealth,
+        ISqlTraceabilityHealth sqlHealth,
         ILogger<StatusController> logger)
     {
         _plcClient = plcClient;
@@ -34,7 +36,46 @@ public sealed class StatusController : ControllerBase
         _zplToggle = zplToggle;
         _poEndDiagnostics = poEndDiagnostics;
         _plcHealth = plcHealth;
+        _sqlHealth = sqlHealth;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// SQL traceability status for JazeeraMES_Prod: connectivity, table presence, row counts, and recent NDT_Bundle rows.
+    /// </summary>
+    [HttpGet("sql-traceability")]
+    public async Task<IActionResult> GetSqlTraceabilityStatus(CancellationToken cancellationToken)
+    {
+        var report = await _sqlHealth.GetReportAsync(cancellationToken).ConfigureAwait(false);
+        var healthy = report.Enabled
+            && report.Connected
+            && report.IsExpectedDatabase
+            && report.MissingTables.Count == 0
+            && string.IsNullOrWhiteSpace(report.Error);
+
+        return Ok(new
+        {
+            Healthy = healthy,
+            ExpectedDatabase = SqlTraceabilityHealth.ExpectedDatabaseName,
+            report.Enabled,
+            report.Connected,
+            report.Database,
+            report.DataSource,
+            report.IsExpectedDatabase,
+            report.MissingTables,
+            report.RowCounts,
+            report.RecentBundles,
+            report.Error,
+            Message = !report.Enabled
+                ? "SQL traceability disabled in config."
+                : !report.Connected
+                    ? "Cannot connect to SQL Server. Check NdtBundle:ConnectionString or NdtBundle__ConnectionString."
+                    : !report.IsExpectedDatabase
+                        ? $"Connected to {report.Database}, not {SqlTraceabilityHealth.ExpectedDatabaseName}."
+                        : report.MissingTables.Count > 0
+                            ? "Connected but traceability tables are missing. Run docs/NDT_Traceability_Schema.sql."
+                            : "Connected to JazeeraMES_Prod; traceability tables present."
+        });
     }
 
     /// <summary>

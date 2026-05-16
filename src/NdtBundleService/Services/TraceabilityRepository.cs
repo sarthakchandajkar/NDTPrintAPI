@@ -131,10 +131,15 @@ VALUES
                 cmd.Parameters.AddWithValue("@SourceRowNumber", rowNo);
                 await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
+
+            _logger.LogInformation(
+                "Recorded {Count} Input_Slit_Row row(s) for file {File} in JazeeraMES_Prod.",
+                rows.Count,
+                sourceFile);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to record Input_Slit_Row for file {File}.", sourceFile);
+            _logger.LogError(ex, "Failed to record Input_Slit_Row for file {File} in JazeeraMES_Prod.", sourceFile);
         }
     }
 
@@ -177,10 +182,15 @@ VALUES
                 cmd.Parameters.AddWithValue("@SourceRowNumber", rowNo);
                 await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
+
+            _logger.LogInformation(
+                "Recorded {Count} Output_Slit_Row row(s) for file {File} in JazeeraMES_Prod.",
+                rows.Count,
+                sourceFile);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to record Output_Slit_Row for file {File}.", sourceFile);
+            _logger.LogError(ex, "Failed to record Output_Slit_Row for file {File} in JazeeraMES_Prod.", sourceFile);
         }
     }
 
@@ -267,10 +277,14 @@ VALUES
             cmd.Parameters.AddWithValue("@HydroType", (object?)NullIfEmpty(hydrotestingType ?? string.Empty) ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@SourceFile", (object?)NullIfEmpty(sourceFile) ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation(
+                "Recorded Manual_Station_Run for batch {BatchNo} station {Station} in JazeeraMES_Prod.",
+                ndtBatchNo,
+                workStation);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to record Manual_Station_Run for batch {BatchNo}.", ndtBatchNo);
+            _logger.LogError(ex, "Failed to record Manual_Station_Run for batch {BatchNo} in JazeeraMES_Prod.", ndtBatchNo);
         }
     }
 
@@ -331,15 +345,15 @@ END";
             cmd.Parameters.AddWithValue("@OutputFile", (object?)NullIfEmpty(outputFilePath) ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             _logger.LogInformation(
-                "Recorded NDT_Process_Consolidated for batch {BatchNo} (output {OutputFile}).",
+                "Recorded NDT_Process_Consolidated for batch {BatchNo} in JazeeraMES_Prod (output {OutputFile}).",
                 ndtBatchNo,
                 outputFilePath);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(
+            _logger.LogError(
                 ex,
-                "Failed to record NDT_Process_Consolidated for batch {BatchNo}. Revisual CSV was still written; fix SQL connectivity to persist traceability.",
+                "Failed to record NDT_Process_Consolidated for batch {BatchNo} in JazeeraMES_Prod. Revisual CSV was still written; fix SQL connectivity.",
                 ndtBatchNo);
         }
     }
@@ -389,11 +403,11 @@ END";
             cmd.Parameters.AddWithValue("@PipeSize", (object?)NullIfEmpty(pipeSize) ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@Length", (object?)NullIfEmpty(length) ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            _logger.LogInformation("Recorded Bundle_Label for PO {PoNumber} mill {MillNo}.", po, millNo);
+            _logger.LogInformation("Recorded Bundle_Label for PO {PoNumber} mill {MillNo} in JazeeraMES_Prod.", po, millNo);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to record Bundle_Label for PO {PoNumber} mill {MillNo}.", po, millNo);
+            _logger.LogError(ex, "Failed to record Bundle_Label for PO {PoNumber} mill {MillNo} in JazeeraMES_Prod.", po, millNo);
         }
     }
 

@@ -34,6 +34,9 @@ public sealed class FormationChartCsvProvider : IFormationChartProvider
 
     private readonly NdtBundleOptions _options;
     private readonly ILogger<FormationChartCsvProvider> _logger;
+    private readonly object _cacheLock = new();
+    private IReadOnlyDictionary<string, FormationChartEntry>? _cached;
+    private string? _cacheSignature;
 
     public FormationChartCsvProvider(IOptions<NdtBundleOptions> options, ILogger<FormationChartCsvProvider> logger)
     {
@@ -52,12 +55,35 @@ public sealed class FormationChartCsvProvider : IFormationChartProvider
             return BuiltInFormationChart;
         }
 
+        var signature = $"{path}|{File.GetLastWriteTimeUtc(path).Ticks}";
+        lock (_cacheLock)
+        {
+            if (_cached is not null && string.Equals(_cacheSignature, signature, StringComparison.Ordinal))
+                return _cached;
+        }
+
+        var result = await LoadFormationChartAsync(path, cancellationToken).ConfigureAwait(false);
+        lock (_cacheLock)
+        {
+            _cached = result;
+            _cacheSignature = signature;
+        }
+
+        return result;
+    }
+
+    private async Task<IReadOnlyDictionary<string, FormationChartEntry>> LoadFormationChartAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
         var result = CopyBuiltInFormationChart();
 
         await using var stream = File.OpenRead(path);
         using var reader = new StreamReader(stream);
 
-        string? headerLine = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+        string? headerLine = await reader.ReadLineAsync().ConfigureAwait(false);
         if (headerLine is null)
             return result;
 
@@ -77,9 +103,8 @@ public sealed class FormationChartCsvProvider : IFormationChartProvider
             return BuiltInFormationChart;
         }
 
-        while (!reader.EndOfStream)
+        while (await reader.ReadLineAsync().ConfigureAwait(false) is { } line)
         {
-            var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(line))
                 continue;
 

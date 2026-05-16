@@ -68,38 +68,50 @@ public sealed class ReconcileController : ControllerBase
         IReadOnlyList<NdtBundleRecord> bundles,
         CancellationToken cancellationToken)
     {
-        var pipeSizes = await _pipeSizeProvider.GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
-        var formation = await _formationChartProvider.GetFormationChartAsync(cancellationToken).ConfigureAwait(false);
-
-        var byPoMill = bundles.GroupBy(b => (b.PoNumber, b.MillNo));
-        var result = new List<NdtBundleRecord>();
-
-        foreach (var group in byPoMill)
+        try
         {
-            var threshold = ResolveThreshold(group.Key.PoNumber, pipeSizes, formation);
-            var ordered = group
-                .OrderBy(b => ParseBatchSequence(b.BundleNo))
-                .ThenBy(b => b.BundleNo, StringComparer.OrdinalIgnoreCase)
-                .ToList();
+            var pipeSizes = await _pipeSizeProvider.GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
+            var formation = await _formationChartProvider.GetFormationChartAsync(cancellationToken).ConfigureAwait(false);
 
-            if (ordered.Count == 0)
-                continue;
+            var byPoMill = bundles.GroupBy(b => (b.PoNumber, b.MillNo));
+            var result = new List<NdtBundleRecord>();
 
-            var maxSeq = ParseBatchSequence(ordered[^1].BundleNo);
-            foreach (var bundle in ordered)
+            foreach (var group in byPoMill)
             {
-                var seq = ParseBatchSequence(bundle.BundleNo);
-                var isLatest = seq == maxSeq;
-                var isOpenPartial = isLatest && bundle.TotalNdtPcs > 0 && bundle.TotalNdtPcs < threshold;
-                if (!isOpenPartial)
-                    result.Add(bundle);
-            }
-        }
+                var threshold = ResolveThreshold(group.Key.PoNumber, pipeSizes, formation);
+                var ordered = group
+                    .OrderBy(b => ParseBatchSequence(b.BundleNo))
+                    .ThenBy(b => b.BundleNo, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
 
-        return result
-            .OrderByDescending(b => ParseBatchSequence(b.BundleNo))
-            .ThenByDescending(b => b.BundleNo, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+                if (ordered.Count == 0)
+                    continue;
+
+                var maxSeq = ParseBatchSequence(ordered[^1].BundleNo);
+                foreach (var bundle in ordered)
+                {
+                    var seq = ParseBatchSequence(bundle.BundleNo);
+                    var isLatest = seq == maxSeq;
+                    var isOpenPartial = isLatest && bundle.TotalNdtPcs > 0 && bundle.TotalNdtPcs < threshold;
+                    if (!isOpenPartial)
+                        result.Add(bundle);
+                }
+            }
+
+            return result
+                .OrderByDescending(b => ParseBatchSequence(b.BundleNo))
+                .ThenByDescending(b => b.BundleNo, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(
+                "Returning bundle list without open-partial filtering because the request was canceled while loading pipe sizes or formation chart.");
+            return bundles
+                .OrderByDescending(b => ParseBatchSequence(b.BundleNo))
+                .ThenByDescending(b => b.BundleNo, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
     }
 
     private static int ResolveThreshold(
