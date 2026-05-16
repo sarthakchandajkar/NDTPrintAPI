@@ -59,10 +59,59 @@ internal static class SqlTraceabilityConnection
             trimmed = ServerDot.Replace(trimmed, "Server=localhost\\SQLEXPRESS");
 
         var builder = new SqlConnectionStringBuilder(trimmed);
+        builder.DataSource = PreferLocalhostWhenOnSameMachine(builder.DataSource);
         if (builder.ConnectTimeout < 15)
             builder.ConnectTimeout = 15;
 
         return builder.ConnectionString;
+    }
+
+    /// <summary>
+    /// SSMS can resolve the VM hostname + named instance; the Windows service often cannot (SQL Browser / error 26).
+    /// When the app runs on the SQL host, use localhost so SQLEXPRESS is located reliably.
+    /// </summary>
+    private static string PreferLocalhostWhenOnSameMachine(string dataSource)
+    {
+        if (string.IsNullOrWhiteSpace(dataSource))
+            return dataSource;
+
+        var machine = Environment.MachineName;
+        if (string.IsNullOrWhiteSpace(machine))
+            return dataSource;
+
+        var slash = dataSource.IndexOf('\\', StringComparison.Ordinal);
+        var comma = dataSource.IndexOf(',', StringComparison.Ordinal);
+        var splitAt = slash >= 0 && comma >= 0 ? Math.Min(slash, comma)
+            : slash >= 0 ? slash
+            : comma >= 0 ? comma
+            : -1;
+        var hostPart = splitAt >= 0 ? dataSource[..splitAt] : dataSource;
+        var suffix = splitAt >= 0 ? dataSource[splitAt..] : string.Empty;
+
+        if (!IsLocalMachineHost(hostPart, machine))
+            return dataSource;
+
+        return "localhost" + suffix;
+    }
+
+    private static bool IsLocalMachineHost(string hostPart, string machine)
+    {
+        if (hostPart.Equals(machine, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (hostPart.Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase)
+            || hostPart.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+            || hostPart.Equals("(local)", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        // NetBIOS name is 15 chars; SSMS/login may show AJS-SOH-VM-PAS while MachineName is AJS-SOH-VM-PAS-DEV.
+        if (machine.Length > 15
+            && hostPart.Equals(machine[..15], StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        var computerName = Environment.GetEnvironmentVariable("COMPUTERNAME");
+        return !string.IsNullOrWhiteSpace(computerName)
+            && hostPart.Equals(computerName, StringComparison.OrdinalIgnoreCase);
     }
 
     public static SqlConnection Create(NdtBundleOptions options)
