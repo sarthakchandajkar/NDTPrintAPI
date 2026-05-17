@@ -16,7 +16,7 @@ public sealed class FormationChartCsvProvider : IFormationChartProvider
         new Dictionary<string, FormationChartEntry>(StringComparer.OrdinalIgnoreCase)
         {
             { "Default", new FormationChartEntry { PipeSize = "Default", RequiredNdtPcs = 20 } },
-            { "0.5", new FormationChartEntry { PipeSize = "0.5", RequiredNdtPcs = 2 } },
+            { "0.5", new FormationChartEntry { PipeSize = "0.5", RequiredNdtPcs = 250 } },
             { "0.75", new FormationChartEntry { PipeSize = "0.75", RequiredNdtPcs = 180 } },
             { "1", new FormationChartEntry { PipeSize = "1", RequiredNdtPcs = 150 } },
             { "1.25", new FormationChartEntry { PipeSize = "1.25", RequiredNdtPcs = 140 } },
