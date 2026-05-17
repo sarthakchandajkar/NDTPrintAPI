@@ -326,6 +326,9 @@ public sealed class ReconcileController : ControllerBase
 
         try
         {
+            await NdtBundleOutputPaths.TrySaveBundleZplAsync(_options, bundle.BundleNo, zplBytes, cancellationToken)
+                .ConfigureAwait(false);
+
             var sendResult = await _printerSender.SendAsync(address, _options.NdtTagPrinterPort, zplBytes, cancellationToken).ConfigureAwait(false);
             if (sendResult.Success)
                 return Ok(new { Message = "Bundle tag (Reprint) sent to printer.", NdtBatchNo = batchNo, NdtPcs = bundle.TotalNdtPcs });

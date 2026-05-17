@@ -60,10 +60,14 @@ public class NdtBundleOptions
     /// <summary>When true, manual station state is persisted as JSON files under OutputBundleFolder\ManualStationState. When false, state is kept in memory only and no files are generated in that folder.</summary>
     public bool EnableManualStationStateFiles { get; set; }
 
-    /// <summary>When true, the service writes NDT_Bundle_*.csv summary files in OutputBundleFolder. When false, these summary files are skipped while other CSV flows continue.</summary>
+    /// <summary>When true, writes <c>NDT_Bundle_{batchNo}.csv</c> to <see cref="BundleSummaryOutputFolder"/>. When false, bundle summary CSV is skipped (ZPL may still be written on print).</summary>
     public bool EnableBundleSummaryCsvFiles { get; set; } = true;
 
-    /// <summary>When <see cref="EnableBundleSummaryCsvFiles"/> is true, folder for NDT_Bundle_*.csv summaries; when empty, falls back to <see cref="OutputBundleFolder"/>. Also used when scanning CSVs for bundle list if not using SQL.</summary>
+    /// <summary>
+    /// Folder for completed bundle artifacts: <c>NDT_Bundle_{batchNo}.csv</c> and <c>NDT_Bundle_{batchNo}.zpl</c>.
+    /// Production example: <c>Z:\To SAP\TM\NDT\NDT Bundles</c>. Per-slit input-slit CSVs stay in <see cref="OutputBundleFolder"/>.
+    /// When empty, falls back to <see cref="OutputBundleFolder"/>.
+    /// </summary>
     public string BundleSummaryOutputFolder { get; set; } = string.Empty;
 
     /// <summary>

@@ -947,16 +947,16 @@ ORDER BY
     }
 
     /// <summary>
-    /// Lists bundle CSV files generated in the configured OutputBundleFolder.
+    /// Lists bundle CSV files generated in the NDT Bundles folder (BundleSummaryOutputFolder).
     /// </summary>
     [HttpGet("bundles")]
     public IActionResult ListBundles()
     {
-        var folder = _options.OutputBundleFolder;
+        var folder = NdtBundleOutputPaths.ResolveBundleArtifactsFolder(_options);
         if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
             return Ok(Array.Empty<object>());
 
-        var files = Directory.GetFiles(folder, "*.csv")
+        var files = Directory.GetFiles(folder, "NDT_Bundle_*.csv")
             .Select(path => new
             {
                 FileName = Path.GetFileName(path),

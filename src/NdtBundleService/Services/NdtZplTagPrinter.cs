@@ -91,7 +91,7 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
 
         // Always save a ZPL preview file alongside bundle output so the layout
         // can be visualized in an external ZPL viewer without depending on the printer.
-        await TrySaveZplPreviewAsync(zplBytes, ndtBatchNoFormatted, cancellationToken).ConfigureAwait(false);
+        await TrySaveBundleZplAsync(opt, zplBytes, ndtBatchNoFormatted, cancellationToken).ConfigureAwait(false);
 
         var sendResult = await _sender.SendAsync(address, opt.NdtTagPrinterPort, zplBytes, cancellationToken).ConfigureAwait(false);
         if (sendResult.Success)
@@ -101,32 +101,26 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
         return sendResult.Success;
     }
 
-    private async Task TrySaveZplPreviewAsync(byte[] zplBytes, string ndtBatchNoFormatted, CancellationToken cancellationToken)
+    private async Task TrySaveBundleZplAsync(
+        NdtBundleOptions opt,
+        byte[] zplBytes,
+        string ndtBatchNoFormatted,
+        CancellationToken cancellationToken)
     {
         try
         {
-            var folder = (_options.CurrentValue.OutputBundleFolder ?? string.Empty).Trim();
-            if (string.IsNullOrEmpty(folder))
+            var folder = NdtBundleOutputPaths.ResolveBundleArtifactsFolder(opt);
+            if (string.IsNullOrWhiteSpace(folder))
                 return;
 
-            Directory.CreateDirectory(folder);
-
-            var safeBatch = string.Join("_", (ndtBatchNoFormatted ?? string.Empty)
-                .Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
-
-            if (string.IsNullOrEmpty(safeBatch))
-                safeBatch = "NDTBatch";
-
-            var fileName = $"NDTTag_{safeBatch}_{DateTime.Now:yyyyMMddHHmmss}.zpl";
-            var fullPath = Path.Combine(folder, fileName);
-
-            await File.WriteAllBytesAsync(fullPath, zplBytes, cancellationToken).ConfigureAwait(false);
-            _logger.LogInformation("Saved ZPL preview for NDT tag {BatchNo} to {Path}", ndtBatchNoFormatted, fullPath);
+            await NdtBundleOutputPaths.TrySaveBundleZplAsync(opt, ndtBatchNoFormatted, zplBytes, cancellationToken)
+                .ConfigureAwait(false);
+            var fullPath = Path.Combine(folder, NdtBundleOutputPaths.GetBundleZplFileName(ndtBatchNoFormatted));
+            _logger.LogInformation("Saved ZPL for NDT bundle {BatchNo} to {Path}", ndtBatchNoFormatted, fullPath);
         }
         catch (Exception ex)
         {
-            // Preview is best-effort; do not fail printing if this throws.
-            _logger.LogDebug(ex, "Failed to save ZPL preview for NDT tag {BatchNo}.", ndtBatchNoFormatted);
+            _logger.LogDebug(ex, "Failed to save ZPL for NDT bundle {BatchNo}.", ndtBatchNoFormatted);
         }
     }
 

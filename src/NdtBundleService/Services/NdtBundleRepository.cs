@@ -208,7 +208,7 @@ END";
         if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
             return null;
 
-        var path = Path.Combine(folder, $"NDT_Bundle_{batchNo}.csv");
+        var path = Path.Combine(folder, NdtBundleOutputPaths.GetBundleCsvFileName(batchNo));
         if (!File.Exists(path))
             return null;
 
@@ -614,7 +614,7 @@ END";
         if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder) || string.IsNullOrWhiteSpace(batchNo))
             return false;
 
-        var fileName = $"NDT_Bundle_{batchNo.Trim()}.csv";
+        var fileName = NdtBundleOutputPaths.GetBundleCsvFileName(batchNo.Trim());
         var path = Path.Combine(folder, fileName);
         if (!File.Exists(path))
             return false;
@@ -848,11 +848,6 @@ END";
         return line.Split(',').Select(s => s.Trim()).ToList();
     }
 
-    private string GetBundleSummaryFolder()
-    {
-        var configured = (Opt.BundleSummaryOutputFolder ?? string.Empty).Trim();
-        if (!string.IsNullOrWhiteSpace(configured))
-            return configured;
-        return (Opt.OutputBundleFolder ?? string.Empty).Trim();
-    }
+    private string GetBundleSummaryFolder() =>
+        NdtBundleOutputPaths.ResolveBundleArtifactsFolder(Opt) ?? string.Empty;
 }

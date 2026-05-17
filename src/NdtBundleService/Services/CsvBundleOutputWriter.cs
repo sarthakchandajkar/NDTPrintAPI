@@ -36,50 +36,43 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
 
     public async Task WriteBundleAsync(InputSlitRecord contextRecord, int ndtBatchNo, int totalNdtPcs, CancellationToken cancellationToken)
     {
-        var folder = _options.OutputBundleFolder;
-        if (string.IsNullOrWhiteSpace(folder))
-        {
-            _logger.LogWarning("OutputBundleFolder is not configured; bundle CSV will not be written.");
-            return;
-        }
-//this is the first change
-        Directory.CreateDirectory(folder);
-
-        // NDT_Batch_No format: 10 chars = 12 (fixed) + YY + Mill(1-4) + Sequence(5 digits)
         var ndtBatchNoFormatted = FormatNdtBatchNo(ndtBatchNo, contextRecord.MillNo);
-
+        var bundleFolder = NdtBundleOutputPaths.ResolveBundleArtifactsFolder(_options);
         if (_options.EnableBundleSummaryCsvFiles)
         {
-            // Write bundle summary to a distinct file (actual total for this bundle, e.g. 11 pipes).
-            // Do not overwrite per-slit output files (SlitNumber_Date_PONumber.csv) which keep per-row NDT pipe counts.
-            var summaryFolder = string.IsNullOrWhiteSpace(_options.BundleSummaryOutputFolder)
-                ? folder
-                : _options.BundleSummaryOutputFolder.Trim();
-            Directory.CreateDirectory(summaryFolder);
-            var fileName = $"NDT_Bundle_{ndtBatchNoFormatted}.csv";
-            var path = Path.Combine(summaryFolder, fileName);
-
-            var lines = new List<string>
+            if (string.IsNullOrWhiteSpace(bundleFolder))
             {
-                "PO Number,Slit No,NDT Pipes,Rejected P,Slit Start Time,Slit Finish Time,Mill No,NDT Short Length Pipe,Rejected Short Length Pipe,NDT Batch No"
-            };
+                _logger.LogWarning(
+                    "BundleSummaryOutputFolder and OutputBundleFolder are not configured; NDT_Bundle CSV will not be written.");
+            }
+            else
+            {
+                Directory.CreateDirectory(bundleFolder);
+                var fileName = NdtBundleOutputPaths.GetBundleCsvFileName(ndtBatchNoFormatted);
+                var path = Path.Combine(bundleFolder, fileName);
 
-            var line = string.Join(",",
-                Escape(contextRecord.PoNumber),
-                Escape(contextRecord.SlitNo),
-                totalNdtPcs.ToString(CultureInfo.InvariantCulture),
-                contextRecord.RejectedPipes.ToString(CultureInfo.InvariantCulture),
-                Escape(contextRecord.SlitStartTime?.ToString("O") ?? string.Empty),
-                Escape(contextRecord.SlitFinishTime?.ToString("O") ?? string.Empty),
-                contextRecord.MillNo.ToString(CultureInfo.InvariantCulture),
-                Escape(contextRecord.NdtShortLengthPipe),
-                Escape(contextRecord.RejectedShortLengthPipe),
-                ndtBatchNoFormatted);
+                var lines = new List<string>
+                {
+                    "PO Number,Slit No,NDT Pipes,Rejected P,Slit Start Time,Slit Finish Time,Mill No,NDT Short Length Pipe,Rejected Short Length Pipe,NDT Batch No"
+                };
 
-            lines.Add(line);
+                var line = string.Join(",",
+                    Escape(contextRecord.PoNumber),
+                    Escape(contextRecord.SlitNo),
+                    totalNdtPcs.ToString(CultureInfo.InvariantCulture),
+                    contextRecord.RejectedPipes.ToString(CultureInfo.InvariantCulture),
+                    Escape(contextRecord.SlitStartTime?.ToString("O") ?? string.Empty),
+                    Escape(contextRecord.SlitFinishTime?.ToString("O") ?? string.Empty),
+                    contextRecord.MillNo.ToString(CultureInfo.InvariantCulture),
+                    Escape(contextRecord.NdtShortLengthPipe),
+                    Escape(contextRecord.RejectedShortLengthPipe),
+                    ndtBatchNoFormatted);
 
-            await File.WriteAllLinesAsync(path, lines, cancellationToken);
-            _logger.LogInformation("Wrote bundle CSV: {Path}", path);
+                lines.Add(line);
+
+                await File.WriteAllLinesAsync(path, lines, cancellationToken);
+                _logger.LogInformation("Wrote bundle CSV: {Path}", path);
+            }
         }
         else
         {
