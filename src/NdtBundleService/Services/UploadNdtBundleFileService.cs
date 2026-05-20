@@ -189,6 +189,7 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
         if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
             return string.Empty;
         return Directory.EnumerateFiles(folder, "*.csv")
+            .Where(f => SourceFileEligibility.IncludePoPlanFolderFileUtc(File.GetLastWriteTimeUtc(f), _options))
             .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
             .FirstOrDefault() ?? string.Empty;
     }

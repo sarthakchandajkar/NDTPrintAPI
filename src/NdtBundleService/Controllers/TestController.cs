@@ -246,20 +246,19 @@ namespace NdtBundleService.Controllers;
             var wipByPo = new Dictionary<string, WipByMillRowDto>(StringComparer.OrdinalIgnoreCase);
             string sourcePath;
 
-            var minUtc = SourceFileEligibility.ParseMinUtc(_options);
             var planFolder = _options.PoPlanFolder?.Trim();
             if (!string.IsNullOrWhiteSpace(planFolder) && Directory.Exists(planFolder))
             {
                 var files = Directory.EnumerateFiles(planFolder, "*.csv")
                     .Select(f => new FileInfo(f))
-                    .Where(f => SourceFileEligibility.IncludeFileUtc(f.LastWriteTimeUtc, minUtc))
+                    .Where(f => SourceFileEligibility.IncludePoPlanFolderFileUtc(f.LastWriteTimeUtc, _options))
                     .OrderBy(f => f.LastWriteTimeUtc)
                     .ThenBy(f => f.FullName, StringComparer.OrdinalIgnoreCase)
                     .Select(f => f.FullName)
                     .ToArray();
 
                 if (files.Length == 0)
-                    return NotFound(new { Message = "PoPlanFolder has no eligible CSV files (check MinSourceFileLastWriteUtc or folder path).", Path = planFolder });
+                    return NotFound(new { Message = "PoPlanFolder has no eligible CSV files (check MinSourceFileLastWriteUtc, PoPlanFolderRollingDays, or folder path).", Path = planFolder });
 
                 foreach (var file in files)
                     await MergeWipFileIntoByMillAsync(file, wipByMill, wipByPo, cancellationToken).ConfigureAwait(false);
@@ -274,8 +273,8 @@ namespace NdtBundleService.Controllers;
                 if (path.StartsWith("NOTFOUND:", StringComparison.Ordinal))
                     return NotFound(new { Message = "WIP CSV file not found.", Path = path["NOTFOUND:".Length..] });
 
-                if (!SourceFileEligibility.IncludeFileUtc(System.IO.File.GetLastWriteTimeUtc(path), minUtc))
-                    return NotFound(new { Message = "WIP CSV file is older than MinSourceFileLastWriteUtc.", Path = path });
+                if (!SourceFileEligibility.IncludePoPlanFolderFileUtc(System.IO.File.GetLastWriteTimeUtc(path), _options))
+                    return NotFound(new { Message = "WIP CSV file is outside the PO plan date window (MinSourceFileLastWriteUtc / PoPlanFolderRollingDays).", Path = path });
 
                 if (!await MergeWipFileIntoByMillAsync(path, wipByMill, wipByPo, cancellationToken).ConfigureAwait(false))
                     return BadRequest(new { Message = "WIP CSV must include \"Mill Number\" or \"Mill No\", and \"PO_No\", \"PO Number\", or \"PO No\"." });

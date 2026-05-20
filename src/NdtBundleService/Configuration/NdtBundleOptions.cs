@@ -27,6 +27,14 @@ public class NdtBundleOptions
     /// <summary>Folder where PO Plan (WIP) CSV files are dropped from SAP (e.g. D:\NDT\From SAP\TM). When set, one file is used as current PO plan; advance to next file only on PO End. If empty, single-file paths below are used.</summary>
     public string PoPlanFolder { get; set; } = string.Empty;
 
+    /// <summary>
+    /// When greater than 0, only PO plan CSVs in <see cref="PoPlanFolder"/> whose <c>LastWriteTimeUtc</c> is on or after
+    /// <c>UtcNow - PoPlanFolderRollingDays</c> are scanned (merged WIP, pipe size, current plan list). Combined with
+    /// <see cref="MinSourceFileLastWriteUtc"/> using the later (stricter) cutoff. Set to <c>0</c> to disable the rolling window
+    /// and use only <see cref="MinSourceFileLastWriteUtc"/> (or no date filter if that is empty). Default <c>90</c>.
+    /// </summary>
+    public int PoPlanFolderRollingDays { get; set; } = 90;
+
     /// <summary>Path to the PO_Plan CSV file that includes NDTPcsPerBundle per PO. Used when PoPlanFolder is not set.</summary>
     public string PoPlanCsvPath { get; set; } = string.Empty;
 

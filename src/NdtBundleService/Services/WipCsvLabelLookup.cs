@@ -93,6 +93,7 @@ public static class WipCsvLabelLookup
         if (!string.IsNullOrWhiteSpace(folder) && Directory.Exists(folder))
         {
             foreach (var path in Directory.EnumerateFiles(folder, "*.csv")
+                         .Where(p => SourceFileEligibility.IncludePoPlanFolderFileUtc(File.GetLastWriteTimeUtc(p), options))
                          .OrderByDescending(File.GetLastWriteTimeUtc)
                          .ThenBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase))
             {

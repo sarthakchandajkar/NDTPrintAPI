@@ -55,10 +55,9 @@ public sealed class PipeSizeCsvProvider : IPipeSizeProvider
         var planFolder = (_options.PoPlanFolder ?? string.Empty).Trim();
         if (!string.IsNullOrWhiteSpace(planFolder) && Directory.Exists(planFolder))
         {
-            var minUtc = SourceFileEligibility.ParseMinUtc(_options);
             paths.AddRange(
                 Directory.EnumerateFiles(planFolder, "*.csv")
-                    .Where(p => SourceFileEligibility.IncludeFileUtc(File.GetLastWriteTimeUtc(p), minUtc))
+                    .Where(p => SourceFileEligibility.IncludePoPlanFolderFileUtc(File.GetLastWriteTimeUtc(p), _options))
                     .OrderBy(p => File.GetLastWriteTimeUtc(p)));
         }
         else

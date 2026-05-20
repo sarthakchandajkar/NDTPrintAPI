@@ -111,10 +111,11 @@ public sealed class CurrentPoPlanService : ICurrentPoPlanService
             return;
         }
 
-        var minUtc = SourceFileEligibility.ParseMinUtc(_options);
         var files = Directory.EnumerateFiles(folder, "*.csv")
-            .Where(f => SourceFileEligibility.IncludeFileUtc(new FileInfo(f).LastWriteTimeUtc, minUtc))
-            .OrderBy(f => new FileInfo(f).LastWriteTimeUtc)
+            .Select(f => new FileInfo(f))
+            .Where(fi => SourceFileEligibility.IncludePoPlanFolderFileUtc(fi.LastWriteTimeUtc, _options))
+            .OrderBy(fi => fi.LastWriteTimeUtc)
+            .Select(fi => fi.FullName)
             .ToArray();
 
         if (files.Length == 0)
