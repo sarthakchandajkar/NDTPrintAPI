@@ -34,6 +34,8 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000).
 
+`next.config.mjs` rewrites `/api/*` to `http://127.0.0.1:5000/api/*`. If the NdtBundleService is **not** listening on port **5000**, the Summary page will show **500** for `/api/Test/wip-by-mills` and similar routes. Start the backend first (see Prerequisites).
+
 ## Build
 
 ```bash

@@ -22,18 +22,20 @@ public static class WipBundleWipCsvEnricher
 
     public static async Task TryEnrichRowAsync(
         TestController.WipByMillRowDto row,
-        MillSlitLiveOptions live,
+        MillSlitLiveOptions? live,
         ILogger logger,
         CancellationToken cancellationToken)
     {
+        var o = live ?? new MillSlitLiveOptions();
+
         if (string.IsNullOrWhiteSpace(row.PoNumber) || row.MillNo is < 1 or > 4)
             return;
 
         if (!string.IsNullOrWhiteSpace(row.PipeSize))
             return;
 
-        var bundle = (live.WipBundleFolder ?? string.Empty).Trim();
-        var accepted = (live.WipBundleAcceptedFolder ?? string.Empty).Trim();
+        var bundle = (o.WipBundleFolder ?? string.Empty).Trim();
+        var accepted = (o.WipBundleAcceptedFolder ?? string.Empty).Trim();
         var files = new List<FileInfo>();
         foreach (var folder in new[] { bundle, accepted })
         {

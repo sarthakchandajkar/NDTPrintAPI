@@ -261,7 +261,16 @@ namespace NdtBundleService.Controllers;
                     return NotFound(new { Message = "PoPlanFolder has no eligible CSV files (check MinSourceFileLastWriteUtc, PoPlanFolderRollingDays, or folder path).", Path = planFolder });
 
                 foreach (var file in files)
-                    await MergeWipFileIntoByMillAsync(file, wipByMill, wipByPo, cancellationToken).ConfigureAwait(false);
+                {
+                    try
+                    {
+                        await MergeWipFileIntoByMillAsync(file, wipByMill, wipByPo, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Skipping PO plan WIP file after read/parse error: {File}", file);
+                    }
+                }
 
                 sourcePath = $"{planFolder} ({files.Length} WIP CSV file(s); PO per mill from slits, else TM Bundle / Bundle Accepted WIP filenames)";
             }
@@ -282,7 +291,16 @@ namespace NdtBundleService.Controllers;
                 sourcePath = path;
             }
 
-            var slitPoByMill = await _activePoPerMill.GetLatestPoByMillAsync(cancellationToken).ConfigureAwait(false);
+            IReadOnlyDictionary<int, string> slitPoByMill;
+            try
+            {
+                slitPoByMill = await _activePoPerMill.GetLatestPoByMillAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "GetLatestPoByMillAsync failed; continuing with empty slit PO map for wip-by-mills.");
+                slitPoByMill = new Dictionary<int, string>();
+            }
 
             var mills = new List<WipByMillRowDto>(4);
             for (var m = 1; m <= 4; m++)
@@ -317,7 +335,7 @@ namespace NdtBundleService.Controllers;
                 }
             }
 
-            var liveOpts = _options.MillSlitLive;
+            var liveOpts = _options.MillSlitLive ?? new MillSlitLiveOptions();
             foreach (var row in mills)
             {
                 if (string.IsNullOrWhiteSpace(row.PoNumber) || !string.IsNullOrWhiteSpace(row.PipeSize))
@@ -325,7 +343,16 @@ namespace NdtBundleService.Controllers;
                 await WipBundleWipCsvEnricher.TryEnrichRowAsync(row, liveOpts, _logger, cancellationToken).ConfigureAwait(false);
             }
 
-            var pipeSizeByPo = await _pipeSizeProvider.GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
+            IReadOnlyDictionary<string, string> pipeSizeByPo;
+            try
+            {
+                pipeSizeByPo = await _pipeSizeProvider.GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "GetPipeSizeByPoAsync failed; pipe sizes on wip-by-mills may be empty.");
+                pipeSizeByPo = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            }
             foreach (var row in mills)
             {
                 if (string.IsNullOrWhiteSpace(row.PoNumber) || !string.IsNullOrWhiteSpace(row.PipeSize))
@@ -334,7 +361,17 @@ namespace NdtBundleService.Controllers;
                     row.PipeSize = ps.Trim();
             }
 
-            var formation = await _formationChartProvider.GetFormationChartAsync(cancellationToken).ConfigureAwait(false);
+            IReadOnlyDictionary<string, FormationChartEntry> formation;
+            try
+            {
+                formation = await _formationChartProvider.GetFormationChartAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "GetFormationChartAsync failed; NdtPcsPerBundle on wip-by-mills will use defaults where possible.");
+                formation = new Dictionary<string, FormationChartEntry>(StringComparer.OrdinalIgnoreCase);
+            }
+
             foreach (var row in mills)
             {
                 if (string.IsNullOrWhiteSpace(row.PoNumber))
