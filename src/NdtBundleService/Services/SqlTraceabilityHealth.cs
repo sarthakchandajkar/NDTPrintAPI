@@ -24,6 +24,9 @@ public sealed class SqlTraceabilityHealthReport
     public IReadOnlyList<SqlTraceabilityBundleSample> RecentBundles { get; init; } = Array.Empty<SqlTraceabilityBundleSample>();
     public IReadOnlyList<SqlTraceabilityWriteResult> RecentWrites { get; init; } = Array.Empty<SqlTraceabilityWriteResult>();
     public string? Error { get; init; }
+    public string? MachineName { get; init; }
+    public string? ProcessWindowsLogin { get; init; }
+    public IReadOnlyList<string> SuggestedSqlLogins { get; init; } = Array.Empty<string>();
 }
 
 public sealed class SqlTraceabilityBundleSample
@@ -68,6 +71,7 @@ public sealed class SqlTraceabilityHealth : ISqlTraceabilityHealth
         var opt = _optionsMonitor.CurrentValue;
         var resolvedCs = SqlTraceabilityConnection.ResolveConnectionString(opt);
         var (configuredServer, configuredDatabase) = SqlTraceabilityConnection.DescribeConnectionString(resolvedCs);
+        var loginHint = SqlTraceabilityConnection.GetWindowsLoginHint();
         var recentWrites = _writeTracker.GetRecentResults();
 
         if (!opt.UseSqlServerForBundles)
@@ -76,7 +80,10 @@ public sealed class SqlTraceabilityHealth : ISqlTraceabilityHealth
             {
                 Enabled = false,
                 RecentWrites = recentWrites,
-                Error = "NdtBundle:UseSqlServerForBundles is false."
+                Error = "NdtBundle:UseSqlServerForBundles is false.",
+                MachineName = loginHint.MachineName,
+                ProcessWindowsLogin = loginHint.CurrentProcessLogin,
+                SuggestedSqlLogins = loginHint.SuggestedCreateLoginNames
             };
         }
 
@@ -86,7 +93,10 @@ public sealed class SqlTraceabilityHealth : ISqlTraceabilityHealth
             {
                 Enabled = true,
                 RecentWrites = recentWrites,
-                Error = "No SQL connection configured. Set NdtBundle:ConnectionString or NdtBundle:SqlServer + SqlDatabase (JazeeraMES_Prod), or env NdtBundle__ConnectionString."
+                Error = "No SQL connection configured. Set NdtBundle:ConnectionString or NdtBundle:SqlServer + SqlDatabase (JazeeraMES_Prod), or env NdtBundle__ConnectionString.",
+                MachineName = loginHint.MachineName,
+                ProcessWindowsLogin = loginHint.CurrentProcessLogin,
+                SuggestedSqlLogins = loginHint.SuggestedCreateLoginNames
             };
         }
 
@@ -130,12 +140,18 @@ public sealed class SqlTraceabilityHealth : ISqlTraceabilityHealth
                 MissingTables = missingTables,
                 RowCounts = rowCounts,
                 RecentBundles = recentBundles,
-                RecentWrites = recentWrites
+                RecentWrites = recentWrites,
+                MachineName = loginHint.MachineName,
+                ProcessWindowsLogin = loginHint.CurrentProcessLogin,
+                SuggestedSqlLogins = loginHint.SuggestedCreateLoginNames
             };
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "SQL traceability health check failed.");
+            var grantHint = loginHint.SuggestedCreateLoginNames.Count > 0
+                ? $" Grant SQL login using: {string.Join(" or ", loginHint.SuggestedCreateLoginNames)} (COMPUTERNAME={loginHint.MachineName}; include trailing dash on host if present)."
+                : string.Empty;
             return new SqlTraceabilityHealthReport
             {
                 Enabled = true,
@@ -143,7 +159,10 @@ public sealed class SqlTraceabilityHealth : ISqlTraceabilityHealth
                 ConfiguredServer = configuredServer,
                 ConfiguredDatabase = configuredDatabase,
                 RecentWrites = recentWrites,
-                Error = ex.Message
+                Error = ex.Message + grantHint,
+                MachineName = loginHint.MachineName,
+                ProcessWindowsLogin = loginHint.CurrentProcessLogin,
+                SuggestedSqlLogins = loginHint.SuggestedCreateLoginNames
             };
         }
     }

@@ -68,6 +68,15 @@ public class NdtBundleOptions
     /// <summary>When true, manual station state is persisted as JSON files under OutputBundleFolder\ManualStationState. When false, state is kept in memory only and no files are generated in that folder.</summary>
     public bool EnableManualStationStateFiles { get; set; }
 
+    /// <summary>
+    /// When true, persists per-(PO, mill) bundle sequence, running NDT total, and engine size counts to
+    /// <see cref="NdtBundleRuntimeStateFile"/> (or OutputBundleFolder\NdtBundleRuntimeState.json) so tag numbering continues after restart.
+    /// </summary>
+    public bool EnableNdtBundleRuntimeStatePersistence { get; set; } = true;
+
+    /// <summary>Optional full path for runtime state JSON. When empty, uses OutputBundleFolder\NdtBundleRuntimeState.json.</summary>
+    public string? NdtBundleRuntimeStateFile { get; set; }
+
     /// <summary>When true, writes <c>NDT_Bundle_{batchNo}.csv</c> to <see cref="BundleSummaryOutputFolder"/>. When false, bundle summary CSV is skipped (ZPL may still be written on print).</summary>
     public bool EnableBundleSummaryCsvFiles { get; set; } = true;
 
@@ -84,8 +93,14 @@ public class NdtBundleOptions
     /// </summary>
     public string UploadNdtBundleFilesFolder { get; set; } = @"Z:\To SAP\TM\NDT\MES PAS NDT\Bundle";
 
-    /// <summary>Folder where Slit Accepted files are written (used to map slit width by slit batch number). Production example: <c>Z:\To SAP\TM\Slitting\Slit Accepted</c>.</summary>
+    /// <summary>Folder where slitting accepted CSVs are read for Slit Width on upload bundle files. Production: <c>Z:\To SAP\TM\Slitting\Slit Accepted</c> (not Input Slit Accepted).</summary>
     public string SlitAcceptedFolder { get; set; } = @"Z:\To SAP\TM\Slitting\Slit Accepted";
+
+    /// <summary>TM FG bundle folder (<c>FG_{mill}_{po}_….csv</c>) for Pipe Grade → Slit Grade. When empty, uses <see cref="MillSlitLiveOptions.WipBundleFolder"/>.</summary>
+    public string FgBundleFolder { get; set; } = @"Z:\To SAP\TM\Bundle";
+
+    /// <summary>Accepted FG bundle folder. When empty, uses <see cref="MillSlitLiveOptions.WipBundleAcceptedFolder"/>.</summary>
+    public string FgBundleAcceptedFolder { get; set; } = @"Z:\To SAP\TM\Bundle Accepted";
 
     /// <summary>When true, the upload bundle CSV generator runs on a timer.</summary>
     public bool EnableUploadNdtBundleScheduler { get; set; } = true;
@@ -99,11 +114,22 @@ public class NdtBundleOptions
     /// <summary>When false, SQL Server is never used for bundles (reads/writes use CSV folders only), even if <see cref="ConnectionString"/> is set (e.g. env override).</summary>
     public bool UseSqlServerForBundles { get; set; } = true;
 
+    /// <summary>
+    /// When true and <see cref="UseSqlServerForBundles"/> is enabled, reconcile/printed-tags list endpoints read bundles and slits from SQL first.
+    /// CSV folder scan is used only when SQL is disabled or the query fails (avoids slow Z:\ scans on dashboard load).
+    /// </summary>
+    public bool PreferSqlForReconcileReads { get; set; } = true;
+
+    /// <summary>
+    /// When false and SQL bundle list fails, returns an empty list instead of scanning all output CSV files (prevents long hangs / timeouts on the dashboard).
+    /// </summary>
+    public bool AllowCsvFallbackForBundleReads { get; set; } = true;
+
     /// <summary>SQL Server connection string for NDT_Bundle and reconciliation. Ignored unless <see cref="UseSqlServerForBundles"/> is true. If empty, bundle list comes from output CSVs.</summary>
     public string ConnectionString { get; set; } = string.Empty;
 
-    /// <summary>When <see cref="ConnectionString"/> is empty, builds Trusted_Connection string from Server + Database (e.g. production env vars).</summary>
-    public string SqlServer { get; set; } = string.Empty;
+    /// <summary>When <see cref="ConnectionString"/> is empty, builds Trusted_Connection string from Server + Database. Production VM NetBIOS: <c>AJS-SOH-VM-PAS-\SQLEXPRESS</c> (normalized to localhost when the app runs on that host).</summary>
+    public string SqlServer { get; set; } = @"AJS-SOH-VM-PAS-\SQLEXPRESS";
 
     /// <summary>Database name when using <see cref="SqlServer"/> instead of <see cref="ConnectionString"/> (default target: JazeeraMES_Prod).</summary>
     public string SqlDatabase { get; set; } = "JazeeraMES_Prod";

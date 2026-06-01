@@ -84,6 +84,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
     private readonly IWipLabelProvider _wipLabelProvider;
     private readonly INetworkPrinterSender _sender;
     private readonly ITraceabilityRepository _traceability;
+    private readonly IReconcileSyncService _reconcileSync;
     private readonly ILogger<ManualNdtTagService> _logger;
 
     private static readonly object StateLock = new();
@@ -96,6 +97,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         IWipLabelProvider wipLabelProvider,
         INetworkPrinterSender sender,
         ITraceabilityRepository traceability,
+        IReconcileSyncService reconcileSync,
         ILogger<ManualNdtTagService> logger)
     {
         _optionsMonitor = optionsMonitor;
@@ -104,6 +106,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         _wipLabelProvider = wipLabelProvider;
         _sender = sender;
         _traceability = traceability;
+        _reconcileSync = reconcileSync;
         _logger = logger;
     }
 
@@ -280,7 +283,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
         }
 
-        await _traceability.RecordManualStationRunAsync(
+        await _traceability.UpsertManualStationRunAsync(
             poNumber: state.PoNumber,
             ndtBatchNo: batch,
             ndtPcs: incoming,
@@ -292,6 +295,12 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             hydrotestingType: IsHydroStation(request.Station) ? HydrotestingTypeValue(request.Station) : null,
             sourceFile: csvPath ?? string.Empty,
             cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        await _reconcileSync.SyncAfterManualStationReconcileAsync(
+            request.Station,
+            BuildReconcileSnapshot(state),
+            csvPath,
+            cancellationToken).ConfigureAwait(false);
 
         var printed = false;
         if (request.PrintTag)
@@ -652,6 +661,24 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             ManualTagStation.Hydrotesting or ManualTagStation.FourHeadHydrotesting or ManualTagStation.BigHydrotesting => state.Hydrotesting,
             ManualTagStation.Revisual => state.Revisual,
             _ => null
+        };
+
+    private static ManualStationReconcileSnapshot BuildReconcileSnapshot(FlowState state) =>
+        new()
+        {
+            PoNumber = state.PoNumber,
+            NdtBatchNo = state.NdtBatchNo,
+            InitialPcs = state.InitialPcs,
+            HasVisual = state.Visual is not null,
+            VisualRejected = state.Visual?.RejectedPcs ?? 0,
+            VisualStart = state.Visual?.StartTime,
+            HasHydro = state.Hydrotesting is not null,
+            HydroRejected = state.Hydrotesting?.RejectedPcs ?? 0,
+            HasRevisual = state.Revisual is not null,
+            RevisualOk = state.Revisual?.OkPcs ?? 0,
+            RevisualRejected = state.Revisual?.RejectedPcs ?? 0,
+            RevisualEnd = state.Revisual?.EndTime,
+            RevisualInvalidated = state.RevisualInvalidatedByUpstreamReconcile
         };
 
     private static void SetStationRecord(FlowState state, ManualTagStation station, StationRecord record)

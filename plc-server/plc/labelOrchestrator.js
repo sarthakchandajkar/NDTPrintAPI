@@ -80,7 +80,8 @@ class PlcLabelOrchestrator {
 
   emitLabelPrinted(payload) {
     try {
-      this.io.emit("plc:mill3:label_printed", {
+      this.io.emit(`plc:mill${this.millNo}:label_printed`, {
+        millNo: this.millNo,
         mill: this.millLabel,
         timestamp: formatTimestamp(),
         ...payload,

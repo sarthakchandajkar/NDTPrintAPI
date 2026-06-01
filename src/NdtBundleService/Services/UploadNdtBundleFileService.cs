@@ -88,19 +88,27 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
 
                 var bundle = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
                 var sourceSlitNo = bundle?.SlitNo?.Trim() ?? string.Empty;
-                var convertedSlitNo = ConvertSlitNoPrefix(sourceSlitNo);
                 var hrcNumber = ExtractHrcNumber(sourceSlitNo);
 
                 var wip = await ReadWipByPoAndMillAsync(poNo, bundle?.MillNo, cancellationToken).ConfigureAwait(false);
-                var slitWidth = await FindSlitWidthFromAcceptedFilesAsync(sourceSlitNo, cancellationToken).ConfigureAwait(false);
+                var slitWidth = await SlitAcceptedCsvLookup.ResolveSlitWidthAsync(_options, sourceSlitNo, cancellationToken)
+                    .ConfigureAwait(false);
+                var slitGrade = await FgBundleCsvLookup.ResolvePipeGradeAsync(
+                        _options,
+                        poNo,
+                        bundle?.MillNo,
+                        _logger,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (string.IsNullOrWhiteSpace(slitGrade))
+                    slitGrade = wip.PipeGrade;
                 var slitThick = wip.PipeThickness;
-                var slitGrade = wip.PipeGrade;
                 var lenPerPipe = wip.PipeLength;
                 var totalBundleWt = FormatWeight(wip.PipeWeightPerMeter, okPcs);
 
                 var outputLine = string.Join(",",
                     Escape(poNo),
-                    Escape(convertedSlitNo),
+                    Escape(sourceSlitNo),
                     Escape(hrcNumber),
                     Escape(slitWidth),
                     Escape(slitThick),
@@ -117,7 +125,7 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
                 uploadRowsForSql.Add(new UploadBundleRow
                 {
                     PoNo = poNo,
-                    SlitNo = convertedSlitNo,
+                    SlitNo = sourceSlitNo,
                     HrcNumber = hrcNumber,
                     SlitWidth = slitWidth,
                     SlitThick = slitThick,
@@ -192,60 +200,6 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
             .Where(f => SourceFileEligibility.IncludePoPlanFolderFileUtc(File.GetLastWriteTimeUtc(f), _options))
             .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
             .FirstOrDefault() ?? string.Empty;
-    }
-
-    private async Task<string> FindSlitWidthFromAcceptedFilesAsync(string slitNo, CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(slitNo))
-            return string.Empty;
-
-        var folder = (_options.SlitAcceptedFolder ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
-            return string.Empty;
-
-        foreach (var path in Directory.EnumerateFiles(folder, "*.csv"))
-        {
-            try
-            {
-                var lines = await ReadAllLinesSharedAsync(path, cancellationToken).ConfigureAwait(false);
-                if (lines.Length < 2)
-                    continue;
-                var headers = SplitCsvLine(lines[0]);
-                var values = SplitCsvLine(lines[1]);
-                for (var i = 0; i < headers.Count; i++)
-                {
-                    if (!headers[i].EndsWith("Batch_No", StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    if (i >= values.Count || !values[i].Trim().Equals(slitNo.Trim(), StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    var widthHeader = headers[i].Replace("Batch_No", "Width", StringComparison.OrdinalIgnoreCase);
-                    var widthIndex = headers.FindIndex(h => h.Equals(widthHeader, StringComparison.OrdinalIgnoreCase));
-                    if (widthIndex >= 0 && widthIndex < values.Count)
-                        return values[widthIndex].Trim();
-                }
-            }
-            catch
-            {
-                // Ignore malformed slit accepted files.
-            }
-        }
-
-        return string.Empty;
-    }
-
-    private static string ConvertSlitNoPrefix(string slitNo)
-    {
-        if (string.IsNullOrWhiteSpace(slitNo))
-            return string.Empty;
-        var value = slitNo.Trim();
-        var first = value[0];
-        if (!char.IsDigit(first))
-            return value;
-        var digit = first - '0';
-        if (digit <= 0)
-            return value;
-        var letter = (char)('A' + digit - 1);
-        return letter + value[1..];
     }
 
     private static string ExtractHrcNumber(string slitNo)

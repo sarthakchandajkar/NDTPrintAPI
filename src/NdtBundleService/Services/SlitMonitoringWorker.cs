@@ -20,6 +20,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
     private readonly IBundleEngine _bundleEngine;
     private readonly IBundleOutputWriter _outputWriter;
     private readonly INdtBatchStateService _batchState;
+    private readonly INdtBundleRuntimeStateStore _runtimeState;
     private readonly PlcPoEndPollHandler _plcPoEndPollHandler;
     private readonly ITraceabilityRepository _traceability;
     private readonly ISqlTraceabilityWriteTracker _sqlWriteTracker;
@@ -36,6 +37,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         IBundleEngine bundleEngine,
         IBundleOutputWriter outputWriter,
         INdtBatchStateService batchState,
+        INdtBundleRuntimeStateStore runtimeState,
         PlcPoEndPollHandler plcPoEndPollHandler,
         ITraceabilityRepository traceability,
         ISqlTraceabilityWriteTracker sqlWriteTracker,
@@ -47,6 +49,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         _bundleEngine = bundleEngine;
         _outputWriter = outputWriter;
         _batchState = batchState;
+        _runtimeState = runtimeState;
         _plcPoEndPollHandler = plcPoEndPollHandler;
         _traceability = traceability;
         _sqlWriteTracker = sqlWriteTracker;
@@ -65,6 +68,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
         var inbox = (_optionsMonitor.CurrentValue.InputSlitFolder ?? string.Empty).Trim();
         _logger.LogInformation("SlitMonitoringWorker started. Watching folder {Folder}", inbox);
+
+        await _runtimeState.EnsureInitializedAsync(stoppingToken).ConfigureAwait(false);
 
         SeedPreExistingInputSlitCsvsAsProcessed();
 

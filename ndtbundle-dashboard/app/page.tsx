@@ -4,9 +4,12 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { io, type Socket } from "socket.io-client";
 import { api, type WipByMillRow } from "@/lib/api";
-
-const SOCKET_URL =
-  process.env.NEXT_PUBLIC_PLC_SOCKET_URL || "http://localhost:3030";
+import {
+  PLC_MILL_NUMBERS,
+  PLC_SOCKET_URL,
+  plcEventPrefix,
+  type PlcMillUpdate,
+} from "@/lib/plcTypes";
 
 type MillRowState = {
   row: WipByMillRow;
@@ -22,11 +25,18 @@ function parseMillNo(row: WipByMillRow): number {
   return Number.NaN;
 }
 
-/** Live NDT counter row: server uses MillSlitLive.ApplyToMillNo; socket bridge may still emit mill 3 only. */
+/** Live PLC counts per mill from plc-server Socket.IO (DB251). */
+type PlcLiveByMill = Record<
+  number,
+  { ndtCount: number | null; okCount: number | null; nokCount: number | null }
+>;
+
+/** API-backed live NDT (MillSlitLive.ApplyToMillNo) when socket unavailable. */
 type LiveNdtState = { millNo: number; count: number | null };
 
 export default function SummaryPage() {
   const [millRows, setMillRows] = useState<MillRowState[]>([]);
+  const [plcLive, setPlcLive] = useState<PlcLiveByMill>({});
   const [liveNdt, setLiveNdt] = useState<LiveNdtState | null>(null);
   const [sourcePath, setSourcePath] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -81,27 +91,45 @@ export default function SummaryPage() {
   useEffect(() => {
     let socket: Socket | null = null;
     try {
-      socket = io(SOCKET_URL, {
+      socket = io(PLC_SOCKET_URL, {
         transports: ["websocket", "polling"],
         reconnection: true,
         reconnectionAttempts: Infinity,
         reconnectionDelay: 2000,
       });
 
-      socket.on("plc:mill3:update", (payload: { ndtCount?: number }) => {
-        const value =
+      const onUpdate = (millNo: number, payload: PlcMillUpdate) => {
+        const ndt =
           typeof payload?.ndtCount === "number" && Number.isFinite(payload.ndtCount)
             ? Math.trunc(payload.ndtCount)
             : null;
-        setLiveNdt({ millNo: 3, count: value });
-      });
+        const ok =
+          typeof payload?.okCount === "number" && Number.isFinite(payload.okCount)
+            ? Math.trunc(payload.okCount)
+            : null;
+        const nok =
+          typeof payload?.nokCount === "number" && Number.isFinite(payload.nokCount)
+            ? Math.trunc(payload.nokCount)
+            : null;
+        setPlcLive((prev) => ({
+          ...prev,
+          [millNo]: { ndtCount: ndt, okCount: ok, nokCount: nok },
+        }));
+        setLiveNdt({ millNo, count: ndt });
+      };
+
+      for (const n of PLC_MILL_NUMBERS) {
+        socket.on(`${plcEventPrefix(n)}:update`, (payload: PlcMillUpdate) => {
+          onUpdate(n, payload);
+        });
+      }
     } catch {
-      // Socket optional; API poll still fills live NDT.
+      // Socket optional; API poll still fills live NDT for configured mill.
     }
 
     return () => {
       if (socket) {
-        socket.removeAllListeners("plc:mill3:update");
+        socket.removeAllListeners();
         socket.close();
       }
     };
@@ -227,14 +255,15 @@ export default function SummaryPage() {
       {(() => {
         const mill3Row = millRows.find(({ row }) => parseMillNo(row) === 3)?.row;
         if (millRows.length === 0) return null;
+        const plc3 = plcLive[3];
         const liveForM3 =
-          liveNdt?.millNo === 3
-            ? liveNdt.count != null
+          plc3?.ndtCount != null
+            ? String(plc3.ndtCount)
+            : liveNdt?.millNo === 3 && liveNdt.count != null
               ? String(liveNdt.count)
-              : "—"
-            : liveNdt != null
-              ? `PLC live counter is on Mill-${liveNdt.millNo} (service config)`
-              : "—";
+              : liveNdt != null
+                ? `API live counter on Mill-${liveNdt.millNo}`
+                : "—";
         return (
           <div className="rounded-lg border border-primary-200 bg-gradient-to-br from-primary-50 to-white p-5 shadow-sm">
             <h2 className="text-lg font-semibold text-gray-900">Mill 3 — running job</h2>
@@ -275,8 +304,9 @@ export default function SummaryPage() {
             Each row is one mill (Mill-1 … Mill-4). PO number is taken from the latest Input Slit row when present; otherwise
             from the latest <code className="text-xs bg-gray-100 px-1 rounded">WIP_MM_…</code> file name in the TM Bundle /
             Bundle Accepted folders (<code className="text-xs bg-gray-100 px-1 rounded">MillSlitLive</code> in service
-            config). Pipe details merge from the PO plan WIP folder when the PO matches. NDT pipe count for Mill-3 comes
-            from the PLC-backed counter (API poll every few seconds and optional Socket.IO when the PLC bridge is running).
+            config). Pipe details merge from the PO plan WIP folder when the PO matches. OK / NOK / NDT counts come from
+            the PLC bridge (<code className="text-xs bg-gray-100 px-1 rounded">plc-server</code> Socket.IO) when running;
+            Mill-3 also has an API fallback via <code className="text-xs bg-gray-100 px-1 rounded">MillSlitLive</code>.
           </p>
         </div>
         <div className="overflow-x-auto">
@@ -288,7 +318,13 @@ export default function SummaryPage() {
                   PO number
                 </th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">
-                  NDT pipes
+                  OK
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">
+                  NOK
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">
+                  NDT
                 </th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide hidden lg:table-cell">
                   Pipe size
@@ -313,7 +349,7 @@ export default function SummaryPage() {
             <tbody className="divide-y divide-gray-200">
               {millRows.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-8 text-gray-500">
+                  <td colSpan={11} className="px-4 py-8 text-gray-500">
                     No mill data. Ensure the PO plan CSV has a &quot;Mill Number&quot; column and rows for mills 1–4.
                   </td>
                 </tr>
@@ -321,13 +357,20 @@ export default function SummaryPage() {
                 millRows.map(({ row }) => {
                   const m = row.millNo ?? 0;
                   const parsedMillNo = parseMillNo(row);
-                  const displayNdt =
+                  const plc = Number.isFinite(parsedMillNo) ? plcLive[parsedMillNo] : undefined;
+                  const displayOk = plc?.okCount != null ? plc.okCount : "—";
+                  const displayNok = plc?.nokCount != null ? plc.nokCount : "—";
+                  let displayNdt: number | string = "—";
+                  if (plc?.ndtCount != null) {
+                    displayNdt = plc.ndtCount;
+                  } else if (
                     liveNdt != null &&
                     Number.isFinite(parsedMillNo) &&
                     parsedMillNo === liveNdt.millNo &&
                     liveNdt.count != null
-                      ? liveNdt.count
-                      : "—";
+                  ) {
+                    displayNdt = liveNdt.count;
+                  }
                   return (
                     <tr key={Number.isFinite(parsedMillNo) ? `mill-${parsedMillNo}` : `mill-${String(m)}`} className="hover:bg-gray-50">
                       <td className="px-4 py-3 font-semibold text-gray-900 whitespace-nowrap">
@@ -336,7 +379,13 @@ export default function SummaryPage() {
                       <td className="px-4 py-3 text-gray-900 font-medium whitespace-nowrap">
                         {(row.poNumber ?? "").trim() || "—"}
                       </td>
-                      <td className="px-4 py-3 text-primary-600 font-semibold whitespace-nowrap">
+                      <td className="px-4 py-3 text-emerald-700 font-medium tabular-nums whitespace-nowrap">
+                        {displayOk}
+                      </td>
+                      <td className="px-4 py-3 text-rose-700 font-medium tabular-nums whitespace-nowrap">
+                        {displayNok}
+                      </td>
+                      <td className="px-4 py-3 text-primary-600 font-semibold tabular-nums whitespace-nowrap">
                         {displayNdt}
                       </td>
                       <td className="px-4 py-3 text-gray-700 hidden lg:table-cell whitespace-nowrap">

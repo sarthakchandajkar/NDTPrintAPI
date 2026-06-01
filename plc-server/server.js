@@ -12,7 +12,7 @@ const corsOrigin =
 
 const httpServer = http.createServer((_, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("Mill-3 PLC Socket.IO bridge — use a Socket.IO client.\n");
+  res.end("Mills 1–4 PLC Socket.IO bridge — use a Socket.IO client.\n");
 });
 
 const io = new Server(httpServer, {
@@ -26,5 +26,5 @@ startPlcPoller(io);
 
 httpServer.listen(port, () => {
   // eslint-disable-next-line no-console
-  console.log(`plc-server listening on http://localhost:${port} (Socket.IO + Mill-3 S7 read)`);
+  console.log(`plc-server listening on http://localhost:${port} (Socket.IO + Mills 1–4 S7)`);
 });

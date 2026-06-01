@@ -5,21 +5,24 @@ namespace NdtBundleService.Services;
 
 /// <summary>
 /// Aggregates NDT pipe counts per PO/mill/size and decides when bundles are complete.
-/// This is a simplified first implementation based on NDTPcsPerBundle and size thresholds.
+/// Bundle sequence and partial totals are persisted via <see cref="INdtBundleRuntimeStateStore"/>.
 /// </summary>
 public sealed class NdtBundleEngine : IBundleEngine
 {
     private readonly IFormationChartProvider _formationChartProvider;
     private readonly IPipeSizeProvider _pipeSizeProvider;
+    private readonly INdtBundleRuntimeStateStore _runtimeState;
     private readonly ILogger<NdtBundleEngine> _logger;
 
-    // State per (PO, Mill)
-    private readonly Dictionary<(string Po, int Mill), BundleState> _bundleStates = new();
-
-    public NdtBundleEngine(IFormationChartProvider formationChartProvider, IPipeSizeProvider pipeSizeProvider, ILogger<NdtBundleEngine> logger)
+    public NdtBundleEngine(
+        IFormationChartProvider formationChartProvider,
+        IPipeSizeProvider pipeSizeProvider,
+        INdtBundleRuntimeStateStore runtimeState,
+        ILogger<NdtBundleEngine> logger)
     {
         _formationChartProvider = formationChartProvider;
         _pipeSizeProvider = pipeSizeProvider;
+        _runtimeState = runtimeState;
         _logger = logger;
     }
 
@@ -31,47 +34,51 @@ public sealed class NdtBundleEngine : IBundleEngine
         if (record.NdtPipes <= 0)
             return;
 
-        var key = (record.PoNumber, record.MillNo);
-        var state = GetOrCreateState(key);
+        await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
 
-        // Pipe size from external file (by PO Number), not from Input Slit CSV
         var pipeSizeByPo = await _pipeSizeProvider.GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
         pipeSizeByPo.TryGetValue(record.PoNumber, out var pipeSize);
 
         var formation = await _formationChartProvider.GetFormationChartAsync(cancellationToken).ConfigureAwait(false);
         var sizeThreshold = FormationChartLookup.ResolveThreshold(formation, pipeSize);
 
-        // Keep last record as context for bundle export
-        state.LastRecord = record;
+        _runtimeState.SetLastRecord(record.PoNumber, record.MillNo, record);
 
-        // One accumulator per normalized pipe size (PO can switch size mid-stream in edge cases)
         var sizeKey = FormationChartLookup.NormalizePipeSizeKey(pipeSize);
         if (string.IsNullOrEmpty(sizeKey))
             sizeKey = "Default";
 
-        if (!state.SizeCounts.TryGetValue(sizeKey, out var currentSizeCount))
+        var sizeCounts = _runtimeState.GetSizeCounts(record.PoNumber, record.MillNo);
+        if (!sizeCounts.TryGetValue(sizeKey, out var currentSizeCount))
             currentSizeCount = 0;
         currentSizeCount += record.NdtPipes;
 
-        // Full bundle closes when threshold is reached.
-        // If a slit pushes past threshold, keep the overshoot in the same bundle total (no carry-forward split).
         if (currentSizeCount >= sizeThreshold)
         {
-            state.CurrentBatchNo++;
             var totalForBatch = currentSizeCount;
             currentSizeCount = 0;
+
+            var batchNo = _runtimeState.CloseBundle(record.PoNumber, record.MillNo, totalForBatch, sizeThreshold);
             _logger.LogInformation(
                 "Closing size-based bundle {BatchNo} for PO {PO} Mill {Mill} Size {Size} threshold={Threshold} total={Total} (includes slit overshoot)",
-                state.CurrentBatchNo,
+                batchNo,
                 record.PoNumber,
                 record.MillNo,
                 sizeKey,
                 sizeThreshold,
                 totalForBatch);
-            await onBundleClosedAsync(state.LastRecord!, state.CurrentBatchNo, totalForBatch).ConfigureAwait(false);
+
+            sizeCounts[sizeKey] = currentSizeCount;
+            _runtimeState.SetSizeCounts(record.PoNumber, record.MillNo, sizeCounts);
+            await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
+
+            await onBundleClosedAsync(record, batchNo, totalForBatch).ConfigureAwait(false);
+            return;
         }
 
-        state.SizeCounts[sizeKey] = currentSizeCount;
+        sizeCounts[sizeKey] = currentSizeCount;
+        _runtimeState.SetSizeCounts(record.PoNumber, record.MillNo, sizeCounts);
+        await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task HandlePoEndAsync(
@@ -80,25 +87,36 @@ public sealed class NdtBundleEngine : IBundleEngine
         Func<InputSlitRecord, int, int, Task> onBundleClosedAsync,
         CancellationToken cancellationToken)
     {
-        var key = (poNumber, millNo);
-        if (!_bundleStates.TryGetValue(key, out var state))
-            return;
+        await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
 
-        var contextRecord = state.LastRecord ?? CreateSyntheticRecord(poNumber, millNo);
+        var pipeSizeByPo = await _pipeSizeProvider.GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
+        pipeSizeByPo.TryGetValue(poNumber, out var pipeSize);
 
-        // Reset size-based counts on PO end (close any partial size-based bundles)
-        foreach (var sizeKey in state.SizeCounts.Keys.ToList())
+        var formation = await _formationChartProvider.GetFormationChartAsync(cancellationToken).ConfigureAwait(false);
+        var sizeThreshold = FormationChartLookup.ResolveThreshold(formation, pipeSize);
+
+        var contextRecord = _runtimeState.GetLastRecord(poNumber, millNo) ?? CreateSyntheticRecord(poNumber, millNo);
+        var sizeCounts = _runtimeState.GetSizeCounts(poNumber, millNo);
+
+        foreach (var sizeKey in sizeCounts.Keys.ToList())
         {
-            var count = state.SizeCounts[sizeKey];
+            var count = sizeCounts[sizeKey];
             if (count <= 0)
                 continue;
 
-            state.CurrentBatchNo++;
-            var totalForBatch = count;
-            state.SizeCounts[sizeKey] = 0;
-            _logger.LogInformation("Closing partial size-based bundle {BatchNo} for PO {PO} Mill {Mill} Size {Size} due to PO end.", state.CurrentBatchNo, poNumber, millNo, sizeKey);
-            await onBundleClosedAsync(contextRecord, state.CurrentBatchNo, totalForBatch).ConfigureAwait(false);
+            var batchNo = _runtimeState.CloseBundle(poNumber, millNo, count, sizeThreshold);
+            sizeCounts[sizeKey] = 0;
+            _logger.LogInformation(
+                "Closing partial size-based bundle {BatchNo} for PO {PO} Mill {Mill} Size {Size} due to PO end.",
+                batchNo,
+                poNumber,
+                millNo,
+                sizeKey);
+            await onBundleClosedAsync(contextRecord, batchNo, count).ConfigureAwait(false);
         }
+
+        _runtimeState.SetSizeCounts(poNumber, millNo, sizeCounts);
+        await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static InputSlitRecord CreateSyntheticRecord(string poNumber, int millNo)
@@ -114,22 +132,4 @@ public sealed class NdtBundleEngine : IBundleEngine
             RejectedShortLengthPipe = ""
         };
     }
-
-    private BundleState GetOrCreateState((string Po, int Mill) key)
-    {
-        if (_bundleStates.TryGetValue(key, out var state))
-            return state;
-
-        state = new BundleState();
-        _bundleStates[key] = state;
-        return state;
-    }
-
-    private sealed class BundleState
-    {
-        public int CurrentBatchNo { get; set; }
-        public Dictionary<string, int> SizeCounts { get; } = new(StringComparer.OrdinalIgnoreCase);
-        public InputSlitRecord? LastRecord { get; set; }
-    }
 }
-

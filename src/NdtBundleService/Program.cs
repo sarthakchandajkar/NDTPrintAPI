@@ -29,6 +29,7 @@ builder.Services.AddSingleton<IPipeSizeProvider, PipeSizeCsvProvider>();
 builder.Services.AddSingleton<IBundleLabelInfoProvider, BundleLabelCsvProvider>();
 builder.Services.AddSingleton<ICurrentPoPlanService, CurrentPoPlanService>();
 builder.Services.AddSingleton<INdtBundleRepository, NdtBundleRepository>();
+builder.Services.AddSingleton<INdtBundleRuntimeStateStore, NdtBundleRuntimeStateStore>();
 builder.Services.AddSingleton<IBundleEngine, NdtBundleEngine>();
 builder.Services.AddSingleton<IBundleOutputWriter, CsvBundleOutputWriter>();
 builder.Services.AddSingleton<INdtBatchStateService, NdtBatchStateService>();
@@ -64,6 +65,7 @@ builder.Services.AddSingleton<IPlcClient>(sp =>
 builder.Services.AddSingleton<IManualNdtTagService, ManualNdtTagService>();
 builder.Services.AddSingleton<IUploadNdtBundleFileService, UploadNdtBundleFileService>();
 builder.Services.AddSingleton<ITraceabilityRepository, TraceabilityRepository>();
+builder.Services.AddSingleton<IReconcileSyncService, ReconcileSyncService>();
 builder.Services.AddSingleton<ISqlTraceabilityWriteTracker, SqlTraceabilityWriteTracker>();
 builder.Services.AddSingleton<ISqlTraceabilityHealth, SqlTraceabilityHealth>();
 

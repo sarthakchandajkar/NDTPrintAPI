@@ -37,7 +37,7 @@ const navEntries: NavEntry[] = [
   { type: "link", href: "/printed-tags", label: "Printed Tags" },
   { type: "link", href: "/reconcile", label: "Reconcile Bundle" },
   { type: "link", href: "/po-end", label: "PO End" },
-  { type: "link", href: "/mill3-plc", label: "Mill-3 PLC" },
+  { type: "link", href: "/mills-plc", label: "Mills PLC" },
 ];
 
 function isGroupActive(prefix: string, pathname: string, children: NavChild[]) {

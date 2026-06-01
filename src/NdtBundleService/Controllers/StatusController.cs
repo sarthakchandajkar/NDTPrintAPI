@@ -73,6 +73,9 @@ public sealed class StatusController : ControllerBase
             report.RecentBundles,
             RecentWrites = recentWrites,
             report.Error,
+            report.MachineName,
+            report.ProcessWindowsLogin,
+            SuggestedSqlLogins = report.SuggestedSqlLogins,
             Message = !report.Enabled
                 ? "SQL traceability disabled in config."
                 : !report.Connected

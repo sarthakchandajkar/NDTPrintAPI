@@ -16,6 +16,7 @@ public sealed class ReconcileController : ControllerBase
 {
     private readonly INdtBundleRepository _bundleRepository;
     private readonly ITraceabilityRepository _traceability;
+    private readonly IReconcileSyncService _reconcileSync;
     private readonly IFormationChartProvider _formationChartProvider;
     private readonly IPipeSizeProvider _pipeSizeProvider;
     private readonly IWipLabelProvider _wipLabelProvider;
@@ -27,6 +28,7 @@ public sealed class ReconcileController : ControllerBase
     public ReconcileController(
         INdtBundleRepository bundleRepository,
         ITraceabilityRepository traceability,
+        IReconcileSyncService reconcileSync,
         IFormationChartProvider formationChartProvider,
         IPipeSizeProvider pipeSizeProvider,
         IWipLabelProvider wipLabelProvider,
@@ -37,6 +39,7 @@ public sealed class ReconcileController : ControllerBase
     {
         _bundleRepository = bundleRepository;
         _traceability = traceability;
+        _reconcileSync = reconcileSync;
         _formationChartProvider = formationChartProvider;
         _pipeSizeProvider = pipeSizeProvider;
         _wipLabelProvider = wipLabelProvider;
@@ -98,21 +101,28 @@ public sealed class ReconcileController : ControllerBase
                 }
             }
 
-            return result
-                .OrderByDescending(b => ParseBatchSequence(b.BundleNo))
-                .ThenByDescending(b => b.BundleNo, StringComparer.OrdinalIgnoreCase)
-                .ToList();
+            return SortBundlesNewestFirst(result);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             _logger.LogWarning(
                 "Returning bundle list without open-partial filtering because the request was canceled while loading pipe sizes or formation chart.");
-            return bundles
-                .OrderByDescending(b => ParseBatchSequence(b.BundleNo))
-                .ThenByDescending(b => b.BundleNo, StringComparer.OrdinalIgnoreCase)
-                .ToList();
+            return SortBundlesNewestFirst(bundles);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Returning bundle list without open-partial filtering because pipe sizes or formation chart could not be loaded.");
+            return SortBundlesNewestFirst(bundles);
         }
     }
+
+    private static IReadOnlyList<NdtBundleRecord> SortBundlesNewestFirst(IReadOnlyList<NdtBundleRecord> bundles) =>
+        bundles
+            .OrderByDescending(b => ParseBatchSequence(b.BundleNo))
+            .ThenByDescending(b => b.BundleNo, StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
     private static int ResolveThreshold(
         string poNumber,
@@ -150,15 +160,19 @@ public sealed class ReconcileController : ControllerBase
 
         await _bundleRepository.UpdateBundlePipesAsync(batchNo, request.NewNdtPipes, cancellationToken).ConfigureAwait(false);
         var summaryUpdated = await _bundleRepository.UpdateBundleSummaryCsvAsync(batchNo, request.NewNdtPipes, cancellationToken).ConfigureAwait(false);
-        var filesUpdated = await _bundleRepository.UpdateOutputCsvFilesForBundleAsync(batchNo, request.NewNdtPipes, cancellationToken).ConfigureAwait(false);
 
-        _logger.LogInformation("Reconciled bundle {BatchNo}: NewNdtPipes={NewPipes}, CsvFilesUpdated={Count}.", batchNo, request.NewNdtPipes, filesUpdated);
+        await _reconcileSync.SyncAfterBundleTotalReconcileAsync(
+            batchNo,
+            bundle.PoNumber,
+            request.NewNdtPipes,
+            cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation("Reconciled bundle {BatchNo}: NewNdtPipes={NewPipes}.", batchNo, request.NewNdtPipes);
         return Ok(new
         {
-            Message = "Bundle reconciled. CSV(s) updated.",
+            Message = "Bundle reconciled. Output CSVs, NDT process CSV, bundle summary, and SQL traceability updated where configured.",
             NdtBatchNo = batchNo,
             NewNdtPipes = request.NewNdtPipes,
-            CsvFilesUpdated = filesUpdated,
             BundleSummaryUpdated = summaryUpdated
         });
     }
@@ -216,6 +230,8 @@ public sealed class ReconcileController : ControllerBase
         var filesUpdated = await _bundleRepository.UpdateOutputCsvFilesForSlitAsync(batchNo, slitNo, request.NewNdtPipes, cancellationToken).ConfigureAwait(false);
         if (filesUpdated == 0)
             return NotFound(new { Message = $"No output CSV row found for bundle {batchNo} and slit {slitNo}." });
+
+        await _reconcileSync.SyncAfterSlitReconcileAsync(batchNo, slitNo, request.NewNdtPipes, cancellationToken).ConfigureAwait(false);
 
         var slits = await _bundleRepository.GetSlitsForBatchAsync(batchNo, cancellationToken).ConfigureAwait(false);
 

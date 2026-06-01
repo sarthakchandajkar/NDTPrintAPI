@@ -57,6 +57,44 @@ public interface ITraceabilityRepository
         string ndtBatchNo,
         IReadOnlyList<RemovedSlitRowTraceRef> refs,
         CancellationToken cancellationToken);
+
+    /// <summary>Updates the latest Manual_Station_Run row for (batch, work station), or inserts when none exists.</summary>
+    Task UpsertManualStationRunAsync(
+        string poNumber,
+        string ndtBatchNo,
+        int ndtPcs,
+        int okPcs,
+        int rejectPcs,
+        string workStation,
+        DateTime start,
+        DateTime end,
+        string? hydrotestingType,
+        string sourceFile,
+        CancellationToken cancellationToken);
+
+    /// <summary>Updates NDT_Pipes on all Output_Slit_Row rows for the batch and slit.</summary>
+    Task UpdateOutputSlitRowNdtPipesByBatchAndSlitAsync(
+        string ndtBatchNo,
+        string slitNo,
+        int ndtPipes,
+        CancellationToken cancellationToken);
+
+    /// <summary>Aligns Output_Slit_Row.NDT_Pipes with per-slit output CSV rows for the batch (by source file + row number).</summary>
+    Task SyncOutputSlitRowsFromPerSlitCsvForBatchAsync(string ndtBatchNo, CancellationToken cancellationToken);
+
+    /// <summary>Updates reject counts and OK on NDT_Process_Consolidated when present (partial update after Visual/Hydro reconcile).</summary>
+    Task UpdateNdtProcessConsolidatedFromStationsAsync(
+        string poNumber,
+        string ndtBatchNo,
+        int ndtPcs,
+        int okPcs,
+        int visualReject,
+        int hydrotestReject,
+        int revisualReject,
+        DateTime? bundleStart,
+        DateTime? bundleEnd,
+        string? outputFilePath,
+        CancellationToken cancellationToken);
 }
 
 public sealed class UploadBundleRow
@@ -306,7 +344,32 @@ WHERE NDT_Batch_No = @BatchNo
     private static string SqlLikeEscape(string literal) =>
         literal.Replace("[", "[[]", StringComparison.Ordinal).Replace("%", "[%]", StringComparison.Ordinal).Replace("_", "[_]", StringComparison.Ordinal);
 
-    public async Task RecordManualStationRunAsync(
+    public Task RecordManualStationRunAsync(
+        string poNumber,
+        string ndtBatchNo,
+        int ndtPcs,
+        int okPcs,
+        int rejectPcs,
+        string workStation,
+        DateTime start,
+        DateTime end,
+        string? hydrotestingType,
+        string sourceFile,
+        CancellationToken cancellationToken) =>
+        UpsertManualStationRunAsync(
+            poNumber,
+            ndtBatchNo,
+            ndtPcs,
+            okPcs,
+            rejectPcs,
+            workStation,
+            start,
+            end,
+            hydrotestingType,
+            sourceFile,
+            cancellationToken);
+
+    public async Task UpsertManualStationRunAsync(
         string poNumber,
         string ndtBatchNo,
         int ndtPcs,
@@ -325,37 +388,84 @@ WHERE NDT_Batch_No = @BatchNo
         try
         {
             await using var conn = SqlTraceabilityConnection.Create(Opt);
-            await OpenConnectionAsync(conn, "Manual_Station_Run insert", cancellationToken).ConfigureAwait(false);
+            await OpenConnectionAsync(conn, "Manual_Station_Run upsert", cancellationToken).ConfigureAwait(false);
 
-            const string sql = @"
+            const string updateSql = @"
+UPDATE dbo.Manual_Station_Run
+SET PO_Number = @PoNumber,
+    NDT_Pcs = @NdtPcs,
+    OK_Pcs = @Ok,
+    Reject_Pcs = @Reject,
+    Bundle_Start = @Start,
+    Bundle_End = @End,
+    Hydrotesting_Type = @HydroType,
+    Source_File = @SourceFile
+WHERE Manual_Station_Run_ID = (
+    SELECT TOP (1) Manual_Station_Run_ID
+    FROM dbo.Manual_Station_Run
+    WHERE NDT_Batch_No = @BatchNo AND Work_Station = @WorkStation
+    ORDER BY Manual_Station_Run_ID DESC);";
+
+            await using (var updateCmd = new SqlCommand(updateSql, conn))
+            {
+                AddManualStationParameters(updateCmd, poNumber, ndtBatchNo, ndtPcs, okPcs, rejectPcs, workStation, start, end, hydrotestingType, sourceFile);
+                var updated = await updateCmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                if (updated > 0)
+                {
+                    _writeTracker.RecordSuccess("Manual_Station_Run", $"{ndtBatchNo} {workStation}");
+                    _logger.LogInformation(
+                        "Updated Manual_Station_Run for batch {BatchNo} station {Station} in JazeeraMES_Prod.",
+                        ndtBatchNo,
+                        workStation);
+                    return;
+                }
+            }
+
+            const string insertSql = @"
 INSERT INTO dbo.Manual_Station_Run
     (PO_Number, NDT_Batch_No, NDT_Pcs, OK_Pcs, Reject_Pcs, Work_Station, Bundle_Start, Bundle_End, Hydrotesting_Type, Source_File)
 VALUES
     (@PoNumber, @BatchNo, @NdtPcs, @Ok, @Reject, @WorkStation, @Start, @End, @HydroType, @SourceFile);";
 
-            await using var cmd = new SqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("@PoNumber", poNumber);
-            cmd.Parameters.AddWithValue("@BatchNo", ndtBatchNo);
-            cmd.Parameters.AddWithValue("@NdtPcs", ndtPcs);
-            cmd.Parameters.AddWithValue("@Ok", okPcs);
-            cmd.Parameters.AddWithValue("@Reject", rejectPcs);
-            cmd.Parameters.AddWithValue("@WorkStation", (object?)NullIfEmpty(workStation) ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@Start", start);
-            cmd.Parameters.AddWithValue("@End", end);
-            cmd.Parameters.AddWithValue("@HydroType", (object?)NullIfEmpty(hydrotestingType ?? string.Empty) ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@SourceFile", (object?)NullIfEmpty(sourceFile) ?? DBNull.Value);
-            await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await using var insertCmd = new SqlCommand(insertSql, conn);
+            AddManualStationParameters(insertCmd, poNumber, ndtBatchNo, ndtPcs, okPcs, rejectPcs, workStation, start, end, hydrotestingType, sourceFile);
+            await insertCmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             _writeTracker.RecordSuccess("Manual_Station_Run", $"{ndtBatchNo} {workStation}");
             _logger.LogInformation(
-                "Recorded Manual_Station_Run for batch {BatchNo} station {Station} in JazeeraMES_Prod.",
+                "Inserted Manual_Station_Run for batch {BatchNo} station {Station} in JazeeraMES_Prod.",
                 ndtBatchNo,
                 workStation);
         }
         catch (Exception ex)
         {
             _writeTracker.RecordFailure("Manual_Station_Run", ex.Message, ndtBatchNo);
-            _logger.LogError(ex, "Failed to record Manual_Station_Run for batch {BatchNo} in JazeeraMES_Prod.", ndtBatchNo);
+            _logger.LogError(ex, "Failed to upsert Manual_Station_Run for batch {BatchNo} in JazeeraMES_Prod.", ndtBatchNo);
         }
+    }
+
+    private static void AddManualStationParameters(
+        SqlCommand cmd,
+        string poNumber,
+        string ndtBatchNo,
+        int ndtPcs,
+        int okPcs,
+        int rejectPcs,
+        string workStation,
+        DateTime start,
+        DateTime end,
+        string? hydrotestingType,
+        string sourceFile)
+    {
+        cmd.Parameters.AddWithValue("@PoNumber", poNumber);
+        cmd.Parameters.AddWithValue("@BatchNo", ndtBatchNo);
+        cmd.Parameters.AddWithValue("@NdtPcs", ndtPcs);
+        cmd.Parameters.AddWithValue("@Ok", okPcs);
+        cmd.Parameters.AddWithValue("@Reject", rejectPcs);
+        cmd.Parameters.AddWithValue("@WorkStation", (object?)NullIfEmpty(workStation) ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@Start", start);
+        cmd.Parameters.AddWithValue("@End", end);
+        cmd.Parameters.AddWithValue("@HydroType", (object?)NullIfEmpty(hydrotestingType ?? string.Empty) ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@SourceFile", (object?)NullIfEmpty(sourceFile) ?? DBNull.Value);
     }
 
     public async Task RecordNdtProcessConsolidatedAsync(
@@ -523,6 +633,204 @@ VALUES
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to record Upload_Bundle_Row for file {File}.", generatedFile);
+        }
+    }
+
+    public async Task UpdateOutputSlitRowNdtPipesByBatchAndSlitAsync(
+        string ndtBatchNo,
+        string slitNo,
+        int ndtPipes,
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled || string.IsNullOrWhiteSpace(ndtBatchNo))
+            return;
+
+        var batch = ndtBatchNo.Trim();
+        var slit = string.IsNullOrWhiteSpace(slitNo) ? "—" : slitNo.Trim();
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await OpenConnectionAsync(conn, "Output_Slit_Row update by slit", cancellationToken).ConfigureAwait(false);
+
+            const string sql = @"
+UPDATE dbo.Output_Slit_Row
+SET NDT_Pipes = @NdtPipes
+WHERE NDT_Batch_No = @BatchNo
+  AND (
+    (@MatchDash = 0 AND Slit_No = @SlitNo)
+    OR (@MatchDash = 1 AND (Slit_No IS NULL OR Slit_No = N'—' OR LTRIM(RTRIM(Slit_No)) = N''))
+  );";
+
+            await using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@NdtPipes", ndtPipes);
+            cmd.Parameters.AddWithValue("@BatchNo", batch);
+            cmd.Parameters.AddWithValue("@SlitNo", slit);
+            cmd.Parameters.AddWithValue("@MatchDash", slit == "—" ? 1 : 0);
+            var rows = await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            if (rows > 0)
+            {
+                _writeTracker.RecordSuccess("Output_Slit_Row", $"{batch} slit {slit}");
+                _logger.LogInformation(
+                    "Updated {Count} Output_Slit_Row row(s) for batch {BatchNo} slit {SlitNo} to {NdtPipes} pipes.",
+                    rows,
+                    batch,
+                    slit,
+                    ndtPipes);
+            }
+        }
+        catch (Exception ex)
+        {
+            _writeTracker.RecordFailure("Output_Slit_Row", ex.Message, batch);
+            _logger.LogWarning(ex, "Failed to update Output_Slit_Row for batch {BatchNo} slit {SlitNo}.", batch, slit);
+        }
+    }
+
+    public async Task SyncOutputSlitRowsFromPerSlitCsvForBatchAsync(string ndtBatchNo, CancellationToken cancellationToken)
+    {
+        if (!Enabled || string.IsNullOrWhiteSpace(ndtBatchNo))
+            return;
+
+        var folder = (Opt.OutputBundleFolder ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+            return;
+
+        var batch = ndtBatchNo.Trim();
+        const int colNdtPipes = 2;
+        const int colNdtBatchNo = 9;
+        const int minColumns = 10;
+        var synced = 0;
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await OpenConnectionAsync(conn, "Output_Slit_Row sync from CSV", cancellationToken).ConfigureAwait(false);
+
+            const string sql = @"
+UPDATE dbo.Output_Slit_Row
+SET NDT_Pipes = @NdtPipes
+WHERE NDT_Batch_No = @BatchNo
+  AND Source_File = @SourceFile
+  AND Source_Row_Number = @SourceRow;";
+
+            var files = Directory.EnumerateFiles(folder, "*.csv")
+                .Where(p => !Path.GetFileName(p).StartsWith("NDT_Bundle_", StringComparison.OrdinalIgnoreCase));
+
+            foreach (var path in files)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                string[] lines;
+                try
+                {
+                    lines = await File.ReadAllLinesAsync(path, cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                var baseName = Path.GetFileName(path);
+                for (var i = 1; i < lines.Length; i++)
+                {
+                    var line = lines[i];
+                    if (string.IsNullOrWhiteSpace(line))
+                        continue;
+
+                    var cols = ReconcileCsvParsing.SplitCsvLine(line);
+                    if (cols.Count < minColumns)
+                        continue;
+                    if (!cols[colNdtBatchNo].Trim().Equals(batch, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    if (!int.TryParse(cols[colNdtPipes].Trim(), out var pipes))
+                        pipes = 0;
+
+                    await using var cmd = new SqlCommand(sql, conn);
+                    cmd.Parameters.AddWithValue("@NdtPipes", pipes);
+                    cmd.Parameters.AddWithValue("@BatchNo", batch);
+                    cmd.Parameters.AddWithValue("@SourceFile", baseName);
+                    cmd.Parameters.AddWithValue("@SourceRow", i + 1);
+                    synced += await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            if (synced > 0)
+            {
+                _writeTracker.RecordSuccess("Output_Slit_Row", $"{batch} sync {synced}");
+                _logger.LogInformation(
+                    "Synced {Count} Output_Slit_Row row(s) from per-slit CSVs for batch {BatchNo}.",
+                    synced,
+                    batch);
+            }
+        }
+        catch (Exception ex)
+        {
+            _writeTracker.RecordFailure("Output_Slit_Row", ex.Message, batch);
+            _logger.LogWarning(ex, "Failed to sync Output_Slit_Row from CSV for batch {BatchNo}.", batch);
+        }
+    }
+
+    public async Task UpdateNdtProcessConsolidatedFromStationsAsync(
+        string poNumber,
+        string ndtBatchNo,
+        int ndtPcs,
+        int okPcs,
+        int visualReject,
+        int hydrotestReject,
+        int revisualReject,
+        DateTime? bundleStart,
+        DateTime? bundleEnd,
+        string? outputFilePath,
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled || string.IsNullOrWhiteSpace(ndtBatchNo))
+            return;
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await OpenConnectionAsync(conn, "NDT_Process_Consolidated partial update", cancellationToken).ConfigureAwait(false);
+
+            const string sql = @"
+IF EXISTS (SELECT 1 FROM dbo.NDT_Process_Consolidated WHERE NDT_Batch_No = @BatchNo)
+BEGIN
+    UPDATE dbo.NDT_Process_Consolidated
+    SET PO_Number = @PoNumber,
+        NDT_Pcs = @NdtPcs,
+        OK_Pcs = @Ok,
+        Visual_Reject = @VisualRej,
+        Hydrotest_Reject = @HydroRej,
+        Revisual_Reject = @RevisualRej,
+        Bundle_Start = COALESCE(@BundleStart, Bundle_Start),
+        Bundle_End = COALESCE(@BundleEnd, Bundle_End),
+        Output_File = COALESCE(@OutputFile, Output_File)
+    WHERE NDT_Batch_No = @BatchNo;
+END";
+
+            await using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@PoNumber", poNumber);
+            cmd.Parameters.AddWithValue("@BatchNo", ndtBatchNo.Trim());
+            cmd.Parameters.AddWithValue("@NdtPcs", ndtPcs);
+            cmd.Parameters.AddWithValue("@Ok", okPcs);
+            cmd.Parameters.AddWithValue("@VisualRej", visualReject);
+            cmd.Parameters.AddWithValue("@HydroRej", hydrotestReject);
+            cmd.Parameters.AddWithValue("@RevisualRej", revisualReject);
+            cmd.Parameters.AddWithValue("@BundleStart", (object?)bundleStart ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@BundleEnd", (object?)bundleEnd ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@OutputFile", (object?)NullIfEmpty(outputFilePath) ?? DBNull.Value);
+            var rows = await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            if (rows > 0)
+            {
+                _writeTracker.RecordSuccess("NDT_Process_Consolidated", ndtBatchNo);
+                _logger.LogInformation(
+                    "Updated NDT_Process_Consolidated for batch {BatchNo} after manual station reconcile.",
+                    ndtBatchNo);
+            }
+        }
+        catch (Exception ex)
+        {
+            _writeTracker.RecordFailure("NDT_Process_Consolidated", ex.Message, ndtBatchNo);
+            _logger.LogWarning(ex, "Failed partial NDT_Process_Consolidated update for batch {BatchNo}.", ndtBatchNo);
         }
     }
 

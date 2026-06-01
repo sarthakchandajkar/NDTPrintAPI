@@ -7,6 +7,7 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
     private readonly IBundleEngine _bundleEngine;
     private readonly IBundleOutputWriter _outputWriter;
     private readonly INdtBatchStateService _batchState;
+    private readonly INdtBundleRuntimeStateStore _runtimeState;
     private readonly ICurrentPoPlanService? _currentPoPlanService;
     private readonly IMillSlitLiveNdtAccumulator _liveNdtAccumulator;
     private readonly ILogger<PoEndWorkflowService> _logger;
@@ -15,6 +16,7 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
         IBundleEngine bundleEngine,
         IBundleOutputWriter outputWriter,
         INdtBatchStateService batchState,
+        INdtBundleRuntimeStateStore runtimeState,
         IMillSlitLiveNdtAccumulator liveNdtAccumulator,
         ILogger<PoEndWorkflowService> logger,
         ICurrentPoPlanService? currentPoPlanService = null)
@@ -22,6 +24,7 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
         _bundleEngine = bundleEngine;
         _outputWriter = outputWriter;
         _batchState = batchState;
+        _runtimeState = runtimeState;
         _liveNdtAccumulator = liveNdtAccumulator;
         _logger = logger;
         _currentPoPlanService = currentPoPlanService;
@@ -54,6 +57,7 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
             cancellationToken).ConfigureAwait(false);
 
         await _batchState.IncrementBatchOnPoEndAsync(po, millNo, cancellationToken).ConfigureAwait(false);
+        await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
 
         _liveNdtAccumulator.OnPoEndForMill(po, millNo);
 
