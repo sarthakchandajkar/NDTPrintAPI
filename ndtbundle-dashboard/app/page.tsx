@@ -252,51 +252,6 @@ export default function SummaryPage() {
         </div>
       )}
 
-      {(() => {
-        const mill3Row = millRows.find(({ row }) => parseMillNo(row) === 3)?.row;
-        if (millRows.length === 0) return null;
-        const plc3 = plcLive[3];
-        const liveForM3 =
-          plc3?.ndtCount != null
-            ? String(plc3.ndtCount)
-            : liveNdt?.millNo === 3 && liveNdt.count != null
-              ? String(liveNdt.count)
-              : liveNdt != null
-                ? `API live counter on Mill-${liveNdt.millNo}`
-                : "—";
-        return (
-          <div className="rounded-lg border border-primary-200 bg-gradient-to-br from-primary-50 to-white p-5 shadow-sm">
-            <h2 className="text-lg font-semibold text-gray-900">Mill 3 — running job</h2>
-            <p className="text-xs text-gray-500 mt-1">
-              PO follows the same rules as the table (slits first, then TM WIP bundle file names). Pipe size is filled from
-              the PO plan, WIP CSV in bundle folders, or PO master lookup when available.
-            </p>
-            <dl className="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
-              <div className="rounded-md bg-white/80 border border-gray-100 px-3 py-2">
-                <dt className="text-gray-500 text-xs uppercase tracking-wide">PO</dt>
-                <dd className="font-semibold text-gray-900 tabular-nums">
-                  {(mill3Row?.poNumber ?? "").trim() || "—"}
-                </dd>
-              </div>
-              <div className="rounded-md bg-white/80 border border-gray-100 px-3 py-2">
-                <dt className="text-gray-500 text-xs uppercase tracking-wide">Pipe size</dt>
-                <dd className="font-semibold text-gray-900">{mill3Row?.pipeSize?.trim() || "—"}</dd>
-              </div>
-              <div className="rounded-md bg-white/80 border border-gray-100 px-3 py-2">
-                <dt className="text-gray-500 text-xs uppercase tracking-wide">NDT pcs / bundle</dt>
-                <dd className="font-semibold text-gray-900 tabular-nums">
-                  {mill3Row?.ndtPcsPerBundle == null ? "—" : mill3Row.ndtPcsPerBundle}
-                </dd>
-              </div>
-              <div className="rounded-md bg-white/80 border border-primary-100 px-3 py-2 ring-1 ring-primary-100/60">
-                <dt className="text-primary-700 text-xs uppercase tracking-wide">Live NDT count (PLC)</dt>
-                <dd className="text-xl font-bold text-primary-700 tabular-nums">{liveForM3}</dd>
-              </div>
-            </dl>
-          </div>
-        );
-      })()}
-
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
         <div className="px-5 py-3 bg-primary-50 border-b border-gray-200">
           <h2 className="font-semibold text-gray-900">PO running by mill</h2>
