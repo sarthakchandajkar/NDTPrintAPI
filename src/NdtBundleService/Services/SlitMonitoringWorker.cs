@@ -387,7 +387,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     sourceRowNumber++;
                 }
 
-                // Write one output file: SlitNumber_Date_PONumber.csv (under OutputBundleFolder).
+                // Write one output file: SlitNumber_Date_PONumber.csv (under OutputBundleFolder). Overwrites if present.
                 var outputFolder = (o.OutputBundleFolder ?? string.Empty).Trim();
                 string? outputPath = null;
                 if (!string.IsNullOrWhiteSpace(outputFolder))
@@ -395,8 +395,6 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     Directory.CreateDirectory(outputFolder);
                     var outputFileName = BuildOutputSlitCsvFileName(fileFull, rows, poOverrideForFileName);
                     outputPath = Path.Combine(outputFolder, outputFileName);
-                    if (File.Exists(outputPath))
-                        outputPath = Path.Combine(outputFolder, Path.GetFileNameWithoutExtension(outputFileName) + "_" + DateTime.Now.ToString("HHmmss", CultureInfo.InvariantCulture) + ".csv");
                     await File.WriteAllLinesAsync(outputPath, outputLines, cancellationToken).ConfigureAwait(false);
                     _logger.LogInformation("Wrote bundle CSV: {Path}", outputPath);
                 }

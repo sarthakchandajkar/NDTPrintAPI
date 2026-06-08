@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, type ReconcileBundle, type ReconcileSlitItem } from "@/lib/api";
+import { MillFilter } from "@/components/MillFilter";
+import { filterBundlesByMill, type MillFilterValue } from "@/lib/millFilter";
 
 type ReconcileMode = "OutputBundle" | "Visual" | "Hydrotesting" | "Revisual";
 type HydroType = "FourHeadHydrotesting" | "BigHydrotesting";
@@ -9,7 +11,13 @@ type HydroType = "FourHeadHydrotesting" | "BigHydrotesting";
 export default function ReconcilePage() {
   const [mode, setMode] = useState<ReconcileMode>("OutputBundle");
   const [bundles, setBundles] = useState<ReconcileBundle[]>([]);
+  const [millFilter, setMillFilter] = useState<MillFilterValue>("all");
   const [selectedBatchNo, setSelectedBatchNo] = useState("");
+
+  const filteredBundles = useMemo(
+    () => filterBundlesByMill(bundles, millFilter),
+    [bundles, millFilter]
+  );
   const [slits, setSlits] = useState<ReconcileSlitItem[]>([]);
   const [slitsLoading, setSlitsLoading] = useState(false);
   const [selectedSlitNo, setSelectedSlitNo] = useState("");
@@ -47,10 +55,11 @@ export default function ReconcilePage() {
       const next = Array.isArray(list) ? list : [];
       setBundles(next);
       if (mode === "OutputBundle") {
+        const filtered = filterBundlesByMill(next, millFilter);
         setSelectedBatchNo((prev) => {
-          if (!next.length) return "";
-          if (prev && next.some((b) => b.bundleNo === prev)) return prev;
-          return next[0]?.bundleNo ?? "";
+          if (!filtered.length) return "";
+          if (prev && filtered.some((b) => b.bundleNo === prev)) return prev;
+          return filtered[0]?.bundleNo ?? "";
         });
       }
     } catch (e) {
@@ -64,6 +73,15 @@ export default function ReconcilePage() {
   useEffect(() => {
     refresh();
   }, []);
+
+  useEffect(() => {
+    if (mode !== "OutputBundle") return;
+    setSelectedBatchNo((prev) => {
+      if (!filteredBundles.length) return "";
+      if (prev && filteredBundles.some((b) => b.bundleNo === prev)) return prev;
+      return filteredBundles[0]?.bundleNo ?? "";
+    });
+  }, [millFilter, filteredBundles, mode]);
 
   useEffect(() => {
     if (mode !== "OutputBundle") return;
@@ -402,7 +420,10 @@ export default function ReconcilePage() {
           {mode === "OutputBundle" ? (
             <div className="sm:col-span-1 rounded-md border border-gray-200 px-3 py-2 bg-gray-50">
               <div className="text-sm text-gray-500">Bundle list</div>
-              <div className="text-sm font-medium text-gray-900">{bundles.length} bundle(s) loaded</div>
+              <div className="text-sm font-medium text-gray-900">
+                {filteredBundles.length} shown
+                {millFilter !== "all" ? ` (Mill ${millFilter})` : ""} · {bundles.length} total
+              </div>
               <div className="text-xs text-gray-500 pt-1">Select from the left panel below.</div>
             </div>
           ) : (
@@ -535,10 +556,24 @@ export default function ReconcilePage() {
       </div>
 
       {mode === "OutputBundle" && (
+        <>
+        <MillFilter
+          value={millFilter}
+          onChange={setMillFilter}
+          bundles={bundles}
+          className="bg-white rounded-lg border border-gray-200 shadow-sm p-4"
+        />
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <section className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
           <div className="px-5 py-3 bg-primary-50 text-gray-900 font-semibold border-b border-gray-200 flex items-center justify-between">
-            <span>Bundles</span>
+            <span>
+              Bundles
+              {!loading && bundles.length > 0 && millFilter !== "all" && (
+                <span className="ml-2 text-sm font-normal text-gray-600">
+                  ({filteredBundles.length} of {bundles.length})
+                </span>
+              )}
+            </span>
             <button
               type="button"
               onClick={() => refresh()}
@@ -550,11 +585,15 @@ export default function ReconcilePage() {
           <div className="p-5 space-y-4">
             {loading ? (
               <p className="text-sm text-gray-500">Loading bundles…</p>
-            ) : bundles.length === 0 ? (
-              <p className="text-sm text-gray-500">No bundles found.</p>
+            ) : filteredBundles.length === 0 ? (
+              <p className="text-sm text-gray-500">
+                {bundles.length === 0
+                  ? "No bundles found."
+                  : `No bundles for Mill ${millFilter}. Try another mill or All mills.`}
+              </p>
             ) : (
               <div className="max-h-[560px] overflow-y-auto divide-y divide-gray-100 border border-gray-200 rounded-md">
-                {bundles.map((b) => {
+                {filteredBundles.map((b) => {
                   const active = b.bundleNo === selectedBatchNo;
                   return (
                     <button
@@ -742,6 +781,7 @@ export default function ReconcilePage() {
           </div>
         </section>
       </div>
+        </>
       )}
 
       {mode === "OutputBundle" && (
