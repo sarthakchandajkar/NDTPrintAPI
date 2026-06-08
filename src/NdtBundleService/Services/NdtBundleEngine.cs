@@ -53,7 +53,7 @@ public sealed class NdtBundleEngine : IBundleEngine
             currentSizeCount = 0;
         currentSizeCount += record.NdtPipes;
 
-        if (currentSizeCount >= sizeThreshold)
+        if (currentSizeCount >= sizeThreshold && currentSizeCount > 0)
         {
             var totalForBatch = currentSizeCount;
             currentSizeCount = 0;

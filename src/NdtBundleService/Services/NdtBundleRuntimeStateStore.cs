@@ -121,6 +121,13 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         lock (_stateLock)
         {
             var slot = GetSlot(poNumber, millNo);
+            if (ndtPipes <= 0)
+            {
+                totalSoFar = slot.RunningTotal;
+                batchNumberForRow = 0;
+                return;
+            }
+
             slot.RunningTotal += ndtPipes;
             totalSoFar = slot.RunningTotal;
             batchNumberForRow = slot.BatchOffset + 1;
@@ -138,6 +145,9 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         lock (_stateLock)
         {
             var slot = GetSlot(poNumber, millNo);
+            if (closedTotalPcs <= 0)
+                return slot.EngineBatchNo;
+
             slot.EngineBatchNo += 1;
             if (slot.BatchOffset < slot.EngineBatchNo)
                 slot.BatchOffset = slot.EngineBatchNo;
@@ -152,12 +162,14 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         {
             var slot = GetSlot(poNumber, millNo);
             var total = slot.RunningTotal;
+            if (total <= 0)
+            {
+                slot.RunningTotal = 0;
+                return;
+            }
+
             var offset = slot.BatchOffset;
-
-            var sequence = total == 0 ? 0 : Math.Max(1, ((total - 1) / threshold) + 1);
-            if (sequence == 0 && total == 0 && offset == 0)
-                sequence = 1;
-
+            var sequence = Math.Max(1, ((total - 1) / threshold) + 1);
             slot.BatchOffset = offset + sequence;
             slot.RunningTotal = 0;
             slot.EngineBatchNo = slot.BatchOffset;

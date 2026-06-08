@@ -190,6 +190,7 @@ public interface INdtBatchStateService
     /// <summary>
     /// Updates running total for (poNumber, millNo) by ndtPipes and returns the batch number for this record,
     /// the new total so far, and the threshold used (from formation chart by pipe size).
+    /// When <paramref name="ndtPipes"/> is 0, state is unchanged and <c>BatchNumber</c> is 0 (no NDT bundle label).
     /// </summary>
     Task<(int BatchNumber, int TotalSoFar, int Threshold)> GetBatchForRecordAsync(string poNumber, int millNo, int ndtPipes, CancellationToken cancellationToken);
 

@@ -36,6 +36,15 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
 
     public async Task WriteBundleAsync(InputSlitRecord contextRecord, int ndtBatchNo, int totalNdtPcs, CancellationToken cancellationToken)
     {
+        if (totalNdtPcs <= 0)
+        {
+            _logger.LogDebug(
+                "Skipping NDT bundle output for PO {PO} Mill {Mill}: zero NDT pipes.",
+                contextRecord.PoNumber,
+                contextRecord.MillNo);
+            return;
+        }
+
         var ndtBatchNoFormatted = FormatNdtBatchNo(ndtBatchNo, contextRecord.MillNo);
         var bundleFolder = NdtBundleOutputPaths.ResolveBundleArtifactsFolder(_options);
         if (_options.EnableBundleSummaryCsvFiles)

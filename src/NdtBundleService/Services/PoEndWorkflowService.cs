@@ -46,6 +46,9 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
             millNo,
             async (contextRecord, batchNo, totalNdtPcs) =>
             {
+                if (totalNdtPcs <= 0)
+                    return;
+
                 await _outputWriter.WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken).ConfigureAwait(false);
                 _logger.LogInformation(
                     "PO end bundle closed: PO {PO} Mill {Mill} Batch index {Batch} NdtPcs {Pcs}",

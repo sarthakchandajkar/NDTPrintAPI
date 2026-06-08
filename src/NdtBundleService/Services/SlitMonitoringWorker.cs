@@ -340,42 +340,54 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     var bundleNdtPipes = useLiveThisRow && plcNdt.HasValue ? record.NdtPipes : effectiveRecord.NdtPipes;
                     var bundleRecord = CloneRecordWithNdt(effectiveRecord, bundleNdtPipes);
 
-                    var (bn, _, _) = await _batchState
-                        .GetBatchForRecordAsync(
-                            bundleRecord.PoNumber,
-                            bundleRecord.MillNo,
-                            bundleRecord.NdtPipes,
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                    var batchNumber = bn;
-
-                    try
+                    string ndtBatchNoFormatted;
+                    if (bundleRecord.NdtPipes <= 0)
                     {
-                        await _bundleEngine.ProcessSlitRecordAsync(
-                            bundleRecord,
-                            async (contextRecord, batchNo, totalNdtPcs) =>
-                            {
-                                try
-                                {
-                                    await _outputWriter.WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken).ConfigureAwait(false);
-                                    _logger.LogInformation(
-                                        "Bundle output completed for {BatchNo} ({Pcs} pcs).",
-                                        FormatNdtBatchNo(batchNo, contextRecord.MillNo),
-                                        totalNdtPcs);
-                                }
-                                catch (Exception ex)
-                                {
-                                    _logger.LogError(ex, "Tag print failed for bundle {BatchNo}.", FormatNdtBatchNo(batchNo, contextRecord.MillNo));
-                                }
-                            },
-                            cancellationToken).ConfigureAwait(false);
+                        ndtBatchNoFormatted = string.Empty;
                     }
-                    catch (Exception ex)
+                    else
                     {
-                        _logger.LogError(ex, "Bundle engine failed for record in {File}; output CSV was already written.", fileFull);
-                    }
+                        var (bn, _, _) = await _batchState
+                            .GetBatchForRecordAsync(
+                                bundleRecord.PoNumber,
+                                bundleRecord.MillNo,
+                                bundleRecord.NdtPipes,
+                                cancellationToken)
+                            .ConfigureAwait(false);
 
-                    var ndtBatchNoFormatted = FormatNdtBatchNo(batchNumber, effectiveRecord.MillNo);
+                        try
+                        {
+                            await _bundleEngine.ProcessSlitRecordAsync(
+                                bundleRecord,
+                                async (contextRecord, batchNo, totalNdtPcs) =>
+                                {
+                                    if (totalNdtPcs <= 0)
+                                        return;
+
+                                    try
+                                    {
+                                        await _outputWriter.WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken).ConfigureAwait(false);
+                                        _logger.LogInformation(
+                                            "Bundle output completed for {BatchNo} ({Pcs} pcs).",
+                                            FormatNdtBatchNo(batchNo, contextRecord.MillNo),
+                                            totalNdtPcs);
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        _logger.LogError(ex, "Tag print failed for bundle {BatchNo}.", FormatNdtBatchNo(batchNo, contextRecord.MillNo));
+                                    }
+                                },
+                                cancellationToken).ConfigureAwait(false);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Bundle engine failed for record in {File}; output CSV was already written.", fileFull);
+                        }
+
+                        ndtBatchNoFormatted = bn > 0
+                            ? FormatNdtBatchNo(bn, effectiveRecord.MillNo)
+                            : string.Empty;
+                    }
 
                     var rawOut = row.RawLine;
                     if (useLiveThisRow && plcNdt.HasValue && ndtColumnIndex >= 0)
