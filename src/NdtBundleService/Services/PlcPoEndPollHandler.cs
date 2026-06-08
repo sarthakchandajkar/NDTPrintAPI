@@ -21,6 +21,9 @@ public sealed class PlcPoEndPollHandler
     /// <summary>Previous scan coil level per mill index 0..3 = mills 1..4.</summary>
     private readonly bool[] _lastCoilLevel = new bool[4];
 
+    /// <summary>First poll per mill seeds baseline without firing (avoids spurious PO end when coil is already latched at startup).</summary>
+    private readonly bool[] _coilPrimed = new bool[4];
+
     public PlcPoEndPollHandler(
         IOptions<NdtBundleOptions> options,
         IPlcClient plcClient,
@@ -80,17 +83,30 @@ public sealed class PlcPoEndPollHandler
                 continue;
 
             var now = signals.TryGetValue(m, out var v) && v;
-            var was = _lastCoilLevel[m - 1];
-            _lastCoilLevel[m - 1] = now;
+            var idx = m - 1;
+
+            if (!_coilPrimed[idx])
+            {
+                _coilPrimed[idx] = true;
+                _lastCoilLevel[idx] = now;
+                continue;
+            }
+
+            var was = _lastCoilLevel[idx];
+            _lastCoilLevel[idx] = now;
 
             if (!now || was)
                 continue;
 
             poByMill ??= await _activePoPerMill.GetLatestPoByMillAsync(cancellationToken).ConfigureAwait(false);
-            if (!poByMill.TryGetValue(m, out var po) || string.IsNullOrWhiteSpace(po))
+            poByMill.TryGetValue(m, out var po);
+            if (string.IsNullOrWhiteSpace(po))
+                po = await TryResolvePoFromPlcSnapshotAsync(m, plcCfg, cancellationToken).ConfigureAwait(false);
+
+            if (string.IsNullOrWhiteSpace(po))
             {
                 _logger.LogWarning(
-                    "PLC PO-end rising edge for Mill {Mill} but no active PO found in slit CSVs; close bundles skipped for this mill.",
+                    "PLC PO-end rising edge for Mill {Mill} but no PO from slit CSVs or PLC PO_Id; close bundles skipped for this mill.",
                     m);
                 continue;
             }
@@ -186,6 +202,49 @@ public sealed class PlcPoEndPollHandler
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "MES acknowledgment Modbus write failed for Mill {Mill}.", millNo);
+        }
+    }
+
+    private async Task<string?> TryResolvePoFromPlcSnapshotAsync(int millNo, PlcPoEndOptions plcCfg, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var snapshots = await _plcClient.ReadMillPoSnapshotsAsync(cancellationToken).ConfigureAwait(false);
+            if (snapshots is null || !snapshots.TryGetValue(millNo, out var snap) || !snap.ReadOk)
+                return null;
+
+            if (!IsValidPoId(snap.PoId, plcCfg.MinValidPoId, plcCfg.MaxValidPoId))
+                return null;
+
+            var formatted = FormatPoNumberFromPlc(snap.PoId, plcCfg.PoNumberFormatFromPlc);
+            var normalized = InputSlitCsvParsing.NormalizePo(formatted);
+            _logger.LogInformation(
+                "Mill {Mill}: PO-end PO resolved from PLC PO_Id {PoId} → {Po}.",
+                millNo,
+                snap.PoId,
+                normalized);
+            return normalized;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Mill {Mill}: failed to read PLC PO_Id snapshot for PO-end resolution.", millNo);
+            return null;
+        }
+    }
+
+    private static bool IsValidPoId(int id, int minId, int maxId) => id >= minId && id <= maxId;
+
+    private static string FormatPoNumberFromPlc(int poId, string format)
+    {
+        if (string.IsNullOrWhiteSpace(format))
+            return poId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        try
+        {
+            return string.Format(System.Globalization.CultureInfo.InvariantCulture, format, poId);
+        }
+        catch (FormatException)
+        {
+            return poId.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
     }
 

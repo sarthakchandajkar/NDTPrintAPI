@@ -97,16 +97,19 @@ public sealed class StatusController : ControllerBase
         var byMill = await _plcClient.GetPoEndSignalsByMillAsync(cancellationToken).ConfigureAwait(false);
         var poEndActive = byMill.Values.Any(v => v);
         var plcCfg = _options.PlcPoEnd;
-        var modbusEnabled = plcCfg?.Enabled == true &&
-            string.Equals(plcCfg.Driver, "ModbusTcp", StringComparison.OrdinalIgnoreCase);
-        var connected = modbusEnabled && _plcHealth.LastReadOk == true;
+        var plcIoEnabled = plcCfg?.Enabled == true &&
+            (PlcPoEndOptions.IsS7Driver(plcCfg) ||
+             string.Equals(plcCfg.Driver, "ModbusTcp", StringComparison.OrdinalIgnoreCase));
+        var connected = plcIoEnabled && _plcHealth.LastReadOk == true;
         var diag = _poEndDiagnostics.GetSnapshot();
         var poIdMode = PlcPoEndOptions.IsModbusPoIdTransition(plcCfg);
-        var message = !modbusEnabled
-            ? "PLC PO-end polling uses Stub (all false) unless PlcPoEnd.Enabled=true and Driver=ModbusTcp."
-            : poIdMode
-                ? "Modbus TCP PO_Id transition mode (NdtBundle:PlcPoEnd.DetectionMode and Mills register map)."
-                : "Modbus TCP PO-end coils from PlcPoEnd.Mills (per-mill POChangeTOMES / MES ack).";
+        var message = !plcIoEnabled
+            ? "PLC PO-end polling uses Stub (all false) unless PlcPoEnd.Enabled=true and Driver=S7 or ModbusTcp."
+            : PlcPoEndOptions.IsS7Driver(plcCfg)
+                ? "Siemens S7 PO-end M-bits from PlcPoEnd.Mills (per-mill POChangeTOMES / MES ack), same map as plc-server."
+                : poIdMode
+                    ? "Modbus TCP PO_Id transition mode (NdtBundle:PlcPoEnd.DetectionMode and Mills register map)."
+                    : "Modbus TCP PO-end coils from PlcPoEnd.Mills (per-mill POChangeTOMES / MES ack).";
         return Ok(new
         {
             Connected = connected,

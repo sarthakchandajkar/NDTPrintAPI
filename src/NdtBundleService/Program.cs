@@ -52,6 +52,14 @@ builder.Services.AddSingleton<IPlcClient>(sp =>
 {
     var bundleOptions = sp.GetRequiredService<IOptions<NdtBundleOptions>>().Value;
     var plc = bundleOptions.PlcPoEnd ?? new PlcPoEndOptions();
+    if (plc.Enabled && PlcPoEndOptions.IsS7Driver(plc))
+    {
+        return new S7MillPoEndPlcClient(
+            sp.GetRequiredService<IOptions<NdtBundleOptions>>(),
+            sp.GetRequiredService<PlcConnectionHealth>(),
+            sp.GetRequiredService<ILogger<S7MillPoEndPlcClient>>());
+    }
+
     if (plc.Enabled && string.Equals(plc.Driver, "ModbusTcp", StringComparison.OrdinalIgnoreCase))
     {
         return new ModbusTcpMillPoEndPlcClient(

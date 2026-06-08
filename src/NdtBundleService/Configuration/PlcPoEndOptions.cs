@@ -8,7 +8,7 @@ public sealed class PlcPoEndOptions
     /// <summary>When true, <see cref="SlitMonitoringWorker"/> polls PLCs and runs PO-end workflow on rising edges.</summary>
     public bool Enabled { get; set; }
 
-    /// <summary><c>Stub</c> (no I/O) or <c>ModbusTcp</c> (read one coil per mill).</summary>
+    /// <summary><c>Stub</c> (no I/O), <c>S7</c> (Siemens S7 direct, same as plc-server), or <c>ModbusTcp</c> (Modbus gateway).</summary>
     public string Driver { get; set; } = "Stub";
 
     /// <summary>
@@ -51,9 +51,14 @@ public sealed class PlcPoEndOptions
     public static bool IsModbusPoIdTransition(PlcPoEndOptions? o) =>
         o is not null &&
         string.Equals(o.DetectionMode, "ModbusPoIdTransition", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>True when <see cref="Driver"/> is direct Siemens S7 (port 102).</summary>
+    public static bool IsS7Driver(PlcPoEndOptions? o) =>
+        o is not null &&
+        string.Equals(o.Driver, "S7", StringComparison.OrdinalIgnoreCase);
 }
 
-/// <summary>Modbus TCP endpoint for one mill: PO-end coil and/or PO_Id / optional slit-valid Modbus map.</summary>
+/// <summary>Per-mill PLC endpoint: Siemens S7 memory tags and/or Modbus coil / register map.</summary>
 public sealed class MillModbusPoEndEndpoint
 {
     public int MillNo { get; set; }
@@ -61,9 +66,34 @@ public sealed class MillModbusPoEndEndpoint
     /// <summary>PLC IP or hostname.</summary>
     public string Host { get; set; } = string.Empty;
 
+    /// <summary>S7 ISO-on-TCP port (102) or Modbus TCP (502).</summary>
     public int Port { get; set; } = 502;
 
     public byte SlaveId { get; set; } = 1;
+
+    /// <summary>S7 rack (used when <see cref="PlcPoEndOptions.Driver"/> is <c>S7</c>).</summary>
+    public short Rack { get; set; }
+
+    /// <summary>S7 slot; connection tries this slot then slot 1 (plc-server parity).</summary>
+    public short Slot { get; set; } = 2;
+
+    /// <summary><c>S7300</c>, <c>S7400</c>, <c>S71200</c>, <c>S71500</c> for S7 driver.</summary>
+    public string CpuType { get; set; } = "S7300";
+
+    /// <summary>S7 PO-end latch memory tag (e.g. <c>M40.6</c> Mill-1/2, <c>M20.6</c> Mill-3, <c>M41.6</c> Mill-4).</summary>
+    public string S7PoEndAddress { get; set; } = string.Empty;
+
+    /// <summary>S7 MES ack memory tag (e.g. <c>M40.7</c>, <c>M22.7</c>, <c>M41.7</c>).</summary>
+    public string? S7MesAckAddress { get; set; }
+
+    /// <summary>DB number for PO_Id INT (plc-server: DB251,INT8).</summary>
+    public ushort S7PoIdDbNumber { get; set; } = 251;
+
+    /// <summary>Byte offset of PO_Id INT in <see cref="S7PoIdDbNumber"/> (default 8).</summary>
+    public int S7PoIdByteOffset { get; set; } = 8;
+
+    /// <summary>S7 connect/read timeout per mill per poll.</summary>
+    public int S7ConnectTimeoutMs { get; set; } = 8000;
 
     /// <summary>
     /// Zero-based Modbus coil (PDU) mapped to PLC POChangeTOMES latch (e.g. M20.1). Read on each poll; rising edge triggers PO-end workflow.
