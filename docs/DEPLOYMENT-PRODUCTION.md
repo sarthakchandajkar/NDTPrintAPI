@@ -2,6 +2,8 @@
 
 This guide describes how to deploy **NdtBundleService** (API + slit monitoring worker) to a Windows server and keep it running 24/7 as a **Windows Service**.
 
+For **dashboard + plc-server + LAN access** (e.g. VM `10.2.5.202`), see also [DEPLOYMENT-NETWORK.md](./DEPLOYMENT-NETWORK.md).
+
 ---
 
 ## 1. Prerequisites

@@ -9,6 +9,7 @@
     "dev": "node server.js"
   },
   "dependencies": {
+    "dotenv": "^16.4.7",
     "nodes7": "^0.3.18",
     "socket.io": "^4.8.1"
   }

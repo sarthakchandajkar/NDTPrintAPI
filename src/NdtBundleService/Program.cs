@@ -105,7 +105,7 @@ builder.Services.AddHostedService<UploadNdtBundleSchedulerWorker>();
 
 var app = builder.Build();
 
-if (app.Environment.IsDevelopment())
+if (app.Environment.IsDevelopment() || app.Configuration.GetValue<bool>("ShowSwagger"))
 {
     app.UseSwagger();
     app.UseSwaggerUI();
