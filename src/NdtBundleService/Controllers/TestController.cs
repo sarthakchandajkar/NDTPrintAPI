@@ -167,7 +167,11 @@ namespace NdtBundleService.Controllers;
         {
             var path = await ResolveWipPlanCsvPathAsync(cancellationToken).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(path))
+            {
+                if (TryGetUnreachablePoPlanFolderMessage(out var unreachable))
+                    return NotFound(new { Message = unreachable, Path = _options.PoPlanFolder });
                 return NotFound(new { Message = "WIP CSV path not configured (PoPlanCsvPath or PoPlanFolder)." });
+            }
             if (path.StartsWith("NOTFOUND:", StringComparison.Ordinal))
                 return NotFound(new { Message = "WIP CSV file not found.", Path = path["NOTFOUND:".Length..] });
 
@@ -247,7 +251,13 @@ namespace NdtBundleService.Controllers;
             string sourcePath;
 
             var planFolder = _options.PoPlanFolder?.Trim();
-            if (!string.IsNullOrWhiteSpace(planFolder) && Directory.Exists(planFolder))
+            if (TryGetUnreachablePoPlanFolderMessage(out var unreachablePoPlan))
+            {
+                _logger.LogWarning("{Message}", unreachablePoPlan);
+                sourcePath =
+                    $"{planFolder} (not reachable from service account; PO per mill from slits / WIP bundle filenames only)";
+            }
+            else if (!string.IsNullOrWhiteSpace(planFolder) && Directory.Exists(planFolder))
             {
                 var files = Directory.EnumerateFiles(planFolder, "*.csv")
                     .Select(f => new FileInfo(f))
@@ -278,7 +288,11 @@ namespace NdtBundleService.Controllers;
             {
                 var path = await ResolveWipPlanCsvPathAsync(cancellationToken).ConfigureAwait(false);
                 if (string.IsNullOrWhiteSpace(path))
+                {
+                    if (TryGetUnreachablePoPlanFolderMessage(out unreachablePoPlan))
+                        return NotFound(new { Message = unreachablePoPlan, Path = _options.PoPlanFolder });
                     return NotFound(new { Message = "WIP CSV path not configured (PoPlanCsvPath or PoPlanFolder)." });
+                }
                 if (path.StartsWith("NOTFOUND:", StringComparison.Ordinal))
                     return NotFound(new { Message = "WIP CSV file not found.", Path = path["NOTFOUND:".Length..] });
 
@@ -546,6 +560,24 @@ namespace NdtBundleService.Controllers;
             wipByPo[InputSlitCsvParsing.NormalizePo(po)] = dto;
         }
 
+        return true;
+    }
+
+    /// <summary>
+    /// True when <see cref="NdtBundleOptions.PoPlanFolder"/> is set but <see cref="Directory.Exists"/> is false
+    /// (common when the service runs as Local System and cannot see mapped <c>Z:\</c> drives).
+    /// </summary>
+    private bool TryGetUnreachablePoPlanFolderMessage(out string message)
+    {
+        message = string.Empty;
+        var folder = _options.PoPlanFolder?.Trim();
+        if (string.IsNullOrWhiteSpace(folder) || Directory.Exists(folder))
+            return false;
+
+        message =
+            "PoPlanFolder is configured but not reachable from the NDT service account. " +
+            "Mapped drives (Z:\\) are not visible to Local System—run NdtBundleService under a user that has Z: mapped, " +
+            "or set UNC paths (\\\\server\\share\\...) in appsettings.Production.json.";
         return true;
     }
 

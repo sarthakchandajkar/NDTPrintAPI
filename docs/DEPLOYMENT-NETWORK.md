@@ -99,9 +99,48 @@ Prefer deploying **NdtBundleService** when mills are off so slit CSVs and PO-end
 
 ---
 
-## 6. Service account note
+## 6. Service account note (fixes “WIP CSV path not configured”)
 
-If `NdtBundleService` runs as **Local System**, mapped `Z:\` drives are not visible. Either:
+`PoPlanFolder` and other paths use **`Z:\`**. Windows Services running as **Local System** cannot see mapped drives, so the API returns:
 
-- Run the service under a user that has `Z:\` mapped, or
-- Use UNC paths in `appsettings.Production.json` (e.g. `\\server\share\...`).
+```json
+{"message":"WIP CSV path not configured (PoPlanCsvPath or PoPlanFolder)."}
+```
+
+even though the path is set in config.
+
+**Fix (pick one):**
+
+### A) Run `NdtBundleService` under your Windows user (recommended if you use `Z:\`)
+
+1. Open **services.msc** → **NDT Bundle Service** → **Properties** → **Log On**
+2. Select **This account** → enter `.\Sarthak` (or `DOMAIN\Sarthak`) and password
+3. Ensure that user has **Log on as a service** right and can open `Z:\` in File Explorer
+4. Restart the service
+
+Or PowerShell (Admin), after stopping the service:
+
+```powershell
+sc.exe config NdtBundleService obj= ".\Sarthak" password= "YOUR_PASSWORD"
+Start-Service NdtBundleService
+```
+
+### B) Use UNC paths instead of `Z:\`
+
+In `appsettings.Production.json`, replace e.g.:
+
+```json
+"PoPlanFolder": "\\\\10.2.20.210\\pas-sap\\From SAP\\TMFG_TMWIP\\PO Accepted"
+```
+
+Do the same for `InputSlitFolder`, `OutputBundleFolder`, etc. Republish and restart the service.
+
+### Verify folders from the service account
+
+Log in as the service user, then:
+
+```powershell
+Test-Path "Z:\From SAP\TMFG_TMWIP\PO Accepted"
+```
+
+Must return `True` before the Summary page can load WIP enrichment.
