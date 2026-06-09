@@ -21,6 +21,7 @@ public sealed class ReconcileController : ControllerBase
     private readonly IPipeSizeProvider _pipeSizeProvider;
     private readonly IWipLabelProvider _wipLabelProvider;
     private readonly INetworkPrinterSender _printerSender;
+    private readonly IMillPrinterSettingsService _millPrinters;
     private readonly NdtBundleOptions _options;
     private readonly IZplGenerationToggle _zplToggle;
     private readonly ILogger<ReconcileController> _logger;
@@ -33,6 +34,7 @@ public sealed class ReconcileController : ControllerBase
         IPipeSizeProvider pipeSizeProvider,
         IWipLabelProvider wipLabelProvider,
         INetworkPrinterSender printerSender,
+        IMillPrinterSettingsService millPrinters,
         IOptions<NdtBundleOptions> options,
         IZplGenerationToggle zplToggle,
         ILogger<ReconcileController> logger)
@@ -43,6 +45,7 @@ public sealed class ReconcileController : ControllerBase
         _formationChartProvider = formationChartProvider;
         _pipeSizeProvider = pipeSizeProvider;
         _wipLabelProvider = wipLabelProvider;
+        _millPrinters = millPrinters;
         _printerSender = printerSender;
         _options = options.Value;
         _zplToggle = zplToggle;
@@ -311,10 +314,9 @@ public sealed class ReconcileController : ControllerBase
         if (!_zplToggle.IsEnabled)
             return BadRequest(new { Message = "NDT tag ZPL and network print are disabled (runtime toggle)." });
 
-        var address = (_options.NdtTagPrinterAddress ?? "").Trim();
-        var useAddress = !string.IsNullOrEmpty(address) && !address.Equals("0.0.0.0", StringComparison.OrdinalIgnoreCase);
-        if (!useAddress)
-            return BadRequest(new { Message = "Printer not configured (NdtTagPrinterAddress)." });
+        var (address, printerPort, printerConfigured) = _millPrinters.ResolveForMill(bundle.MillNo);
+        if (!printerConfigured)
+            return BadRequest(new { Message = $"Printer not configured for Mill {bundle.MillNo} (Settings → printers)." });
 
         var wip = await _wipLabelProvider.GetWipLabelAsync(bundle.PoNumber, bundle.MillNo, cancellationToken).ConfigureAwait(false);
         var pipeGrade = wip?.PipeGrade;
@@ -345,7 +347,7 @@ public sealed class ReconcileController : ControllerBase
             await NdtBundleOutputPaths.TrySaveBundleZplAsync(_options, bundle.BundleNo, zplBytes, cancellationToken)
                 .ConfigureAwait(false);
 
-            var sendResult = await _printerSender.SendAsync(address, _options.NdtTagPrinterPort, zplBytes, cancellationToken).ConfigureAwait(false);
+            var sendResult = await _printerSender.SendAsync(address, printerPort, zplBytes, cancellationToken).ConfigureAwait(false);
             if (sendResult.Success)
                 return Ok(new { Message = "Bundle tag (Reprint) sent to printer.", NdtBatchNo = batchNo, NdtPcs = bundle.TotalNdtPcs });
             return StatusCode(500, new { Message = "Failed to send to printer. Check NdtTagPrinterAddress/Port and optional NdtTagPrinterLocalBindAddress.", Detail = sendResult.ErrorDetail });

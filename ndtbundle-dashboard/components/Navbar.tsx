@@ -3,8 +3,6 @@
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
-import { api, type PlcStatus, type PrinterStatus } from "@/lib/api";
 
 type NavChild = { href: string; label: string };
 
@@ -38,6 +36,7 @@ const navEntries: NavEntry[] = [
   { type: "link", href: "/reconcile", label: "Reconcile Bundle" },
   { type: "link", href: "/po-end", label: "PO End" },
   { type: "link", href: "/mills-plc", label: "Mills PLC" },
+  { type: "link", href: "/settings", label: "Settings" },
 ];
 
 function isGroupActive(prefix: string, pathname: string, children: NavChild[]) {
@@ -48,43 +47,13 @@ function isGroupActive(prefix: string, pathname: string, children: NavChild[]) {
   );
 }
 
-function plcBadgeClass(plc: PlcStatus | null): string {
-  if (!plc) return "bg-gray-100 text-gray-600";
-  const drv = plc.driver ?? "Stub";
-  if (!plc.plcPoEndEnabled || drv === "Stub") return "bg-gray-100 text-gray-600";
-  if (plc.connected) return plc.poEndActive ? "bg-amber-100 text-amber-800" : "bg-green-100 text-green-800";
-  return "bg-red-100 text-red-800";
-}
-
-function plcLabel(plc: PlcStatus | null): string {
-  if (!plc) return "—";
-  const drv = plc.driver ?? "Stub";
-  if (!plc.plcPoEndEnabled || drv === "Stub") return "Off";
-  if (plc.connected) return plc.poEndActive ? "PO End" : "OK";
-  return "Offline";
-}
-
-function printerBadgeClass(status?: string): string {
-  if (status === "Ready") return "bg-green-100 text-green-800";
-  if (status === "Unreachable") return "bg-red-100 text-red-800";
-  if (status === "Configured") return "bg-amber-100 text-amber-800";
-  return "bg-gray-100 text-gray-600";
-}
-
 export default function Navbar() {
   const pathname = usePathname();
-  const [plc, setPlc] = useState<PlcStatus | null>(null);
-  const [printer, setPrinter] = useState<PrinterStatus | null>(null);
-
-  useEffect(() => {
-    api.plcStatus().then(setPlc).catch(() => setPlc({ connected: false }));
-    api.printerStatus().then(setPrinter).catch(() => setPrinter({ status: "Unknown" }));
-  }, []);
 
   return (
     <header className="bg-white border-b border-gray-200 sticky top-0 z-10 shadow-sm">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex justify-between items-center h-32">
+        <div className="flex items-center h-32">
           <div className="flex items-center gap-8">
             <Link href="/" className="flex items-center gap-3 shrink-0">
               <Image
@@ -178,22 +147,6 @@ export default function Navbar() {
                 );
               })}
             </nav>
-          </div>
-          <div className="flex items-center gap-3">
-            <span
-              title={
-                [plc?.message, plc?.lastPlcError].filter(Boolean).join(" — ") || undefined
-              }
-              className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${plcBadgeClass(plc)}`}
-            >
-              PLC: {plcLabel(plc)}
-            </span>
-            <span
-              title={printer?.message}
-              className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${printerBadgeClass(printer?.status)}`}
-            >
-              Printer: {printer?.status ?? "—"}
-            </span>
           </div>
         </div>
       </div>

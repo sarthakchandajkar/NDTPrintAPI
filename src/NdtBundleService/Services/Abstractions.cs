@@ -44,6 +44,9 @@ public interface IPoPlanProvider
 public interface IFormationChartProvider
 {
     Task<IReadOnlyDictionary<string, FormationChartEntry>> GetFormationChartAsync(CancellationToken cancellationToken);
+
+    /// <summary>Clears cached chart after settings save.</summary>
+    void InvalidateCache();
 }
 
 /// <summary>

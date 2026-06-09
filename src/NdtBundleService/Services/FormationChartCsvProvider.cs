@@ -44,6 +44,15 @@ public sealed class FormationChartCsvProvider : IFormationChartProvider
         _logger = logger;
     }
 
+    public void InvalidateCache()
+    {
+        lock (_cacheLock)
+        {
+            _cached = null;
+            _cacheSignature = null;
+        }
+    }
+
     public async Task<IReadOnlyDictionary<string, FormationChartEntry>> GetFormationChartAsync(CancellationToken cancellationToken)
     {
         var path = ResolveFormationChartPath();

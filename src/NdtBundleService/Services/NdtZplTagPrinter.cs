@@ -16,6 +16,7 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
     private readonly IZplGenerationToggle _zplToggle;
     private readonly IWipLabelProvider _wipLabelProvider;
     private readonly INetworkPrinterSender _sender;
+    private readonly IMillPrinterSettingsService _millPrinters;
     private readonly ILogger<NdtZplTagPrinter> _logger;
 
     public NdtZplTagPrinter(
@@ -23,12 +24,14 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
         IZplGenerationToggle zplToggle,
         IWipLabelProvider wipLabelProvider,
         INetworkPrinterSender sender,
+        IMillPrinterSettingsService millPrinters,
         ILogger<NdtZplTagPrinter> logger)
     {
         _options = options;
         _zplToggle = zplToggle;
         _wipLabelProvider = wipLabelProvider;
         _sender = sender;
+        _millPrinters = millPrinters;
         _logger = logger;
     }
 
@@ -42,11 +45,12 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
         }
 
         var opt = _options.CurrentValue;
-        var address = (opt.NdtTagPrinterAddress ?? "").Trim();
-        var useAddress = !string.IsNullOrEmpty(address) && !address.Equals("0.0.0.0", StringComparison.OrdinalIgnoreCase);
-        if (!useAddress)
+        var (address, printerPort, printerConfigured) = _millPrinters.ResolveForMill(record.MillNo);
+        if (!printerConfigured)
         {
-            _logger.LogWarning("NDT tag not sent: NdtBundle:NdtTagPrinterAddress is not set (or is 0.0.0.0). Set the label printer IP, e.g. 192.168.0.125.");
+            _logger.LogWarning(
+                "NDT tag not sent: no printer configured for Mill {MillNo} (Settings → printers or NdtBundle:NdtTagPrinterAddress for Mill 1).",
+                record.MillNo);
             return false;
         }
 
@@ -93,7 +97,7 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
         // can be visualized in an external ZPL viewer without depending on the printer.
         await TrySaveBundleZplAsync(opt, zplBytes, ndtBatchNoFormatted, cancellationToken).ConfigureAwait(false);
 
-        var sendResult = await _sender.SendAsync(address, opt.NdtTagPrinterPort, zplBytes, cancellationToken).ConfigureAwait(false);
+        var sendResult = await _sender.SendAsync(address, printerPort, zplBytes, cancellationToken).ConfigureAwait(false);
         if (sendResult.Success)
             _logger.LogInformation("Printed NDT tag {BatchNo} ({Pcs} pcs) to {Address}.", ndtBatchNoFormatted, totalNdtPcs, address);
         else

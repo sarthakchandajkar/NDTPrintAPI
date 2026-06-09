@@ -146,5 +146,8 @@ public class NdtBundleOptions
 
     /// <summary>Optional live NDT count + running PO from WIP bundle folder for one mill (e.g. Mill-3 S7).</summary>
     public MillSlitLiveOptions MillSlitLive { get; set; } = new();
+
+    /// <summary>Password-protected dashboard settings (formation chart thresholds, per-mill printers).</summary>
+    public DashboardSettingsOptions DashboardSettings { get; set; } = new();
 }
 

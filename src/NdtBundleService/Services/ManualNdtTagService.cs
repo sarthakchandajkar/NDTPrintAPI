@@ -83,6 +83,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
     private readonly INdtBundleRepository _bundleRepository;
     private readonly IWipLabelProvider _wipLabelProvider;
     private readonly INetworkPrinterSender _sender;
+    private readonly IMillPrinterSettingsService _millPrinters;
     private readonly ITraceabilityRepository _traceability;
     private readonly IReconcileSyncService _reconcileSync;
     private readonly ILogger<ManualNdtTagService> _logger;
@@ -96,6 +97,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         INdtBundleRepository bundleRepository,
         IWipLabelProvider wipLabelProvider,
         INetworkPrinterSender sender,
+        IMillPrinterSettingsService millPrinters,
         ITraceabilityRepository traceability,
         IReconcileSyncService reconcileSync,
         ILogger<ManualNdtTagService> logger)
@@ -105,6 +107,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         _bundleRepository = bundleRepository;
         _wipLabelProvider = wipLabelProvider;
         _sender = sender;
+        _millPrinters = millPrinters;
         _traceability = traceability;
         _reconcileSync = reconcileSync;
         _logger = logger;
@@ -486,11 +489,10 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             return false;
         }
 
-        var address = (Options.NdtTagPrinterAddress ?? "").Trim();
-        var useAddress = !string.IsNullOrEmpty(address) && !address.Equals("0.0.0.0", StringComparison.OrdinalIgnoreCase);
-        if (!useAddress)
+        var (address, printerPort, printerConfigured) = _millPrinters.ResolveForMill(millNo);
+        if (!printerConfigured)
         {
-            _logger.LogWarning("Printer not configured (NdtTagPrinterAddress). Tag will not be sent.");
+            _logger.LogWarning("Printer not configured for Mill {MillNo}. Tag will not be sent.", millNo);
             return false;
         }
 
@@ -524,7 +526,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             StationTextForZpl(station, operatorStationNumber));
 
         await TrySaveZplPreviewAsync(station, operatorStationNumber, ndtBatchNo, zplBytes, cancellationToken).ConfigureAwait(false);
-        var sendResult = await _sender.SendAsync(address, Options.NdtTagPrinterPort, zplBytes, cancellationToken).ConfigureAwait(false);
+        var sendResult = await _sender.SendAsync(address, printerPort, zplBytes, cancellationToken).ConfigureAwait(false);
         return sendResult.Success;
     }
 

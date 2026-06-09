@@ -21,6 +21,7 @@ public sealed class StatusController : ControllerBase
     private readonly PlcConnectionHealth _plcHealth;
     private readonly ISqlTraceabilityHealth _sqlHealth;
     private readonly ISqlTraceabilityWriteTracker _sqlWriteTracker;
+    private readonly AppLogReader _appLogReader;
     private readonly ILogger<StatusController> _logger;
 
     public StatusController(
@@ -31,6 +32,7 @@ public sealed class StatusController : ControllerBase
         PlcConnectionHealth plcHealth,
         ISqlTraceabilityHealth sqlHealth,
         ISqlTraceabilityWriteTracker sqlWriteTracker,
+        AppLogReader appLogReader,
         ILogger<StatusController> logger)
     {
         _plcClient = plcClient;
@@ -40,6 +42,7 @@ public sealed class StatusController : ControllerBase
         _plcHealth = plcHealth;
         _sqlHealth = sqlHealth;
         _sqlWriteTracker = sqlWriteTracker;
+        _appLogReader = appLogReader;
         _logger = logger;
     }
 
@@ -200,6 +203,22 @@ public sealed class StatusController : ControllerBase
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// Tail of the rolling application log file (for dashboard / remote troubleshooting).
+    /// </summary>
+    [HttpGet("logs")]
+    public async Task<IActionResult> GetApplicationLogs([FromQuery] int lines = 200, CancellationToken cancellationToken = default)
+    {
+        var tail = await _appLogReader.ReadTailAsync(lines, cancellationToken).ConfigureAwait(false);
+        return Ok(new
+        {
+            Folder = tail.Folder,
+            File = tail.FileName,
+            LineCount = tail.Lines.Count,
+            Lines = tail.Lines
+        });
     }
 
     [HttpGet("zpl-generation")]

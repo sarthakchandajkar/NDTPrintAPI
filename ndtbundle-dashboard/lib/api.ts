@@ -148,6 +148,63 @@ export interface ZplGenerationStatus {
   enabled?: boolean;
 }
 
+export interface SettingsStatus {
+  configured?: boolean;
+  authenticated?: boolean;
+  message?: string;
+}
+
+export interface FormationChartEntryRow {
+  pipeSize?: string;
+  requiredNdtPcs?: number;
+}
+
+export interface SettingsPlcMill {
+  millNo?: number;
+  driver?: string;
+  host?: string;
+  port?: number;
+  reachable?: boolean;
+  poEndAddress?: string;
+  mesAckAddress?: string;
+}
+
+export interface SettingsPlcDiagnostics {
+  plcPoEndEnabled?: boolean;
+  driver?: string;
+  lastReadOk?: boolean;
+  lastPlcError?: string | null;
+  lastPlcCheckUtc?: string | null;
+  poEndByMill?: Record<string, boolean>;
+  mills?: SettingsPlcMill[];
+}
+
+export interface SettingsPrinterMill {
+  millNo?: number;
+  address?: string;
+  port?: number;
+  effectiveAddress?: string;
+  effectivePort?: number;
+  configured?: boolean;
+  reachable?: boolean;
+  status?: string;
+}
+
+async function fetchSettingsApi<T>(
+  path: string,
+  token: string,
+  options?: RequestInit
+): Promise<T> {
+  return fetchApi<T>(path, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Settings-Token": token,
+      ...(options?.headers as Record<string, string> | undefined),
+    },
+  });
+}
+
 export interface ManualTagPrintResponse {
   message?: string;
   station?: string;
@@ -287,4 +344,41 @@ export const api = {
     fetchApi<UploadBundleGenerationResponse>("/api/UploadNdtBundle/generate-now", {
       method: "POST",
     }),
+
+  settingsStatus: () => fetchApi<SettingsStatus>("/api/Settings/status"),
+  settingsLogin: (password: string) =>
+    fetchApi<{ token?: string; expiresUtc?: string }>("/api/Settings/login", {
+      method: "POST",
+      body: JSON.stringify({ password }),
+    }),
+  settingsLogout: (token: string) =>
+    fetchSettingsApi<{ message?: string }>("/api/Settings/logout", token, { method: "POST" }),
+  settingsFormationChart: (token: string) =>
+    fetchSettingsApi<{ entries?: FormationChartEntryRow[]; sourcePath?: string }>(
+      "/api/Settings/formation-chart",
+      token
+    ),
+  settingsSaveFormationChart: (token: string, entries: FormationChartEntryRow[]) =>
+    fetchSettingsApi<{ message?: string }>("/api/Settings/formation-chart", token, {
+      method: "PUT",
+      body: JSON.stringify({ entries }),
+    }),
+  settingsPlc: (token: string) =>
+    fetchSettingsApi<SettingsPlcDiagnostics>("/api/Settings/plc", token),
+  settingsPrinters: (token: string) =>
+    fetchSettingsApi<{ mills?: SettingsPrinterMill[] }>("/api/Settings/printers", token),
+  settingsSavePrinters: (
+    token: string,
+    mills: { millNo: number; address: string; port: number }[]
+  ) =>
+    fetchSettingsApi<{ message?: string }>("/api/Settings/printers", token, {
+      method: "PUT",
+      body: JSON.stringify({ mills }),
+    }),
+  settingsTestPrinter: (token: string, millNo: number) =>
+    fetchSettingsApi<{ status?: string; reachable?: boolean; address?: string; port?: number }>(
+      "/api/Settings/printers/test",
+      token,
+      { method: "POST", body: JSON.stringify({ millNo }) }
+    ),
 };
