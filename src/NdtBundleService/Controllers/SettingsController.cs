@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Models;
 using NdtBundleService.Services;
+using NdtBundleService.Services.PlcHandshake;
 
 namespace NdtBundleService.Controllers;
 
@@ -21,6 +22,8 @@ public sealed class SettingsController : ControllerBase
     private readonly IPlcClient _plcClient;
     private readonly PlcConnectionHealth _plcHealth;
     private readonly PoEndDetectionDiagnostics _poEndDiagnostics;
+    private readonly PlcHandshakeStatusRegistry _handshakeStatus;
+    private readonly PlcHandshakeCoordinator _handshakeCoordinator;
     private readonly NdtBundleOptions _options;
     private readonly ILogger<SettingsController> _logger;
 
@@ -31,6 +34,8 @@ public sealed class SettingsController : ControllerBase
         IPlcClient plcClient,
         PlcConnectionHealth plcHealth,
         PoEndDetectionDiagnostics poEndDiagnostics,
+        PlcHandshakeStatusRegistry handshakeStatus,
+        PlcHandshakeCoordinator handshakeCoordinator,
         IOptions<NdtBundleOptions> options,
         ILogger<SettingsController> logger)
     {
@@ -40,6 +45,8 @@ public sealed class SettingsController : ControllerBase
         _plcClient = plcClient;
         _plcHealth = plcHealth;
         _poEndDiagnostics = poEndDiagnostics;
+        _handshakeStatus = handshakeStatus;
+        _handshakeCoordinator = handshakeCoordinator;
         _options = options.Value;
         _logger = logger;
     }
@@ -132,6 +139,110 @@ public sealed class SettingsController : ControllerBase
         if (!TryAuthorize(out var denied))
             return denied!;
 
+        var handshakeCfg = _options.PlcHandshake ?? new PlcHandshakeOptions();
+        if (handshakeCfg.Enabled)
+        {
+            var snapshot = _handshakeStatus.GetSnapshot();
+            var poEndByMill = _handshakeStatus.GetPoEndByMill();
+            var mills = new List<object>();
+
+            foreach (var cfg in handshakeCfg.Mills.OrderBy(m => m.ResolveMillNo()))
+            {
+                var millNo = cfg.ResolveMillNo();
+                var live = snapshot.FirstOrDefault(s => s.MillNo == millNo);
+                var host = (cfg.IpAddress ?? string.Empty).Trim();
+                var reachable = !string.IsNullOrEmpty(host) &&
+                                await TcpProbeAsync(host, 102, cancellationToken).ConfigureAwait(false);
+
+                mills.Add(new
+                {
+                    millNo,
+                    name = cfg.Name,
+                    driver = "S7-Handshake",
+                    host,
+                    port = 102,
+                    reachable,
+                    poEndAddress = cfg.TriggerAddress,
+                    mesAckAddress = cfg.AckAddress,
+                    handshakeConnected = live?.Connected ?? false,
+                    triggerActive = live?.TriggerActive ?? false,
+                    ackActive = live?.AckActive ?? false,
+                    handshakeState = live?.HandshakeState ?? "Unknown",
+                    lastPoChangeUtc = live?.LastPoChangeUtc,
+                    lastError = live?.LastError,
+                    testAvailable = _handshakeCoordinator.IsMillRegistered(millNo)
+                });
+            }
+
+            return Ok(new
+            {
+                plcPoEndEnabled = true,
+                plcHandshakeEnabled = true,
+                driver = "S7-Handshake",
+                lastReadOk = snapshot.Count > 0 && snapshot.All(m => m.Connected),
+                lastPlcError = _handshakeStatus.FirstError() ?? _plcHealth.LastError,
+                lastPlcCheckUtc = snapshot.Count > 0
+                    ? snapshot.Max(m => m.LastUpdateUtc)
+                    : _plcHealth.LastUpdateUtc,
+                poEndByMill = Enumerable.Range(1, 4).ToDictionary(
+                    m => m.ToString(),
+                    m => poEndByMill.TryGetValue(m, out var v) && v),
+                mills
+            });
+        }
+
+        return await GetLegacyPlcDiagnosticsAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Runs a PO-change test for one mill: read trigger from PLC, execute PO end workflow, pulse ack bit.
+    /// Uses the mill's persistent handshake S7 connection (no second client).
+    /// </summary>
+    [HttpPost("plc/test-po-change")]
+    public async Task<IActionResult> TestPoChange(
+        [FromBody] TestPoChangeRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!TryAuthorize(out var denied))
+            return denied!;
+
+        var handshakeCfg = _options.PlcHandshake ?? new PlcHandshakeOptions();
+        if (!handshakeCfg.Enabled)
+        {
+            return BadRequest(new
+            {
+                Message = "PlcHandshake is disabled. Enable NdtBundle:PlcHandshake:Enabled or use POST /api/Test/po-end for workflow-only simulation."
+            });
+        }
+
+        if (request?.MillNo is < 1 or > 4)
+            return BadRequest(new { Message = "millNo must be 1–4." });
+
+        _logger.LogInformation("Settings PO change test requested for Mill {Mill}.", request!.MillNo);
+
+        var result = await _handshakeCoordinator
+            .RunSettingsTestAsync(request.MillNo, cancellationToken)
+            .ConfigureAwait(false);
+
+        return Ok(new
+        {
+            result.Success,
+            result.Message,
+            result.MillNo,
+            result.MillName,
+            result.PlcConnected,
+            result.TriggerBefore,
+            result.TriggerAfter,
+            result.AckPulsed,
+            result.WorkflowInvoked,
+            result.PoNumber,
+            steps = result.Steps,
+            logHint = "Filter logs for [Settings test] or PO end workflow for this mill."
+        });
+    }
+
+    private async Task<IActionResult> GetLegacyPlcDiagnosticsAsync(CancellationToken cancellationToken)
+    {
         var plcCfg = _options.PlcPoEnd ?? new PlcPoEndOptions();
         var mills = new List<object>();
 
@@ -151,7 +262,8 @@ public sealed class SettingsController : ControllerBase
                     port,
                     reachable,
                     poEndAddress = ep.S7PoEndAddress,
-                    mesAckAddress = ep.S7MesAckAddress
+                    mesAckAddress = ep.S7MesAckAddress,
+                    testAvailable = false
                 });
             }
         }
@@ -169,7 +281,8 @@ public sealed class SettingsController : ControllerBase
                     driver = "ModbusTcp",
                     host,
                     port,
-                    reachable
+                    reachable,
+                    testAvailable = false
                 });
             }
         }
@@ -190,6 +303,7 @@ public sealed class SettingsController : ControllerBase
         return Ok(new
         {
             plcPoEndEnabled = plcCfg.Enabled,
+            plcHandshakeEnabled = false,
             driver = plcCfg.Driver ?? "Stub",
             lastReadOk = _plcHealth.LastReadOk,
             lastPlcError = _plcHealth.LastError,
@@ -354,6 +468,11 @@ public sealed class SettingsController : ControllerBase
     }
 
     public sealed class TestMillPrinterRequest
+    {
+        public int MillNo { get; set; }
+    }
+
+    public sealed class TestPoChangeRequest
     {
         public int MillNo { get; set; }
     }

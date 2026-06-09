@@ -5,6 +5,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Services;
+using NdtBundleService.Services.PlcHandshake;
 using QuestPDF.Infrastructure;
 using Serilog;
 using Serilog.Events;
@@ -57,9 +58,18 @@ builder.Services.AddSingleton<MillPoEndTransitionDetector>();
 builder.Services.AddSingleton<PoEndDetectionDiagnostics>();
 builder.Services.AddSingleton<PlcPoEndPollHandler>();
 builder.Services.AddSingleton<PlcConnectionHealth>();
+builder.Services.AddSingleton<PlcHandshakeStatusRegistry>();
+builder.Services.AddSingleton<PlcHandshakeCoordinator>();
+builder.Services.AddSingleton<IPoChangeHandler, PoChangeHandler>();
 builder.Services.AddSingleton<IPlcClient>(sp =>
 {
     var bundleOptions = sp.GetRequiredService<IOptions<NdtBundleOptions>>().Value;
+    var handshake = bundleOptions.PlcHandshake ?? new PlcHandshakeOptions();
+    if (handshake.Enabled)
+    {
+        return new PlcHandshakeMirrorPlcClient(sp.GetRequiredService<PlcHandshakeStatusRegistry>());
+    }
+
     var plc = bundleOptions.PlcPoEnd ?? new PlcPoEndOptions();
     if (plc.Enabled && PlcPoEndOptions.IsS7Driver(plc))
     {
@@ -109,6 +119,7 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 // Background worker that orchestrates the flow
+builder.Services.AddHostedService<PlcHandshakeWorker>();
 builder.Services.AddHostedService<SlitMonitoringWorker>();
 builder.Services.AddHostedService<UploadNdtBundleSchedulerWorker>();
 

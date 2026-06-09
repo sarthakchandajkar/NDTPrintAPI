@@ -161,22 +161,46 @@ export interface FormationChartEntryRow {
 
 export interface SettingsPlcMill {
   millNo?: number;
+  name?: string;
   driver?: string;
   host?: string;
   port?: number;
   reachable?: boolean;
   poEndAddress?: string;
   mesAckAddress?: string;
+  handshakeConnected?: boolean;
+  triggerActive?: boolean;
+  ackActive?: boolean;
+  handshakeState?: string;
+  lastPoChangeUtc?: string | null;
+  lastError?: string | null;
+  testAvailable?: boolean;
 }
 
 export interface SettingsPlcDiagnostics {
   plcPoEndEnabled?: boolean;
+  plcHandshakeEnabled?: boolean;
   driver?: string;
   lastReadOk?: boolean;
   lastPlcError?: string | null;
   lastPlcCheckUtc?: string | null;
   poEndByMill?: Record<string, boolean>;
   mills?: SettingsPlcMill[];
+}
+
+export interface SettingsPoChangeTestResult {
+  success?: boolean;
+  message?: string;
+  millNo?: number;
+  millName?: string;
+  plcConnected?: boolean;
+  triggerBefore?: boolean;
+  triggerAfter?: boolean;
+  ackPulsed?: boolean;
+  workflowInvoked?: boolean;
+  poNumber?: string | null;
+  steps?: string[];
+  logHint?: string;
 }
 
 export interface SettingsPrinterMill {
@@ -365,6 +389,11 @@ export const api = {
     }),
   settingsPlc: (token: string) =>
     fetchSettingsApi<SettingsPlcDiagnostics>("/api/Settings/plc", token),
+  settingsTestPoChange: (token: string, millNo: number) =>
+    fetchSettingsApi<SettingsPoChangeTestResult>("/api/Settings/plc/test-po-change", token, {
+      method: "POST",
+      body: JSON.stringify({ millNo }),
+    }),
   settingsPrinters: (token: string) =>
     fetchSettingsApi<{ mills?: SettingsPrinterMill[] }>("/api/Settings/printers", token),
   settingsSavePrinters: (

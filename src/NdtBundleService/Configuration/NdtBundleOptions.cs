@@ -141,8 +141,13 @@ public class NdtBundleOptions
     /// </summary>
     public string? MinSourceFileLastWriteUtc { get; set; }
 
-    /// <summary>Optional per-mill PLC PO-end signals (Modbus TCP, etc.).</summary>
+    /// <summary>Optional per-mill PLC PO-end signals (Modbus TCP, etc.). Disabled when <see cref="PlcHandshake"/> is enabled.</summary>
     public PlcPoEndOptions PlcPoEnd { get; set; } = new();
+
+    /// <summary>
+    /// Persistent per-mill S7 PO-change handshake (trigger/ack M-bits). Preferred over legacy <see cref="PlcPoEnd"/> polling.
+    /// </summary>
+    public PlcHandshakeOptions PlcHandshake { get; set; } = new();
 
     /// <summary>Optional live NDT count + running PO from WIP bundle folder for one mill (e.g. Mill-3 S7).</summary>
     public MillSlitLiveOptions MillSlitLive { get; set; } = new();

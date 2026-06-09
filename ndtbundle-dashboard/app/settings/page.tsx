@@ -5,6 +5,7 @@ import {
   api,
   type FormationChartEntryRow,
   type SettingsPlcDiagnostics,
+  type SettingsPoChangeTestResult,
   type SettingsPrinterMill,
 } from "@/lib/api";
 import {
@@ -36,6 +37,8 @@ export default function SettingsPage() {
   const [formationSource, setFormationSource] = useState<string | null>(null);
   const [plc, setPlc] = useState<SettingsPlcDiagnostics | null>(null);
   const [printers, setPrinters] = useState<SettingsPrinterMill[]>([]);
+  const [poChangeTestingMill, setPoChangeTestingMill] = useState<number | null>(null);
+  const [poChangeTestResult, setPoChangeTestResult] = useState<SettingsPoChangeTestResult | null>(null);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -110,6 +113,29 @@ export default function SettingsPage() {
     }
     clearSettingsToken();
     setAuthenticated(false);
+  };
+
+  const testPoChange = async (millNo: number) => {
+    const t = getSettingsToken();
+    if (!t) return;
+    setPoChangeTestingMill(millNo);
+    setPoChangeTestResult(null);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await api.settingsTestPoChange(t, millNo);
+      setPoChangeTestResult(result);
+      if (result.success) {
+        setMessage(result.message ?? `Mill-${millNo} PO change test completed.`);
+      } else {
+        setError(result.message ?? `Mill-${millNo} PO change test failed.`);
+      }
+      await loadTabData();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "PO change test failed");
+    } finally {
+      setPoChangeTestingMill(null);
+    }
   };
 
   const saveFormation = async () => {
@@ -303,45 +329,112 @@ export default function SettingsPage() {
             <p>
               <span className="text-gray-500">Driver:</span>{" "}
               <span className="font-medium">{plc?.driver ?? "—"}</span>
-              {plc?.plcPoEndEnabled ? "" : " (disabled)"}
+              {plc?.plcHandshakeEnabled
+                ? " (persistent handshake)"
+                : plc?.plcPoEndEnabled
+                  ? ""
+                  : " (disabled)"}
             </p>
             <p>
-              <span className="text-gray-500">Last PLC read:</span>{" "}
+              <span className="text-gray-500">S7 handshake:</span>{" "}
               <span className={plc?.lastReadOk ? "text-green-700 font-medium" : "text-red-700 font-medium"}>
-                {plc?.lastReadOk ? "OK" : "Failed"}
+                {plc?.lastReadOk ? "All mills connected" : "One or more mills not connected"}
               </span>
               {plc?.lastPlcError ? ` — ${plc.lastPlcError}` : ""}
             </p>
             <p className="text-gray-500 text-xs">Checked: {plc?.lastPlcCheckUtc ?? "—"}</p>
+            <p className="text-gray-600 text-xs pt-1">
+              Use <strong>Test PO change</strong> per mill to read the trigger bit from the PLC, run the PO end
+              workflow, and pulse the ack bit. Results appear below and in server logs (
+              <code className="text-xs bg-gray-100 px-1 rounded">[Settings test]</code>).
+            </p>
           </div>
+
+          {poChangeTestResult && (
+            <div
+              className={`rounded-lg border p-4 text-sm ${
+                poChangeTestResult.success
+                  ? "bg-green-50 border-green-200 text-green-900"
+                  : "bg-red-50 border-red-200 text-red-900"
+              }`}
+            >
+              <p className="font-semibold mb-2">
+                {poChangeTestResult.millName ?? `Mill-${poChangeTestResult.millNo}`}:{" "}
+                {poChangeTestResult.message}
+              </p>
+              {poChangeTestResult.poNumber && (
+                <p className="mb-2">PO from slit CSV: {poChangeTestResult.poNumber}</p>
+              )}
+              {Array.isArray(poChangeTestResult.steps) && poChangeTestResult.steps.length > 0 && (
+                <ol className="list-decimal list-inside space-y-0.5 text-xs">
+                  {poChangeTestResult.steps.map((step, i) => (
+                    <li key={i}>{step}</li>
+                  ))}
+                </ol>
+              )}
+              {poChangeTestResult.logHint && (
+                <p className="mt-2 text-xs opacity-80">{poChangeTestResult.logHint}</p>
+              )}
+            </div>
+          )}
+
           <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
             <table className="min-w-full text-sm">
               <thead className="bg-gray-50">
                 <tr>
                   <th className="px-4 py-2 text-left">Mill</th>
                   <th className="px-4 py-2 text-left">Host</th>
-                  <th className="px-4 py-2 text-left">Port</th>
-                  <th className="px-4 py-2 text-left">TCP</th>
-                  <th className="px-4 py-2 text-left">PO end signal</th>
+                  <th className="px-4 py-2 text-left">S7</th>
+                  <th className="px-4 py-2 text-left">Trigger</th>
+                  <th className="px-4 py-2 text-left">Ack</th>
+                  <th className="px-4 py-2 text-left">State</th>
+                  <th className="px-4 py-2 text-left">Test</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
                 {(plc?.mills ?? []).map((m) => (
                   <tr key={m.millNo}>
-                    <td className="px-4 py-2 font-medium">Mill-{m.millNo}</td>
+                    <td className="px-4 py-2 font-medium">
+                      {m.name ?? `Mill-${m.millNo}`}
+                      <div className="text-xs text-gray-500 font-normal">
+                        {m.poEndAddress} → {m.mesAckAddress}
+                      </div>
+                    </td>
                     <td className="px-4 py-2">{m.host || "—"}</td>
-                    <td className="px-4 py-2">{m.port ?? "—"}</td>
                     <td className="px-4 py-2">
                       <span
                         className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                          m.reachable ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"
+                          m.handshakeConnected ?? (m.reachable && plc?.plcHandshakeEnabled)
+                            ? "bg-green-100 text-green-800"
+                            : m.reachable
+                              ? "bg-amber-100 text-amber-800"
+                              : "bg-red-100 text-red-800"
                         }`}
                       >
-                        {m.reachable ? "Reachable" : "Unreachable"}
+                        {m.handshakeConnected
+                          ? "Connected"
+                          : m.reachable
+                            ? "TCP OK"
+                            : "Unreachable"}
                       </span>
                     </td>
                     <td className="px-4 py-2">
-                      {plc?.poEndByMill?.[String(m.millNo)] ? "Active" : "—"}
+                      {m.triggerActive ?? plc?.poEndByMill?.[String(m.millNo)] ? "ON" : "OFF"}
+                    </td>
+                    <td className="px-4 py-2">{m.ackActive ? "ON" : "OFF"}</td>
+                    <td className="px-4 py-2 text-xs">{m.handshakeState ?? "—"}</td>
+                    <td className="px-4 py-2">
+                      <button
+                        type="button"
+                        disabled={
+                          poChangeTestingMill !== null ||
+                          !(m.testAvailable ?? plc?.plcHandshakeEnabled)
+                        }
+                        onClick={() => m.millNo && testPoChange(m.millNo)}
+                        className="px-3 py-1.5 text-xs font-medium rounded-md border border-primary-300 text-primary-800 bg-primary-50 hover:bg-primary-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {poChangeTestingMill === m.millNo ? "Testing…" : "Test PO change"}
+                      </button>
                     </td>
                   </tr>
                 ))}

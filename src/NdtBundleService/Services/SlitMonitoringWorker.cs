@@ -93,7 +93,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
             {
                 await ProcessNewSlitFilesAsync(stoppingToken).ConfigureAwait(false);
 
-                await _plcPoEndPollHandler.PollAsync(stoppingToken).ConfigureAwait(false);
+                if (!IsPlcHandshakeEnabled())
+                    await _plcPoEndPollHandler.PollAsync(stoppingToken).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -584,4 +585,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
             return null;
         return DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var dt) ? dt : null;
     }
+
+    private bool IsPlcHandshakeEnabled() =>
+        _optionsMonitor.CurrentValue.PlcHandshake?.Enabled == true;
 }

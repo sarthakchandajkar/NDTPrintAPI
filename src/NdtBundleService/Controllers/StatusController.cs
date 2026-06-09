@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Services;
+using NdtBundleService.Services.PlcHandshake;
 
 namespace NdtBundleService.Controllers;
 
@@ -22,6 +23,7 @@ public sealed class StatusController : ControllerBase
     private readonly ISqlTraceabilityHealth _sqlHealth;
     private readonly ISqlTraceabilityWriteTracker _sqlWriteTracker;
     private readonly AppLogReader _appLogReader;
+    private readonly PlcHandshakeStatusRegistry _handshakeStatus;
     private readonly ILogger<StatusController> _logger;
 
     public StatusController(
@@ -30,6 +32,7 @@ public sealed class StatusController : ControllerBase
         IZplGenerationToggle zplToggle,
         PoEndDetectionDiagnostics poEndDiagnostics,
         PlcConnectionHealth plcHealth,
+        PlcHandshakeStatusRegistry handshakeStatus,
         ISqlTraceabilityHealth sqlHealth,
         ISqlTraceabilityWriteTracker sqlWriteTracker,
         AppLogReader appLogReader,
@@ -40,6 +43,7 @@ public sealed class StatusController : ControllerBase
         _zplToggle = zplToggle;
         _poEndDiagnostics = poEndDiagnostics;
         _plcHealth = plcHealth;
+        _handshakeStatus = handshakeStatus;
         _sqlHealth = sqlHealth;
         _sqlWriteTracker = sqlWriteTracker;
         _appLogReader = appLogReader;
@@ -97,13 +101,55 @@ public sealed class StatusController : ControllerBase
     [HttpGet("plc")]
     public async Task<IActionResult> GetPlcStatus(CancellationToken cancellationToken)
     {
-        var byMill = await _plcClient.GetPoEndSignalsByMillAsync(cancellationToken).ConfigureAwait(false);
-        var poEndActive = byMill.Values.Any(v => v);
+        var handshakeCfg = _options.PlcHandshake ?? new PlcHandshakeOptions();
+        if (handshakeCfg.Enabled)
+        {
+            var byMill = _handshakeStatus.GetPoEndByMill();
+            var poEndActive = byMill.Values.Any(v => v);
+            var mills = _handshakeStatus.GetSnapshot();
+            var connected = mills.Count > 0 && mills.All(m => m.Connected);
+
+            return Ok(new
+            {
+                Connected = connected,
+                LastPlcError = _handshakeStatus.FirstError() ?? _plcHealth.LastError,
+                LastPlcCheckUtc = mills.Count > 0 ? mills.Max(m => m.LastUpdateUtc) : _plcHealth.LastUpdateUtc,
+                PoEndActive = poEndActive,
+                PlcPoEndEnabled = true,
+                PlcHandshakeEnabled = true,
+                Driver = "S7-Handshake",
+                PoEndDetectionMode = "PersistentHandshake",
+                PoEndByMill = new Dictionary<string, bool>
+                {
+                    ["1"] = byMill.TryGetValue(1, out var h1) && h1,
+                    ["2"] = byMill.TryGetValue(2, out var h2) && h2,
+                    ["3"] = byMill.TryGetValue(3, out var h3) && h3,
+                    ["4"] = byMill.TryGetValue(4, out var h4) && h4
+                },
+                HandshakeMills = mills.Select(m => new
+                {
+                    m.MillName,
+                    m.MillNo,
+                    m.IpAddress,
+                    m.Connected,
+                    m.TriggerActive,
+                    m.AckActive,
+                    m.HandshakeState,
+                    m.LastPoChangeUtc,
+                    m.LastError,
+                    m.LastUpdateUtc
+                }),
+                Message = "Persistent per-mill S7 PO-change handshake (trigger/ack M-bits). Legacy PlcPoEnd polling is disabled."
+            });
+        }
+
+        var legacyByMill = await _plcClient.GetPoEndSignalsByMillAsync(cancellationToken).ConfigureAwait(false);
+        var legacyPoEndActive = legacyByMill.Values.Any(v => v);
         var plcCfg = _options.PlcPoEnd;
         var plcIoEnabled = plcCfg?.Enabled == true &&
             (PlcPoEndOptions.IsS7Driver(plcCfg) ||
              string.Equals(plcCfg.Driver, "ModbusTcp", StringComparison.OrdinalIgnoreCase));
-        var connected = plcIoEnabled && _plcHealth.LastReadOk == true;
+        var legacyConnected = plcIoEnabled && _plcHealth.LastReadOk == true;
         var diag = _poEndDiagnostics.GetSnapshot();
         var poIdMode = PlcPoEndOptions.IsModbusPoIdTransition(plcCfg);
         var message = !plcIoEnabled
@@ -115,19 +161,20 @@ public sealed class StatusController : ControllerBase
                     : "Modbus TCP PO-end coils from PlcPoEnd.Mills (per-mill POChangeTOMES / MES ack).";
         return Ok(new
         {
-            Connected = connected,
+            Connected = legacyConnected,
             LastPlcError = _plcHealth.LastError,
             LastPlcCheckUtc = _plcHealth.LastUpdateUtc,
-            PoEndActive = poEndActive,
+            PoEndActive = legacyPoEndActive,
             PlcPoEndEnabled = plcCfg?.Enabled ?? false,
+            PlcHandshakeEnabled = false,
             Driver = plcCfg?.Driver ?? "Stub",
             PoEndDetectionMode = plcCfg?.DetectionMode ?? "CoilRisingEdge",
             PoEndByMill = new Dictionary<string, bool>
             {
-                ["1"] = byMill.TryGetValue(1, out var m1) && m1,
-                ["2"] = byMill.TryGetValue(2, out var m2) && m2,
-                ["3"] = byMill.TryGetValue(3, out var m3) && m3,
-                ["4"] = byMill.TryGetValue(4, out var m4) && m4
+                ["1"] = legacyByMill.TryGetValue(1, out var m1) && m1,
+                ["2"] = legacyByMill.TryGetValue(2, out var m2) && m2,
+                ["3"] = legacyByMill.TryGetValue(3, out var m3) && m3,
+                ["4"] = legacyByMill.TryGetValue(4, out var m4) && m4
             },
             PoEndDetection = new
             {
