@@ -1,5 +1,15 @@
 namespace NdtBundleService.Services.PlcHandshake;
 
+/// <summary>Last PO-end event captured during handshake (for dashboard).</summary>
+public sealed class PlcHandshakeLastPoEnd
+{
+    public int PoId { get; set; }
+
+    public int NdtCountFinal { get; set; }
+
+    public DateTimeOffset TimestampUtc { get; set; }
+}
+
 /// <summary>Live status for one mill handshake loop (updated by <see cref="PlcHandshakeService"/>).</summary>
 public sealed class PlcHandshakeMillStatus
 {
@@ -22,6 +32,21 @@ public sealed class PlcHandshakeMillStatus
     public string? LastError { get; set; }
 
     public DateTimeOffset LastUpdateUtc { get; set; } = DateTimeOffset.UtcNow;
+
+    public int? OkCount { get; set; }
+
+    public int? NokCount { get; set; }
+
+    /// <summary>NDT count for dashboard (zeroed after PO end until PO ID changes).</summary>
+    public int? NdtCount { get; set; }
+
+    public int? PoId { get; set; }
+
+    public int? SlitId { get; set; }
+
+    public DateTimeOffset? CountsUpdatedUtc { get; set; }
+
+    public PlcHandshakeLastPoEnd? LastPoEnd { get; set; }
 }
 
 /// <summary>Thread-safe aggregate status for dashboard / <see cref="PlcHandshakeMirrorPlcClient"/>.</summary>
@@ -84,19 +109,36 @@ public sealed class PlcHandshakeStatusRegistry
         lock (_sync)
             return _byMill.Values
                 .OrderBy(m => m.MillNo)
-                .Select(m => new PlcHandshakeMillStatus
-                {
-                    MillName = m.MillName,
-                    MillNo = m.MillNo,
-                    IpAddress = m.IpAddress,
-                    Connected = m.Connected,
-                    TriggerActive = m.TriggerActive,
-                    AckActive = m.AckActive,
-                    HandshakeState = m.HandshakeState,
-                    LastPoChangeUtc = m.LastPoChangeUtc,
-                    LastError = m.LastError,
-                    LastUpdateUtc = m.LastUpdateUtc
-                })
+                .Select(CloneStatus)
                 .ToList();
     }
+
+    private static PlcHandshakeMillStatus CloneStatus(PlcHandshakeMillStatus m) =>
+        new()
+        {
+            MillName = m.MillName,
+            MillNo = m.MillNo,
+            IpAddress = m.IpAddress,
+            Connected = m.Connected,
+            TriggerActive = m.TriggerActive,
+            AckActive = m.AckActive,
+            HandshakeState = m.HandshakeState,
+            LastPoChangeUtc = m.LastPoChangeUtc,
+            LastError = m.LastError,
+            LastUpdateUtc = m.LastUpdateUtc,
+            OkCount = m.OkCount,
+            NokCount = m.NokCount,
+            NdtCount = m.NdtCount,
+            PoId = m.PoId,
+            SlitId = m.SlitId,
+            CountsUpdatedUtc = m.CountsUpdatedUtc,
+            LastPoEnd = m.LastPoEnd is null
+                ? null
+                : new PlcHandshakeLastPoEnd
+                {
+                    PoId = m.LastPoEnd.PoId,
+                    NdtCountFinal = m.LastPoEnd.NdtCountFinal,
+                    TimestampUtc = m.LastPoEnd.TimestampUtc
+                }
+        };
 }

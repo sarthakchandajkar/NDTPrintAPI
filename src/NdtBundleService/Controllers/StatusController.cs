@@ -137,9 +137,23 @@ public sealed class StatusController : ControllerBase
                     m.HandshakeState,
                     m.LastPoChangeUtc,
                     m.LastError,
-                    m.LastUpdateUtc
+                    m.LastUpdateUtc,
+                    m.OkCount,
+                    m.NokCount,
+                    m.NdtCount,
+                    m.PoId,
+                    m.SlitId,
+                    m.CountsUpdatedUtc,
+                    LastPoEnd = m.LastPoEnd is null
+                        ? null
+                        : new
+                        {
+                            m.LastPoEnd.PoId,
+                            m.LastPoEnd.NdtCountFinal,
+                            TimestampUtc = m.LastPoEnd.TimestampUtc
+                        }
                 }),
-                Message = "Persistent per-mill S7 PO-change handshake (trigger/ack M-bits). Legacy PlcPoEnd polling is disabled."
+                Message = "Persistent per-mill S7 PO-change handshake plus DB251 OK/NOK/NDT counts on the same connection. Use GET /api/Status/plc-live for dashboard polling."
             });
         }
 
@@ -192,6 +206,63 @@ public sealed class StatusController : ControllerBase
             },
             Message = message
         });
+    }
+
+    /// <summary>
+    /// Live OK/NOK/NDT counts from DB251 when <see cref="PlcHandshakeOptions.Enabled"/> is true
+    /// (same S7 connection as PO-change handshake — no plc-server required).
+    /// </summary>
+    [HttpGet("plc-live")]
+    public IActionResult GetPlcLiveCounts()
+    {
+        var handshakeCfg = _options.PlcHandshake ?? new PlcHandshakeOptions();
+        if (!handshakeCfg.Enabled)
+        {
+            return Ok(new
+            {
+                PlcHandshakeEnabled = false,
+                Message = "PlcHandshake disabled; use plc-server Socket.IO for live counts.",
+                Mills = Array.Empty<object>()
+            });
+        }
+
+        var mills = _handshakeStatus.GetSnapshot();
+        return Ok(new
+        {
+            PlcHandshakeEnabled = true,
+            Mills = mills.Select(m => new
+            {
+                m.MillName,
+                m.MillNo,
+                m.IpAddress,
+                m.Connected,
+                Status = m.Connected ? "connected" : "disconnected",
+                m.OkCount,
+                m.NokCount,
+                m.NdtCount,
+                m.PoId,
+                m.SlitId,
+                PoEndActive = m.TriggerActive,
+                m.HandshakeState,
+                m.LastError,
+                Timestamp = FormatPlcTimestamp(m.CountsUpdatedUtc ?? m.LastUpdateUtc),
+                LastUpdateUtc = m.LastUpdateUtc,
+                LastPoEnd = m.LastPoEnd is null
+                    ? null
+                    : new
+                    {
+                        m.LastPoEnd.PoId,
+                        m.LastPoEnd.NdtCountFinal,
+                        Timestamp = FormatPlcTimestamp(m.LastPoEnd.TimestampUtc)
+                    }
+            })
+        });
+    }
+
+    private static string FormatPlcTimestamp(DateTimeOffset utc)
+    {
+        var local = utc.LocalDateTime;
+        return $"{local:yyyy-MM-dd HH:mm:ss}";
     }
 
     /// <summary>

@@ -27,6 +27,8 @@ public sealed class PlcHandshakeService
     private bool _primed;
     private bool _handshakeInProgress;
     private volatile bool _settingsTestInProgress;
+    private bool _suppressNdtUntilPoChange;
+    private int _poIdWhenSuppressed;
 
     public PlcHandshakeService(
         MillConfig mill,
@@ -88,6 +90,8 @@ public sealed class PlcHandshakeService
                     s.AckActive = ack;
                     s.LastError = null;
                 });
+
+                TryUpdateDb251Counts(millNo);
 
                 _connectionHealth.RecordModbusPoll(true, _statusRegistry.AllConnected());
 
@@ -170,6 +174,31 @@ public sealed class PlcHandshakeService
             "{MillName}: trigger {Trigger} TRUE — PO change handshake started.",
             _mill.Name,
             _mill.TriggerAddress);
+
+        var poIdVal = 0;
+        var ndtFinal = 0;
+        try
+        {
+            poIdVal = ReadDbInt(_options.PoIdByteOffset);
+            ndtFinal = ReadDbInt(_options.NdtCountByteOffset);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "{MillName}: could not read PO/NDT from DB{Db} at PO change start.", _mill.Name, _options.CountsDbNumber);
+        }
+
+        _suppressNdtUntilPoChange = true;
+        _poIdWhenSuppressed = poIdVal;
+        UpdateStatus(millNo, s =>
+        {
+            s.LastPoEnd = new PlcHandshakeLastPoEnd
+            {
+                PoId = poIdVal,
+                NdtCountFinal = ndtFinal,
+                TimestampUtc = DateTimeOffset.UtcNow
+            };
+            s.NdtCount = 0;
+        });
 
         try
         {
@@ -327,6 +356,60 @@ public sealed class PlcHandshakeService
                 throw new InvalidOperationException("PLC not connected.");
 
             _plc.Write(DataType.Memory, 0, byteOffset, value, bit);
+        }
+    }
+
+    private void TryUpdateDb251Counts(int millNo)
+    {
+        try
+        {
+            var ok = ReadDbInt(_options.OkCountByteOffset);
+            var nok = ReadDbInt(_options.NokCountByteOffset);
+            var ndtRaw = ReadDbInt(_options.NdtCountByteOffset);
+            var poId = ReadDbInt(_options.PoIdByteOffset);
+            var slitId = ReadDbInt(_options.SlitIdByteOffset);
+
+            var ndtDisplay = ndtRaw;
+            if (_suppressNdtUntilPoChange)
+            {
+                if (poId != _poIdWhenSuppressed)
+                    _suppressNdtUntilPoChange = false;
+                else
+                    ndtDisplay = 0;
+            }
+
+            UpdateStatus(millNo, s =>
+            {
+                s.OkCount = ok;
+                s.NokCount = nok;
+                s.NdtCount = ndtDisplay;
+                s.PoId = poId;
+                s.SlitId = slitId;
+                s.CountsUpdatedUtc = DateTimeOffset.UtcNow;
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(
+                ex,
+                "{MillName}: DB{Db} count read failed.",
+                _mill.Name,
+                _options.CountsDbNumber);
+        }
+    }
+
+    private int ReadDbInt(int byteOffset)
+    {
+        lock (_plcLock)
+        {
+            if (_plc is null || !_plc.IsConnected)
+                throw new InvalidOperationException("PLC not connected.");
+
+            var raw = _plc.Read(DataType.DataBlock, _options.CountsDbNumber, byteOffset, VarType.Int, 1);
+            if (raw is null)
+                return 0;
+            var v = Convert.ToInt32(raw);
+            return v < 0 ? 0 : v;
         }
     }
 

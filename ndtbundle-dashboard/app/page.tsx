@@ -2,14 +2,8 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { io, type Socket } from "socket.io-client";
 import { api, type WipByMillRow } from "@/lib/api";
-import {
-  PLC_MILL_NUMBERS,
-  PLC_SOCKET_URL,
-  plcEventPrefix,
-  type PlcMillUpdate,
-} from "@/lib/plcTypes";
+import { usePlcCountsByMill } from "@/lib/usePlcMillLive";
 
 type MillRowState = {
   row: WipByMillRow;
@@ -25,7 +19,7 @@ function parseMillNo(row: WipByMillRow): number {
   return Number.NaN;
 }
 
-/** Live PLC counts per mill from plc-server Socket.IO (DB251). */
+/** Live PLC counts per mill (handshake API or plc-server Socket.IO). */
 type PlcLiveByMill = Record<
   number,
   { ndtCount: number | null; okCount: number | null; nokCount: number | null }
@@ -36,7 +30,7 @@ type LiveNdtState = { millNo: number; count: number | null };
 
 export default function SummaryPage() {
   const [millRows, setMillRows] = useState<MillRowState[]>([]);
-  const [plcLive, setPlcLive] = useState<PlcLiveByMill>({});
+  const plcLive = usePlcCountsByMill();
   const [liveNdt, setLiveNdt] = useState<LiveNdtState | null>(null);
   const [sourcePath, setSourcePath] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -86,53 +80,6 @@ export default function SummaryPage() {
 
   useEffect(() => {
     refresh();
-  }, []);
-
-  useEffect(() => {
-    let socket: Socket | null = null;
-    try {
-      socket = io(PLC_SOCKET_URL, {
-        transports: ["websocket", "polling"],
-        reconnection: true,
-        reconnectionAttempts: Infinity,
-        reconnectionDelay: 2000,
-      });
-
-      const onUpdate = (millNo: number, payload: PlcMillUpdate) => {
-        const ndt =
-          typeof payload?.ndtCount === "number" && Number.isFinite(payload.ndtCount)
-            ? Math.trunc(payload.ndtCount)
-            : null;
-        const ok =
-          typeof payload?.okCount === "number" && Number.isFinite(payload.okCount)
-            ? Math.trunc(payload.okCount)
-            : null;
-        const nok =
-          typeof payload?.nokCount === "number" && Number.isFinite(payload.nokCount)
-            ? Math.trunc(payload.nokCount)
-            : null;
-        setPlcLive((prev) => ({
-          ...prev,
-          [millNo]: { ndtCount: ndt, okCount: ok, nokCount: nok },
-        }));
-        setLiveNdt({ millNo, count: ndt });
-      };
-
-      for (const n of PLC_MILL_NUMBERS) {
-        socket.on(`${plcEventPrefix(n)}:update`, (payload: PlcMillUpdate) => {
-          onUpdate(n, payload);
-        });
-      }
-    } catch {
-      // Socket optional; API poll still fills live NDT for configured mill.
-    }
-
-    return () => {
-      if (socket) {
-        socket.removeAllListeners();
-        socket.close();
-      }
-    };
   }, []);
 
   useEffect(() => {
@@ -260,8 +207,9 @@ export default function SummaryPage() {
             from the latest <code className="text-xs bg-gray-100 px-1 rounded">WIP_MM_…</code> file name in the TM Bundle /
             Bundle Accepted folders (<code className="text-xs bg-gray-100 px-1 rounded">MillSlitLive</code> in service
             config). Pipe details merge from the PO plan WIP folder when the PO matches. OK / NOK / NDT counts come from
-            the PLC bridge (<code className="text-xs bg-gray-100 px-1 rounded">plc-server</code> Socket.IO) when running;
-            Mill-3 also has an API fallback via <code className="text-xs bg-gray-100 px-1 rounded">MillSlitLive</code>.
+            NdtBundleService (<code className="text-xs bg-gray-100 px-1 rounded">/api/Status/plc-live</code>) when PO
+            handshake is enabled, otherwise from{" "}
+            <code className="text-xs bg-gray-100 px-1 rounded">plc-server</code> Socket.IO.
           </p>
         </div>
         <div className="overflow-x-auto">

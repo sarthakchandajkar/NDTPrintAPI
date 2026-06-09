@@ -133,9 +133,41 @@ export interface PlcStatus {
   lastPlcCheckUtc?: string | null;
   poEndActive?: boolean;
   plcPoEndEnabled?: boolean;
+  plcHandshakeEnabled?: boolean;
   driver?: string;
   poEndByMill?: Record<string, boolean>;
   message?: string;
+}
+
+export interface PlcLiveMillLastPoEnd {
+  poId?: number;
+  ndtCountFinal?: number;
+  timestamp?: string;
+}
+
+export interface PlcLiveMillPayload {
+  millName?: string;
+  millNo?: number;
+  ipAddress?: string;
+  connected?: boolean;
+  status?: string;
+  okCount?: number | null;
+  nokCount?: number | null;
+  ndtCount?: number | null;
+  poId?: number | null;
+  slitId?: number | null;
+  poEndActive?: boolean;
+  handshakeState?: string;
+  lastError?: string | null;
+  timestamp?: string;
+  lastUpdateUtc?: string;
+  lastPoEnd?: PlcLiveMillLastPoEnd | null;
+}
+
+export interface PlcLiveResponse {
+  plcHandshakeEnabled?: boolean;
+  message?: string;
+  mills?: PlcLiveMillPayload[];
 }
 
 /** NotConfigured | Ready (TCP OK) | Unreachable | Configured (name only, no TCP check). */
@@ -317,6 +349,7 @@ export const api = {
   inputSlitFiles: () => fetchApi<InputSlitFile[]>("/api/InputSlits/files"),
   inputSlitContent: (fileName: string) => fetchApi<InputSlitContent>(`/api/InputSlits/files/${encodeURIComponent(fileName)}/content`),
   plcStatus: () => fetchApi<PlcStatus>("/api/Status/plc"),
+  plcLive: () => fetchApi<PlcLiveResponse>("/api/Status/plc-live"),
   printerStatus: () => fetchApi<PrinterStatus>("/api/Status/printer"),
   zplGenerationStatus: () => fetchApi<ZplGenerationStatus>("/api/Status/zpl-generation"),
   setZplGenerationStatus: (enabled: boolean) =>

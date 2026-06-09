@@ -1,17 +1,10 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
-import { io, type Socket } from "socket.io-client";
 import {
   PLC_MILL_NUMBERS,
-  PLC_SOCKET_URL,
-  emptyPlcMillState,
-  plcEventPrefix,
   type PlcMillLiveState,
-  type PlcMillPoEndEvt,
-  type PlcMillStatusEvt,
-  type PlcMillUpdate,
 } from "@/lib/plcTypes";
+import { usePlcMillLive } from "@/lib/usePlcMillLive";
 
 const MILL_META: Record<
   number,
@@ -117,143 +110,31 @@ function MillPlcCard({
 }
 
 export default function MillsPlcPage() {
-  const [mills, setMills] = useState<Record<number, PlcMillLiveState>>(() => {
-    const init: Record<number, PlcMillLiveState> = {};
-    for (const n of PLC_MILL_NUMBERS) init[n] = emptyPlcMillState();
-    return init;
-  });
-
-  const applyStatus = useCallback((millNo: number, s: PlcMillStatusEvt) => {
-    setMills((prev) => {
-      const cur = prev[millNo] ?? emptyPlcMillState();
-      return {
-        ...prev,
-        [millNo]: {
-          ...cur,
-          connection: s.status === "connected" ? "live" : "error",
-          statusMsg: s.message || (s.status === "connected" ? "Connected" : "Disconnected"),
-        },
-      };
-    });
-  }, []);
-
-  useEffect(() => {
-    let socket: Socket | null = null;
-    try {
-      socket = io(PLC_SOCKET_URL, {
-        transports: ["websocket", "polling"],
-        reconnection: true,
-        reconnectionAttempts: Infinity,
-        reconnectionDelay: 2000,
-      });
-
-      socket.on("connect", () => {
-        setMills((prev) => {
-          const next = { ...prev };
-          for (const n of PLC_MILL_NUMBERS) {
-            next[n] = {
-              ...(next[n] ?? emptyPlcMillState()),
-              connection: "connecting",
-              statusMsg: "Socket connected — waiting for PLC…",
-            };
-          }
-          return next;
-        });
-      });
-
-      socket.on("disconnect", () => {
-        setMills((prev) => {
-          const next = { ...prev };
-          for (const n of PLC_MILL_NUMBERS) {
-            next[n] = {
-              ...(next[n] ?? emptyPlcMillState()),
-              connection: "error",
-              statusMsg: "Socket disconnected from bridge",
-            };
-          }
-          return next;
-        });
-      });
-
-      socket.on("connect_error", () => {
-        setMills((prev) => {
-          const next = { ...prev };
-          for (const n of PLC_MILL_NUMBERS) {
-            next[n] = {
-              ...(next[n] ?? emptyPlcMillState()),
-              connection: "error",
-              statusMsg: `Cannot reach PLC bridge at ${PLC_SOCKET_URL}. Start plc-server.`,
-            };
-          }
-          return next;
-        });
-      });
-
-      for (const millNo of PLC_MILL_NUMBERS) {
-        const prefix = plcEventPrefix(millNo);
-
-        socket.on(`${prefix}:status`, (payload: PlcMillStatusEvt) => {
-          applyStatus(millNo, payload);
-        });
-
-        socket.on(`${prefix}:update`, (payload: PlcMillUpdate) => {
-          setMills((prev) => ({
-            ...prev,
-            [millNo]: {
-              ...(prev[millNo] ?? emptyPlcMillState()),
-              connection: "live",
-              statusMsg: `Live (DB251 + ${MILL_META[millNo].poEnd})`,
-              data: payload,
-            },
-          }));
-        });
-
-        socket.on(`${prefix}:po_end`, (payload: PlcMillPoEndEvt) => {
-          setMills((prev) => ({
-            ...prev,
-            [millNo]: {
-              ...(prev[millNo] ?? emptyPlcMillState()),
-              lastPoEnd: payload,
-            },
-          }));
-        });
-      }
-    } catch {
-      setMills((prev) => {
-        const next = { ...prev };
-        for (const n of PLC_MILL_NUMBERS) {
-          next[n] = {
-            ...emptyPlcMillState(),
-            connection: "error",
-            statusMsg: "Failed to initialize Socket.IO client",
-          };
-        }
-        return next;
-      });
-    }
-
-    return () => {
-      if (socket) {
-        socket.removeAllListeners();
-        socket.close();
-      }
-    };
-  }, [applyStatus]);
+  const mills = usePlcMillLive();
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8">
       <h1 className="text-2xl font-semibold text-slate-800">Mills 1–4 — live PLC</h1>
       <p className="mt-1 text-sm text-slate-600">
-        Siemens S7-300 counts from <strong>DB251</strong> (OK / NOK / NDT). PO change triggers per
-        mill; stream from{" "}
-        <code className="rounded bg-slate-100 px-1">{PLC_SOCKET_URL}</code>
+        Siemens S7-300 counts from <strong>DB251</strong> (OK / NOK / NDT). When PO handshake is
+        enabled, counts come from <strong>NdtBundleService</strong> on the same S7 connection;
+        otherwise from plc-server Socket.IO.
       </p>
 
       <div className="mt-8 grid grid-cols-1 lg:grid-cols-2 gap-6">
         {PLC_MILL_NUMBERS.map((n) => (
-          <MillPlcCard key={n} millNo={n} state={mills[n] ?? emptyPlcMillState()} />
+          <MillPlcCard key={n} millNo={n} state={mills[n] ?? emptyFallback()} />
         ))}
       </div>
     </div>
   );
+}
+
+function emptyFallback(): PlcMillLiveState {
+  return {
+    connection: "connecting",
+    statusMsg: "Loading…",
+    data: null,
+    lastPoEnd: null,
+  };
 }

@@ -22,5 +22,23 @@ public sealed class PlcHandshakeOptions
     /// <summary>Cap for exponential reconnect backoff (ms).</summary>
     public int MaxReconnectDelayMs { get; set; } = 30_000;
 
+    /// <summary>S7 DB for live OK/NOK/NDT counts (same as plc-server: DB251).</summary>
+    public int CountsDbNumber { get; set; } = 251;
+
+    /// <summary>Byte offset of OK count INT in <see cref="CountsDbNumber"/> (DBW2).</summary>
+    public int OkCountByteOffset { get; set; } = 2;
+
+    /// <summary>Byte offset of NOK count INT (DBW4).</summary>
+    public int NokCountByteOffset { get; set; } = 4;
+
+    /// <summary>Byte offset of NDT count INT (DBW6).</summary>
+    public int NdtCountByteOffset { get; set; } = 6;
+
+    /// <summary>Byte offset of PO ID INT (DBW8).</summary>
+    public int PoIdByteOffset { get; set; } = 8;
+
+    /// <summary>Byte offset of Slit ID INT (DBW10).</summary>
+    public int SlitIdByteOffset { get; set; } = 10;
+
     public List<MillConfig> Mills { get; set; } = new();
 }
