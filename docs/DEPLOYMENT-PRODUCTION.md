@@ -263,7 +263,7 @@ cd C:\path\to\NDTPrintAPI
 
    ```powershell
    .\scripts\backup-ndt-june2026.ps1
-   # optional: -BackupRoot "D:\Backups\NDT-June2026-Rebuild"
+   # optional: -BackupRoot "C:\Backups\NDT-June2026-Rebuild"
    ```
 
    Backs up `JazeeraMES_Prod`, `NdtBundleRuntimeState.json`, and NDT output folders (not source Input Slit inboxes).

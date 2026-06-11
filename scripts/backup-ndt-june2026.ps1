@@ -2,7 +2,7 @@
 # Run on the VM as a user with SQL backup rights and UNC read access to pas-sap shares.
 
 param(
-    [string]$BackupRoot = "D:\Backups\NDT-June2026-Rebuild",
+    [string]$BackupRoot = "C:\Backups\NDT-June2026-Rebuild",
     [string]$SqlServer = "AJS-SOH-VM-PAS-\SQLEXPRESS",
     [string]$SqlDatabase = "JazeeraMES_Prod",
     [string]$StateFile = "\\10.2.20.210\pas-sap\To SAP\TM\NDT\NDT Input Slit\NdtBundleRuntimeState.json"
