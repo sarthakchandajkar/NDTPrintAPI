@@ -8,7 +8,8 @@ param(
     [string]$ApiBase = "http://localhost:5000",
     [string]$FromUtc = "2026-06-01T00:00:00Z",
     [int]$PlannedMonth = 6,
-    [int]$ProductionYear = 2026
+    [int]$ProductionYear = 2026,
+    [int]$TimeoutSec = 1800
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,9 +18,10 @@ function Invoke-NdtApi {
     param([string]$Method, [string]$Path, $Body = $null)
     $uri = "$ApiBase$Path"
     if ($Body) {
-        return Invoke-RestMethod -Method $Method -Uri $uri -ContentType "application/json" -Body ($Body | ConvertTo-Json -Depth 8)
+        return Invoke-RestMethod -Method $Method -Uri $uri -ContentType "application/json" `
+            -Body ($Body | ConvertTo-Json -Depth 8) -TimeoutSec $TimeoutSec
     }
-    return Invoke-RestMethod -Method $Method -Uri $uri
+    return Invoke-RestMethod -Method $Method -Uri $uri -TimeoutSec $TimeoutSec
 }
 
 Write-Host "Checking API..." -ForegroundColor Cyan
@@ -38,7 +40,7 @@ $preflightPath = '/api/Test/rebuild-preflight?fromUtc={0}&plannedMonth={1}&produ
 $preflight = Invoke-NdtApi -Method GET -Path $preflightPath
 $preflight | ConvertTo-Json -Depth 8
 
-Write-Host "`nReview targetPoByMill (expected June POs per mill) and startingSequenceByMill before continuing." -ForegroundColor Yellow
+Write-Host "`nReview targetPoByMill and startingSequenceByMill before continuing." -ForegroundColor Yellow
 
 Write-Host "`n=== Dry run (read-only) ===" -ForegroundColor Cyan
 $dry = Invoke-NdtApi -Method POST -Path "/api/Test/rebuild-ndt-from-date" -Body @{
@@ -51,5 +53,7 @@ $dry = Invoke-NdtApi -Method POST -Path "/api/Test/rebuild-ndt-from-date" -Body 
 }
 $dry | ConvertTo-Json -Depth 8
 
-Write-Host "`nDry run complete. Check slitRowsReplayed, slitRowsExcluded, excludedSamples, targetPoByMill." -ForegroundColor Green
-Write-Host 'When ready for purge+rebuild: backup SQL/CSV/state, then run .\scripts\rebuild-ndt-june2026.ps1 -ExecuteRebuild'
+Write-Host "`nDry run complete." -ForegroundColor Green
+Write-Host "  slitRowsIncluded     = all June slits (incl. NDT Pipes=0)"
+Write-Host "  slitRowsReplayed     = slits with NDT Pipes > 0"
+Write-Host 'When ready: .\scripts\backup-ndt-june2026.ps1 then .\scripts\rebuild-ndt-june2026.ps1 -ExecuteRebuild'

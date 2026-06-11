@@ -29,7 +29,10 @@ public sealed class NdtBundleRebuildResult
     public bool DryRun { get; init; }
     public DateTime FromUtc { get; init; }
     public int InputFilesConsidered { get; init; }
+    /// <summary>Included slit rows with NDT Pipes &gt; 0 (batch numbers assigned on rebuild).</summary>
     public int SlitRowsReplayed { get; init; }
+    /// <summary>All included slit rows (includes NDT Pipes = 0; output row written with empty batch column).</summary>
+    public int SlitRowsIncluded { get; init; }
     public int BundlesClosed { get; init; }
     public int OutputSlitFilesWritten { get; init; }
     public NdtTraceabilityPurgeResult? TraceabilityPurge { get; init; }
@@ -118,9 +121,12 @@ public sealed class NdtBundleRebuildService : INdtBundleRebuildService
                 .ToDictionary(kv => kv.Key, kv => kv.Value.PoNumber)
             : new Dictionary<int, string>();
 
+        var slitRowsIncluded = events.Count;
+        var slitRowsWithNdtPipes = events.Count(e => e.Record.NdtPipes > 0);
+
         if (request.DryRun)
         {
-            var millPreview = events
+            var slitsWithNdtByMill = events
                 .Where(e => e.Record.NdtPipes > 0)
                 .GroupBy(e => e.Record.MillNo)
                 .ToDictionary(g => g.Key, g => g.Count());
@@ -133,11 +139,12 @@ public sealed class NdtBundleRebuildService : INdtBundleRebuildService
                 ProductionYear = productionYear,
                 TargetPoByMill = targetPoByMill,
                 InputFilesConsidered = loadResult.FilesConsidered,
-                SlitRowsReplayed = events.Count(e => e.Record.NdtPipes > 0),
+                SlitRowsIncluded = slitRowsIncluded,
+                SlitRowsReplayed = slitRowsWithNdtPipes,
                 SlitRowsExcluded = loadResult.ExcludedCount,
                 ExcludedSamples = excludedSamples,
                 Message = "Dry run completed. No files or database rows were modified.",
-                MillMaxSequence = millPreview,
+                MillMaxSequence = slitsWithNdtByMill,
                 Warnings = warnings
             };
         }
@@ -242,7 +249,8 @@ public sealed class NdtBundleRebuildService : INdtBundleRebuildService
             ProductionYear = productionYear,
             TargetPoByMill = targetPoByMill,
             InputFilesConsidered = loadResult.FilesConsidered,
-            SlitRowsReplayed = events.Count(e => e.Record.NdtPipes > 0),
+            SlitRowsIncluded = slitRowsIncluded,
+            SlitRowsReplayed = slitRowsWithNdtPipes,
             SlitRowsExcluded = loadResult.ExcludedCount,
             ExcludedSamples = excludedSamples,
             BundlesClosed = bundlesClosed,

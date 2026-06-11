@@ -204,8 +204,11 @@ Use this **before** purge/rebuild. Dry run does **not** delete or modify CSV/SQL
 | `RebuildPlannedMonth` | `6` |
 | `ActiveProductionYear` | `2026` |
 | `RebuildFromUtc` | `2026-06-01T00:00:00Z` |
+| `MinSourceFileLastWriteUtc` | `2026-05-25T00:00:00Z` — aligns live worker + rebuild file scan |
+| `MillSlitLive.Enabled` | `false` during cutover |
+| `PlcHandshake.Enabled` | `false` during cutover |
 
-After successful rebuild and validation, set `EnableSlitMonitoringWorker` and `EnableNdtTagZplAndPrint` back to `true` and restart the service.
+After successful rebuild and validation, run `scripts/post-rebuild-enable-production.ps1` or set `EnableSlitMonitoringWorker`, `EnableNdtTagZplAndPrint`, `EnableUploadNdtBundleScheduler`, `MillSlitLive.Enabled`, and `PlcHandshake.Enabled` back to `true`, then restart the service.
 
 ### Deploy latest code
 
@@ -233,7 +236,8 @@ cd C:\path\to\NDTPrintAPI
 |-------|----------------|
 | `targetPoByMill` | Mill 1–4 June POs (e.g. 1000058678, 1000058659, …) |
 | `startingSequenceByMill` | Non-zero per mill if May bundles exist in SQL |
-| `slitRowsReplayed` | Reasonable slit count for June |
+| `slitRowsIncluded` | All June slits (includes NDT Pipes = 0) |
+| `slitRowsReplayed` | June slits with NDT Pipes > 0 |
 | `slitRowsExcluded` | May carryover slits (Planned Month 5 / May timestamps) |
 | `excludedSamples` | Sample exclusion reasons |
 
@@ -255,6 +259,41 @@ cd C:\path\to\NDTPrintAPI
 
 ### After dry run passes
 
-1. Backup SQL, `NdtBundleRuntimeState.json`, and NDT output folders.
-2. Run `.\scripts\rebuild-ndt-june2026.ps1 -ExecuteRebuild` (still with slit worker and ZPL off).
-3. Validate `GET /api/Status/mill-sequences`, then re-enable live settings and restart.
+1. **Backup** (on VM):
+
+   ```powershell
+   .\scripts\backup-ndt-june2026.ps1
+   # optional: -BackupRoot "D:\Backups\NDT-June2026-Rebuild"
+   ```
+
+   Backs up `JazeeraMES_Prod`, `NdtBundleRuntimeState.json`, and NDT output folders (not source Input Slit inboxes).
+
+2. **Execute rebuild** (slit worker and ZPL must stay off):
+
+   ```powershell
+   .\scripts\rebuild-ndt-june2026.ps1 -ExecuteRebuild -SkipDryRun
+   ```
+
+3. Validate `GET /api/Status/mill-sequences`, spot-check output CSVs and SQL, then:
+
+   ```powershell
+   .\scripts\post-rebuild-enable-production.ps1
+   ```
+
+---
+
+## 12. VM cutover checklist (June 2026)
+
+| Step | Action |
+|------|--------|
+| 1 | `git pull` on VM; `dotnet publish` to `C:\Apps\NdtBundleService` (or your deploy path) |
+| 2 | Confirm `appsettings.Production.json` cutover flags (`EnableSlitMonitoringWorker=false`, etc.) |
+| 3 | Stop Windows Service if running; start app (service or F5) with **Production** environment |
+| 4 | `.\scripts\rebuild-dry-run.ps1` — confirm `slitRowsIncluded` / `slitRowsReplayed` > 0 |
+| 5 | `.\scripts\backup-ndt-june2026.ps1` |
+| 6 | `.\scripts\rebuild-ndt-june2026.ps1 -ExecuteRebuild -SkipDryRun` — type `YES` when prompted |
+| 7 | Validate mill sequences, bundle CSVs, SQL traceability |
+| 8 | `.\scripts\post-rebuild-enable-production.ps1` |
+| 9 | Monitor first live slits; physical labels on new bundles only (old labels not reprinted) |
+
+**Do not** delete `Input Slit` or `Input Slit Accepted` source folders. Purge affects derived NDT output, bundle summaries, and SQL for June POs only.

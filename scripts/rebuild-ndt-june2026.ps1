@@ -1,12 +1,13 @@
-# Rebuild NDT bundle numbers, CSVs, and SQL from June 1 2026 while mills may keep running.
-# NdtBundleService must be RUNNING (API on port 5000) with EnableSlitMonitoringWorker=false.
-# Run scripts/rebuild-dry-run.ps1 first. Physical labels are NOT reprinted when ZPL is disabled.
+# Rebuild NDT bundle numbers, CSVs, and SQL for June 2026 planned production.
+# NdtBundleService must be RUNNING with EnableSlitMonitoringWorker=false and ZPL disabled.
+# Run scripts/rebuild-dry-run.ps1 and scripts/backup-ndt-june2026.ps1 first.
 
 param(
     [string]$ApiBase = "http://localhost:5000",
     [string]$FromUtc = "2026-06-01T00:00:00Z",
     [switch]$SkipDryRun,
-    [switch]$ExecuteRebuild
+    [switch]$ExecuteRebuild,
+    [int]$TimeoutSec = 3600
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,9 +16,10 @@ function Invoke-NdtApi {
     param([string]$Method, [string]$Path, $Body = $null)
     $uri = "$ApiBase$Path"
     if ($Body) {
-        return Invoke-RestMethod -Method $Method -Uri $uri -ContentType "application/json" -Body ($Body | ConvertTo-Json -Depth 6)
+        return Invoke-RestMethod -Method $Method -Uri $uri -ContentType "application/json" `
+            -Body ($Body | ConvertTo-Json -Depth 8) -TimeoutSec $TimeoutSec
     }
-    return Invoke-RestMethod -Method $Method -Uri $uri
+    return Invoke-RestMethod -Method $Method -Uri $uri -TimeoutSec $TimeoutSec
 }
 
 Write-Host "=== NDT rebuild preflight ===" -ForegroundColor Cyan
@@ -42,14 +44,26 @@ if (-not $SkipDryRun) {
         source = "InputSlitCsv"
     }
     $dry | ConvertTo-Json -Depth 8
+    if ($dry.slitRowsReplayed -le 0) {
+        Write-Host "ERROR: slitRowsReplayed is 0. Do not execute rebuild." -ForegroundColor Red
+        exit 1
+    }
 }
 
 if (-not $ExecuteRebuild) {
-    Write-Host "`nStopped before destructive rebuild. After backup, run: .\scripts/rebuild-ndt-june2026.ps1 -ExecuteRebuild" -ForegroundColor Yellow
+    Write-Host "`nStopped before destructive rebuild." -ForegroundColor Yellow
+    Write-Host '  1. .\scripts\backup-ndt-june2026.ps1'
+    Write-Host '  2. .\scripts\rebuild-ndt-june2026.ps1 -ExecuteRebuild -SkipDryRun'
     exit 0
 }
 
-Write-Host "`n=== Purge + rebuild (EnableSlitMonitoringWorker must be false in appsettings) ===" -ForegroundColor Red
+$confirm = Read-Host "`nPURGE + REBUILD will delete June NDT SQL/CSV and regenerate. Type YES to continue"
+if ($confirm -ne "YES") {
+    Write-Host "Aborted." -ForegroundColor Yellow
+    exit 0
+}
+
+Write-Host "`n=== Purge + rebuild ===" -ForegroundColor Red
 $body = @{
     fromUtc = $FromUtc
     plannedMonth = 6
@@ -68,5 +82,4 @@ $result | ConvertTo-Json -Depth 8
 Write-Host "`n=== Mill sequences after rebuild ===" -ForegroundColor Cyan
 Invoke-NdtApi -Method GET -Path "/api/Status/mill-sequences" | ConvertTo-Json -Depth 8
 
-Write-Host "`nRe-enable ZPL and start NdtBundleService when validated." -ForegroundColor Green
-Write-Host "POST $ApiBase/api/Status/zpl-generation  body: { `"enabled`": true }"
+Write-Host "`nValidate output, then run: .\scripts\post-rebuild-enable-production.ps1" -ForegroundColor Green
