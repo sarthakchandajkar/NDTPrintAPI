@@ -933,7 +933,7 @@ END";
         var poList = poNumbers.Select(InputSlitCsvParsing.NormalizePo).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var inClause = string.Join(", ", poList.Select((_, i) => $"@Po{i}"));
 
-        var upload = await ExecuteDeleteByPoListAsync(conn, $"DELETE FROM dbo.Upload_Bundle_Row WHERE PO_Number IN ({inClause})", poList, cancellationToken).ConfigureAwait(false);
+        var upload = await ExecuteDeleteByPoListAsync(conn, $"DELETE FROM dbo.Upload_Bundle_Row WHERE PO_NO IN ({inClause})", poList, cancellationToken).ConfigureAwait(false);
         var manual = await ExecuteDeleteByPoListAsync(conn, $"DELETE FROM dbo.Manual_Station_Run WHERE PO_Number IN ({inClause})", poList, cancellationToken).ConfigureAwait(false);
         var process = await ExecuteDeleteByPoListAsync(conn, $"DELETE FROM dbo.NDT_Process_Consolidated WHERE PO_Number IN ({inClause})", poList, cancellationToken).ConfigureAwait(false);
         var output = await ExecuteDeleteByPoListAsync(conn, $"DELETE FROM dbo.Output_Slit_Row WHERE PO_Number IN ({inClause})", poList, cancellationToken).ConfigureAwait(false);
