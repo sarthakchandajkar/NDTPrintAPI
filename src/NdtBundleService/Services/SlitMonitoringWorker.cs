@@ -26,6 +26,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
     private readonly ISqlTraceabilityWriteTracker _sqlWriteTracker;
     private readonly IWipBundleRunningPoProvider _wipRunningPo;
     private readonly IMillNdtCountReader _millNdtCountReader;
+    private readonly IPoPlanRegistry _poPlanRegistry;
     private readonly ILogger<SlitMonitoringWorker> _logger;
 
     // Per input path: last LastWriteTimeUtc we treated as fully handled (seed baseline or successful run).
@@ -43,6 +44,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         ISqlTraceabilityWriteTracker sqlWriteTracker,
         IWipBundleRunningPoProvider wipRunningPo,
         IMillNdtCountReader millNdtCountReader,
+        IPoPlanRegistry poPlanRegistry,
         ILogger<SlitMonitoringWorker> logger)
     {
         _optionsMonitor = optionsMonitor;
@@ -55,11 +57,28 @@ public sealed class SlitMonitoringWorker : BackgroundService
         _sqlWriteTracker = sqlWriteTracker;
         _wipRunningPo = wipRunningPo;
         _millNdtCountReader = millNdtCountReader;
+        _poPlanRegistry = poPlanRegistry;
         _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (!_optionsMonitor.CurrentValue.EnableSlitMonitoringWorker)
+        {
+            _logger.LogWarning(
+                "SlitMonitoringWorker is disabled (NdtBundle:EnableSlitMonitoringWorker=false). Input slits are not processed until re-enabled.");
+            try
+            {
+                await Task.Delay(Timeout.Infinite, stoppingToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // shutdown
+            }
+
+            return;
+        }
+
         if (!await WaitForInputSlitFolderExistsAsync(stoppingToken).ConfigureAwait(false))
             return;
 
@@ -238,6 +257,16 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
             try
             {
+                PoPlanRegistrySnapshot? poRegistry = null;
+                int? activePlannedMonth = null;
+                int? productionYear = null;
+                if (o.EnablePlannedMonthSlitFilter)
+                {
+                    poRegistry = await _poPlanRegistry.GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
+                    activePlannedMonth = ProductionMonthEligibility.ResolveActivePlannedMonth(o);
+                    productionYear = ProductionMonthEligibility.ResolveProductionYear(o, activePlannedMonth.Value);
+                }
+
                 var (headerLine, rows, ndtColumnIndex) = await ReadSlitFileWithRawLinesAsync(fileFull, cancellationToken).ConfigureAwait(false);
 
                 var qualifyingForLive = rows
@@ -308,6 +337,28 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     }
 
                     var record = row.Record;
+
+                    if (poRegistry is not null && activePlannedMonth.HasValue && productionYear.HasValue)
+                    {
+                        poRegistry.TryGet(record.MillNo, record.PoNumber, out var poEntry);
+                        if (!ProductionMonthEligibility.ShouldIncludeSlitRow(
+                                record,
+                                poEntry,
+                                productionYear.Value,
+                                activePlannedMonth.Value,
+                                out var excludeReason))
+                        {
+                            _logger.LogWarning(
+                                "Skipping Input Slit row in {File} (row {Row}): {Reason}",
+                                fileFull,
+                                sourceRowNumber,
+                                excludeReason);
+                            outputLines.Add(row.RawLine.TrimEnd() + ",");
+                            sourceRowNumber++;
+                            continue;
+                        }
+                    }
+
                     var useLiveThisRow = liveSingleSlitRow
                                          && record.MillNo == live.ApplyToMillNo
                                          && !string.IsNullOrWhiteSpace(record.PoNumber);

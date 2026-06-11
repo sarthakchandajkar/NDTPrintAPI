@@ -28,6 +28,10 @@ namespace NdtBundleService.Controllers;
     private readonly IWipBundleRunningPoProvider _wipBundleRunningPo;
     private readonly IMillNdtCountReader _millNdtCountReader;
     private readonly IPoEndWorkflowService _poEndWorkflow;
+    private readonly INdtBundleRebuildService _rebuildService;
+    private readonly INdtBundleRepository _bundleRepository;
+    private readonly INdtBundleRuntimeStateStore _runtimeState;
+    private readonly IPoPlanRegistry _poPlanRegistry;
     private readonly ILogger<TestController> _logger;
     private readonly NdtBundleOptions _options;
 
@@ -43,6 +47,10 @@ namespace NdtBundleService.Controllers;
         IWipBundleRunningPoProvider wipBundleRunningPo,
         IMillNdtCountReader millNdtCountReader,
         IPoEndWorkflowService poEndWorkflow,
+        INdtBundleRebuildService rebuildService,
+        INdtBundleRepository bundleRepository,
+        INdtBundleRuntimeStateStore runtimeState,
+        IPoPlanRegistry poPlanRegistry,
         ICurrentPoPlanService? currentPoPlanService = null)
     {
         _bundleTagPrinter = bundleTagPrinter;
@@ -54,6 +62,10 @@ namespace NdtBundleService.Controllers;
         _wipBundleRunningPo = wipBundleRunningPo;
         _millNdtCountReader = millNdtCountReader;
         _poEndWorkflow = poEndWorkflow;
+        _rebuildService = rebuildService;
+        _bundleRepository = bundleRepository;
+        _runtimeState = runtimeState;
+        _poPlanRegistry = poPlanRegistry;
         _currentPoPlanService = currentPoPlanService;
         _logger = logger;
         _options = options.Value;
@@ -70,6 +82,19 @@ namespace NdtBundleService.Controllers;
         public string PoNumber { get; set; } = string.Empty;
         public int MillNo { get; set; }
         public bool DryRun { get; set; } = true;
+    }
+
+    public sealed class RebuildNdtFromDateRequest
+    {
+        /// <summary>UTC cutoff (ISO-8601). Defaults to NdtBundle:RebuildFromUtc or 2026-06-01T00:00:00Z.</summary>
+        public string? FromUtc { get; set; }
+        /// <summary>SAP planned production month (e.g. 6 = June). Defaults to NdtBundle:RebuildPlannedMonth.</summary>
+        public int? PlannedMonth { get; set; }
+        public int? ProductionYear { get; set; }
+        public bool DryRun { get; set; } = true;
+        public bool PurgeExistingFromDate { get; set; }
+        public string Source { get; set; } = "InputSlitCsv";
+        public Dictionary<int, int>? StartingSequenceByMill { get; set; }
     }
 
     public sealed class WipInfoDto
@@ -1080,6 +1105,215 @@ ORDER BY
         {
             _logger.LogError(ex, "Print dummy bundle failed.");
             return StatusCode(500, new { Message = "Print failed: " + ex.Message, Error = ex.ToString() });
+        }
+    }
+
+    /// <summary>
+    /// Pre-flight for June rebuild: recommended <c>StartingSequenceByMill</c>, current SQL max sequences, and duplicate bundle checks.
+    /// Service may be stopped; mills can keep running (input slits accumulate for replay).
+    /// </summary>
+    [HttpGet("rebuild-preflight")]
+    public async Task<IActionResult> RebuildPreflight(
+        [FromQuery] string? fromUtc,
+        [FromQuery] int? plannedMonth,
+        [FromQuery] int? productionYear,
+        CancellationToken cancellationToken)
+    {
+        var fromUtcText = !string.IsNullOrWhiteSpace(fromUtc)
+            ? fromUtc.Trim()
+            : !string.IsNullOrWhiteSpace(_options.RebuildFromUtc)
+                ? _options.RebuildFromUtc!.Trim()
+                : "2026-06-01T00:00:00Z";
+
+        if (!DateTime.TryParse(fromUtcText, null, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out var cutoff))
+            return BadRequest(new { Message = "fromUtc must be a valid ISO-8601 UTC instant.", FromUtc = fromUtcText });
+
+        var targetPlannedMonth = plannedMonth ?? _options.RebuildPlannedMonth;
+        var targetYear = productionYear
+            ?? (targetPlannedMonth.HasValue
+                ? ProductionMonthEligibility.ResolveProductionYear(_options, targetPlannedMonth.Value)
+                : (int?)null);
+
+        var registry = await _poPlanRegistry.GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
+        var targetPoByMill = targetPlannedMonth.HasValue
+            ? registry.GetPrimaryPoByPlannedMonth(targetPlannedMonth.Value)
+                .ToDictionary(kv => kv.Key, kv => kv.Value.PoNumber)
+            : new Dictionary<int, string>();
+        Dictionary<string, object>? targetPoDetails = null;
+        if (targetPlannedMonth.HasValue)
+        {
+            targetPoDetails = registry.GetPrimaryPoByPlannedMonth(targetPlannedMonth.Value)
+                .ToDictionary(
+                    kv => $"Mill-{kv.Key}",
+                    kv => (object)new { kv.Value.PoNumber, kv.Value.PlannedMonth, kv.Value.SourceFile });
+        }
+
+        IReadOnlyDictionary<int, int> startingSequence;
+        if (targetPlannedMonth.HasValue)
+        {
+            var priorPos = registry.GetPoNumbersBeforePlannedMonth(targetPlannedMonth.Value);
+            startingSequence = await _bundleRepository
+                .GetMaxSequenceByMillForPoNumbersAsync(priorPos, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        else
+        {
+            startingSequence = await _bundleRepository
+                .GetMaxSequenceByMillBeforeUtcAsync(cutoff, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        var currentMax = await _bundleRepository
+            .GetMaxSequenceByMillForCurrentYearAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        MillSequenceStatusSnapshot? runtimeStatus = null;
+        try
+        {
+            runtimeStatus = await _runtimeState.GetStatusAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Runtime state not initialized during rebuild preflight.");
+        }
+
+        var duplicateBundleCollisions = 0;
+        if (SqlTraceabilityConnection.IsSqlEnabled(_options))
+        {
+            try
+            {
+                await using var conn = SqlTraceabilityConnection.Create(_options);
+                await SqlTraceabilityConnection.OpenAsync(conn, _logger, "rebuild preflight", cancellationToken).ConfigureAwait(false);
+                const string sql = @"
+SELECT COUNT(*) FROM (
+    SELECT Bundle_No
+    FROM dbo.NDT_Bundle
+    WHERE PrintedAt >= @FromUtc
+    GROUP BY Bundle_No
+    HAVING COUNT(DISTINCT PO_Number) > 1
+) x";
+                await using var cmd = new SqlCommand(sql, conn);
+                cmd.Parameters.AddWithValue("@FromUtc", cutoff);
+                duplicateBundleCollisions = (int)(await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) ?? 0);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not query duplicate bundle numbers for rebuild preflight.");
+            }
+        }
+
+        return Ok(new
+        {
+            FromUtc = cutoff,
+            PlannedMonth = targetPlannedMonth,
+            ProductionYear = targetYear,
+            TargetPoByMill = targetPoByMill,
+            TargetPoDetails = targetPoDetails,
+            ZplPrintEnabled = _zplToggle.IsEnabled,
+            RequireSequenceHydration = _options.RequireSequenceHydration,
+            EnablePlannedMonthSlitFilter = _options.EnablePlannedMonthSlitFilter,
+            StartingSequenceByMill = startingSequence,
+            StartingSequencesFormatted = startingSequence.ToDictionary(
+                kv => $"Mill-{kv.Key}",
+                kv => NdtBundleSequence.Format(kv.Value, kv.Key)),
+            CurrentMaxSequenceByMill = currentMax,
+            CurrentMaxFormatted = currentMax.ToDictionary(
+                kv => $"Mill-{kv.Key}",
+                kv => NdtBundleSequence.Format(kv.Value, kv.Key)),
+            RuntimeState = runtimeStatus,
+            DuplicateBundleNumbersAfterCutoff = duplicateBundleCollisions,
+            RecommendedSteps = new[]
+            {
+                "Backup SQL, NdtBundleRuntimeState.json, OutputBundleFolder, and BundleSummaryOutputFolder.",
+                "Start NdtBundleService with EnableSlitMonitoringWorker=false (mills may keep running; missed slits can be reconciled later).",
+                "POST /api/Status/zpl-generation { \"enabled\": false }.",
+                "POST /api/Test/rebuild-ndt-from-date with dryRun=true.",
+                "POST /api/Test/rebuild-ndt-from-date with dryRun=false, purgeExistingFromDate=true, StartingSequenceByMill from this response.",
+                "GET /api/Status/mill-sequences to verify counters.",
+                "Set EnableSlitMonitoringWorker=true, POST /api/Status/zpl-generation { \"enabled\": true }, restart NdtBundleService."
+            }
+        });
+    }
+
+    /// <summary>
+    /// Replays input slit history from a cutoff date to regenerate NDT batch numbers, per-slit CSVs, bundle summary CSVs, and SQL traceability.
+    /// Set NdtBundle:EnableNdtTagZplAndPrint=false (or disable via POST /api/Status/zpl-generation) before running with DryRun=false so physical labels are not reprinted.
+    /// Recommended cutover: stop service, backup SQL/CSV/state file, dry-run, purge+rebuild during mills-off window, verify mill sequences, re-enable print, start service.
+    /// </summary>
+    [HttpPost("rebuild-ndt-from-date")]
+    public async Task<IActionResult> RebuildNdtFromDate([FromBody] RebuildNdtFromDateRequest request, CancellationToken cancellationToken)
+    {
+        var fromUtcText = !string.IsNullOrWhiteSpace(request.FromUtc)
+            ? request.FromUtc.Trim()
+            : !string.IsNullOrWhiteSpace(_options.RebuildFromUtc)
+                ? _options.RebuildFromUtc!.Trim()
+                : "2026-06-01T00:00:00Z";
+
+        if (!DateTime.TryParse(fromUtcText, null, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out var fromUtc))
+            return BadRequest(new { Message = "FromUtc must be a valid ISO-8601 UTC instant.", FromUtc = fromUtcText });
+
+        if (!request.DryRun && _zplToggle.IsEnabled)
+        {
+            return BadRequest(new
+            {
+                Message = "Disable ZPL/print before rebuild (NdtBundle:EnableNdtTagZplAndPrint=false or POST /api/Status/zpl-generation) to avoid reprinting physical labels."
+            });
+        }
+
+        var source = string.Equals(request.Source, "InputSlitRow", StringComparison.OrdinalIgnoreCase)
+            ? NdtRebuildSource.InputSlitRow
+            : NdtRebuildSource.InputSlitCsv;
+
+        var plannedMonth = request.PlannedMonth ?? _options.RebuildPlannedMonth;
+
+        _logger.LogWarning(
+            "NDT rebuild requested from {FromUtc:o} PlannedMonth={PlannedMonth} DryRun={DryRun} Purge={Purge} Source={Source}.",
+            fromUtc,
+            plannedMonth,
+            request.DryRun,
+            request.PurgeExistingFromDate,
+            source);
+
+        try
+        {
+            var result = await _rebuildService.RebuildFromDateAsync(new NdtBundleRebuildRequest
+            {
+                FromUtc = fromUtc,
+                PlannedMonth = plannedMonth,
+                ProductionYear = request.ProductionYear ?? _options.ActiveProductionYear,
+                DryRun = request.DryRun,
+                PurgeExistingFromDate = request.PurgeExistingFromDate,
+                Source = source,
+                StartingSequenceByMill = request.StartingSequenceByMill
+            }, cancellationToken).ConfigureAwait(false);
+
+            return Ok(new
+            {
+                result.Message,
+                result.DryRun,
+                FromUtc = result.FromUtc,
+                result.PlannedMonth,
+                result.ProductionYear,
+                result.TargetPoByMill,
+                result.InputFilesConsidered,
+                result.SlitRowsReplayed,
+                result.SlitRowsExcluded,
+                result.ExcludedSamples,
+                result.BundlesClosed,
+                result.OutputSlitFilesWritten,
+                result.MillMaxSequence,
+                MillSequencesFormatted = result.MillMaxSequence.ToDictionary(
+                    kv => $"Mill-{kv.Key}",
+                    kv => NdtBundleSequence.Format(kv.Value, kv.Key)),
+                TraceabilityPurge = result.TraceabilityPurge,
+                CsvPurge = result.CsvPurge,
+                result.Warnings,
+                ZplPrintEnabled = _zplToggle.IsEnabled
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "NDT rebuild failed from {FromUtc:o}.", fromUtc);
+            return StatusCode(500, new { Message = ex.Message });
         }
     }
 }

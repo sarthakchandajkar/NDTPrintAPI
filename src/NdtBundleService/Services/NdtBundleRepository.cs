@@ -84,6 +84,21 @@ public sealed class NdtBundleRepository : INdtBundleRepository
     {
         await using var conn = SqlTraceabilityConnection.Create(Opt);
         await SqlTraceabilityConnection.OpenAsync(conn, _logger, "NDT_Bundle upsert", cancellationToken).ConfigureAwait(false);
+
+        const string checkSql = "SELECT PO_Number FROM dbo.NDT_Bundle WHERE Bundle_No = @BundleNo";
+        await using (var checkCmd = new Microsoft.Data.SqlClient.SqlCommand(checkSql, conn))
+        {
+            checkCmd.Parameters.AddWithValue("@BundleNo", record.BundleNo);
+            var existingPo = await checkCmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
+            if (!string.IsNullOrEmpty(existingPo)
+                && !InputSlitCsvParsing.PoEquals(existingPo, record.PoNumber))
+            {
+                throw new InvalidOperationException(
+                    $"Bundle_No {record.BundleNo} already exists for PO {InputSlitCsvParsing.NormalizePo(existingPo)}; " +
+                    $"refusing to overwrite with PO {InputSlitCsvParsing.NormalizePo(record.PoNumber)}.");
+            }
+        }
+
         const string sql = @"
 IF EXISTS (SELECT 1 FROM dbo.NDT_Bundle WHERE Bundle_No = @BundleNo)
 BEGIN
@@ -955,4 +970,438 @@ ORDER BY SlitNo";
 
     private string GetBundleSummaryFolder() =>
         NdtBundleOutputPaths.ResolveBundleArtifactsFolder(Opt) ?? string.Empty;
+
+    public async Task<NdtBundleCsvPurgeResult> PurgeDerivedCsvAndBundlesFromDateAsync(DateTime fromUtc, CancellationToken cancellationToken)
+    {
+        var summaryDeleted = 0;
+        var perSlitDeleted = 0;
+        var processDeleted = 0;
+        var sqlDeleted = 0;
+
+        var summaryFolder = GetBundleSummaryFolder();
+        if (!string.IsNullOrWhiteSpace(summaryFolder) && Directory.Exists(summaryFolder))
+        {
+            foreach (var path in Directory.EnumerateFiles(summaryFolder, "NDT_Bundle_*.csv", SearchOption.TopDirectoryOnly))
+            {
+                if (ShouldDeleteBundleSummaryFile(path, fromUtc))
+                {
+                    File.Delete(path);
+                    summaryDeleted++;
+                }
+            }
+        }
+
+        var outputFolder = (Opt.OutputBundleFolder ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(outputFolder) && Directory.Exists(outputFolder))
+        {
+            foreach (var path in Directory.EnumerateFiles(outputFolder, "*.csv", SearchOption.TopDirectoryOnly))
+            {
+                if (NdtBundleOutputPaths.IsBundleSummaryFileName(Path.GetFileName(path)))
+                    continue;
+                if (ShouldDeletePerSlitOutputFile(path, fromUtc))
+                {
+                    File.Delete(path);
+                    perSlitDeleted++;
+                }
+            }
+        }
+
+        var processFolder = (Opt.NdtProcessOutputFolder ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(processFolder) && Directory.Exists(processFolder))
+        {
+            foreach (var path in Directory.EnumerateFiles(processFolder, "NDT process_*", SearchOption.TopDirectoryOnly))
+            {
+                try
+                {
+                    if (File.GetLastWriteTimeUtc(path) >= fromUtc)
+                    {
+                        File.Delete(path);
+                        processDeleted++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Could not delete NDT process file {Path}.", path);
+                }
+            }
+        }
+
+        if (UseDatabase)
+        {
+            try
+            {
+                await using var conn = SqlTraceabilityConnection.Create(Opt);
+                await SqlTraceabilityConnection.OpenAsync(conn, _logger, "NDT_Bundle purge", cancellationToken).ConfigureAwait(false);
+                const string sql = "DELETE FROM dbo.NDT_Bundle WHERE PrintedAt >= @FromUtc";
+                await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+                cmd.Parameters.AddWithValue("@FromUtc", fromUtc);
+                sqlDeleted = await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to purge NDT_Bundle rows from {FromUtc:o}.", fromUtc);
+            }
+        }
+
+        return new NdtBundleCsvPurgeResult
+        {
+            BundleSummaryFilesDeleted = summaryDeleted,
+            PerSlitOutputFilesDeleted = perSlitDeleted,
+            NdtProcessFilesDeleted = processDeleted,
+            SqlBundlesDeleted = sqlDeleted
+        };
+    }
+
+    private static bool ShouldDeleteBundleSummaryFile(string path, DateTime fromUtc)
+    {
+        try
+        {
+            if (File.GetLastWriteTimeUtc(path) >= fromUtc)
+                return true;
+        }
+        catch
+        {
+            return false;
+        }
+
+        var name = Path.GetFileNameWithoutExtension(path);
+        if (!name.StartsWith("NDT_Bundle_", StringComparison.OrdinalIgnoreCase))
+            return false;
+        var batchNo = name["NDT_Bundle_".Length..];
+        for (var mill = 1; mill <= 4; mill++)
+        {
+            if (NdtBundleSequence.TryParseSequenceForCurrentYear(batchNo, mill, out _))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static bool ShouldDeletePerSlitOutputFile(string path, DateTime fromUtc)
+    {
+        try
+        {
+            if (File.GetLastWriteTimeUtc(path) >= fromUtc)
+                return true;
+        }
+        catch
+        {
+            // fall through to name parse
+        }
+
+        var name = Path.GetFileNameWithoutExtension(path);
+        var parts = name.Split('_');
+        if (parts.Length < 3)
+            return false;
+        if (parts[1].Length == 8
+            && DateTime.TryParseExact(parts[1], "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var fileDate))
+        {
+            return fileDate.Date >= fromUtc.Date;
+        }
+
+        return false;
+    }
+
+    public Task<IReadOnlyDictionary<int, int>> GetMaxSequenceByMillForCurrentYearAsync(CancellationToken cancellationToken) =>
+        GetMaxSequenceByMillAsync(beforeUtc: null, cancellationToken);
+
+    public Task<IReadOnlyDictionary<int, int>> GetMaxSequenceByMillBeforeUtcAsync(DateTime beforeUtc, CancellationToken cancellationToken) =>
+        GetMaxSequenceByMillAsync(beforeUtc, cancellationToken);
+
+    private async Task<IReadOnlyDictionary<int, int>> GetMaxSequenceByMillAsync(DateTime? beforeUtc, CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<int, int>();
+
+        if (UseDatabase)
+        {
+            try
+            {
+                var fromSql = await GetMaxSequenceByMillFromSqlAsync(beforeUtc, cancellationToken).ConfigureAwait(false);
+                MergeMaxSequences(result, fromSql);
+                if (result.Count > 0)
+                    return result;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to read max NDT bundle sequence per mill from SQL.");
+            }
+        }
+
+        if (Opt.AllowCsvFallbackForBundleReads)
+        {
+            var fromCsv = await GetMaxSequenceByMillFromCsvAsync(beforeUtc, cancellationToken).ConfigureAwait(false);
+            MergeMaxSequences(result, fromCsv);
+        }
+
+        return result;
+    }
+
+    private async Task<Dictionary<int, int>> GetMaxSequenceByMillFromSqlAsync(DateTime? beforeUtc, CancellationToken cancellationToken)
+    {
+        var yy = (DateTime.UtcNow.Year % 100).ToString("D2", CultureInfo.InvariantCulture);
+        await using var conn = SqlTraceabilityConnection.Create(Opt);
+        await SqlTraceabilityConnection.OpenAsync(conn, _logger, "max bundle sequence", cancellationToken).ConfigureAwait(false);
+
+        var sql = @"
+SELECT Mill_No,
+       MAX(TRY_CAST(SUBSTRING(Bundle_No, 6, 5) AS INT)) AS MaxSeq
+FROM dbo.NDT_Bundle
+WHERE LEN(LTRIM(RTRIM(Bundle_No))) = 10
+  AND LEFT(Bundle_No, 2) = '12'
+  AND SUBSTRING(Bundle_No, 3, 2) = @Yy
+  AND TRY_CAST(SUBSTRING(Bundle_No, 5, 1) AS INT) BETWEEN 1 AND 4
+  AND TRY_CAST(SUBSTRING(Bundle_No, 6, 5) AS INT) IS NOT NULL";
+
+        if (beforeUtc.HasValue)
+            sql += " AND PrintedAt < @BeforeUtc";
+
+        sql += " GROUP BY Mill_No";
+
+        await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@Yy", yy);
+        if (beforeUtc.HasValue)
+            cmd.Parameters.AddWithValue("@BeforeUtc", beforeUtc.Value);
+
+        var byMill = new Dictionary<int, int>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var mill = reader.GetInt32(0);
+            if (reader.IsDBNull(1))
+                continue;
+            var seq = reader.GetInt32(1);
+            if (mill is >= 1 and <= 4 && seq > 0)
+                byMill[mill] = seq;
+        }
+
+        return byMill;
+    }
+
+    private async Task<Dictionary<int, int>> GetMaxSequenceByMillFromCsvAsync(DateTime? beforeUtc, CancellationToken cancellationToken)
+    {
+        var byMill = new Dictionary<int, int>();
+        var bundles = await GetBundlesFromCsvAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var bundle in bundles)
+        {
+            if (bundle.MillNo is < 1 or > 4)
+                continue;
+            if (!NdtBundleSequence.TryParseSequenceForCurrentYear(bundle.BundleNo, bundle.MillNo, out var seq))
+                continue;
+            if (beforeUtc.HasValue)
+            {
+                // CSV scan has no PrintedAt; use file mtime on summary CSV when available.
+                var summaryPath = Path.Combine(GetBundleSummaryFolder(), NdtBundleOutputPaths.GetBundleCsvFileName(bundle.BundleNo));
+                if (File.Exists(summaryPath))
+                {
+                    try
+                    {
+                        if (File.GetLastWriteTimeUtc(summaryPath) >= beforeUtc.Value)
+                            continue;
+                    }
+                    catch
+                    {
+                        // include row when mtime unknown
+                    }
+                }
+            }
+
+            if (!byMill.TryGetValue(bundle.MillNo, out var max) || seq > max)
+                byMill[bundle.MillNo] = seq;
+        }
+
+        return byMill;
+    }
+
+    private static void MergeMaxSequences(Dictionary<int, int> target, IReadOnlyDictionary<int, int> source)
+    {
+        foreach (var (mill, seq) in source)
+        {
+            if (mill is < 1 or > 4 || seq <= 0)
+                continue;
+            if (!target.TryGetValue(mill, out var existing) || seq > existing)
+                target[mill] = seq;
+        }
+    }
+
+    public async Task<IReadOnlyDictionary<int, int>> GetMaxSequenceByMillForPoNumbersAsync(
+        IReadOnlySet<string> poNumbers,
+        CancellationToken cancellationToken)
+    {
+        if (poNumbers.Count == 0)
+            return new Dictionary<int, int>();
+
+        var normalized = new HashSet<string>(poNumbers.Select(InputSlitCsvParsing.NormalizePo), StringComparer.OrdinalIgnoreCase);
+        var bundles = await GetBundlesAsync(cancellationToken).ConfigureAwait(false);
+        var byMill = new Dictionary<int, int>();
+        foreach (var bundle in bundles)
+        {
+            if (!normalized.Contains(InputSlitCsvParsing.NormalizePo(bundle.PoNumber)))
+                continue;
+            if (bundle.MillNo is < 1 or > 4)
+                continue;
+            if (!NdtBundleSequence.TryParseSequenceForCurrentYear(bundle.BundleNo, bundle.MillNo, out var seq))
+                continue;
+            if (!byMill.TryGetValue(bundle.MillNo, out var max) || seq > max)
+                byMill[bundle.MillNo] = seq;
+        }
+
+        return byMill;
+    }
+
+    public async Task<NdtBundleCsvPurgeResult> PurgeDerivedForPoNumbersAsync(
+        IReadOnlySet<string> poNumbers,
+        DateTime? alsoFromUtc,
+        CancellationToken cancellationToken)
+    {
+        var summaryDeleted = 0;
+        var perSlitDeleted = 0;
+        var processDeleted = 0;
+        var sqlDeleted = 0;
+
+        if (poNumbers.Count == 0)
+        {
+            return new NdtBundleCsvPurgeResult();
+        }
+
+        var normalized = poNumbers.Select(InputSlitCsvParsing.NormalizePo).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var safeTokens = normalized
+            .Select(p => CsvOutputFileNaming.SanitizeToken(p, "NA"))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var summaryFolder = GetBundleSummaryFolder();
+        if (!string.IsNullOrWhiteSpace(summaryFolder) && Directory.Exists(summaryFolder))
+        {
+            foreach (var path in Directory.EnumerateFiles(summaryFolder, "NDT_Bundle_*.csv", SearchOption.TopDirectoryOnly))
+            {
+                try
+                {
+                    if (alsoFromUtc.HasValue && File.GetLastWriteTimeUtc(path) < alsoFromUtc.Value)
+                        continue;
+                }
+                catch
+                {
+                    // continue with PO match
+                }
+
+                if (await FileMatchesAnyPoAsync(path, normalized, safeTokens, cancellationToken).ConfigureAwait(false))
+                {
+                    File.Delete(path);
+                    summaryDeleted++;
+                }
+            }
+        }
+
+        var outputFolder = (Opt.OutputBundleFolder ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(outputFolder) && Directory.Exists(outputFolder))
+        {
+            foreach (var path in Directory.EnumerateFiles(outputFolder, "*.csv", SearchOption.TopDirectoryOnly))
+            {
+                if (NdtBundleOutputPaths.IsBundleSummaryFileName(Path.GetFileName(path)))
+                    continue;
+
+                var name = Path.GetFileNameWithoutExtension(path);
+                if (!safeTokens.Any(token => name.Contains(token, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+
+                if (alsoFromUtc.HasValue)
+                {
+                    try
+                    {
+                        if (File.GetLastWriteTimeUtc(path) < alsoFromUtc.Value)
+                            continue;
+                    }
+                    catch
+                    {
+                        // delete when PO matches
+                    }
+                }
+
+                File.Delete(path);
+                perSlitDeleted++;
+            }
+        }
+
+        var processFolder = (Opt.NdtProcessOutputFolder ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(processFolder) && Directory.Exists(processFolder))
+        {
+            foreach (var path in Directory.EnumerateFiles(processFolder, "NDT process_*", SearchOption.TopDirectoryOnly))
+            {
+                if (!safeTokens.Any(token => Path.GetFileName(path).Contains(token, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+                try
+                {
+                    if (alsoFromUtc.HasValue && File.GetLastWriteTimeUtc(path) < alsoFromUtc.Value)
+                        continue;
+                    File.Delete(path);
+                    processDeleted++;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Could not delete NDT process file {Path}.", path);
+                }
+            }
+        }
+
+        if (UseDatabase)
+        {
+            try
+            {
+                await using var conn = SqlTraceabilityConnection.Create(Opt);
+                await SqlTraceabilityConnection.OpenAsync(conn, _logger, "NDT_Bundle purge by PO", cancellationToken).ConfigureAwait(false);
+                var inClause = string.Join(", ", normalized.Select((_, i) => $"@Po{i}"));
+                var sql = $"DELETE FROM dbo.NDT_Bundle WHERE PO_Number IN ({inClause})";
+                await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+                for (var i = 0; i < normalized.Count; i++)
+                    cmd.Parameters.AddWithValue($"@Po{i}", normalized[i]);
+                sqlDeleted = await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to purge NDT_Bundle rows for planned-month PO list.");
+            }
+        }
+
+        return new NdtBundleCsvPurgeResult
+        {
+            BundleSummaryFilesDeleted = summaryDeleted,
+            PerSlitOutputFilesDeleted = perSlitDeleted,
+            NdtProcessFilesDeleted = processDeleted,
+            SqlBundlesDeleted = sqlDeleted
+        };
+    }
+
+    private static async Task<bool> FileMatchesAnyPoAsync(
+        string path,
+        IReadOnlyList<string> normalizedPos,
+        IReadOnlySet<string> safeTokens,
+        CancellationToken cancellationToken)
+    {
+        var fileName = Path.GetFileNameWithoutExtension(path);
+        if (safeTokens.Any(token => fileName.Contains(token, StringComparison.OrdinalIgnoreCase)))
+            return true;
+
+        try
+        {
+            await using var stream = File.OpenRead(path);
+            using var reader = new StreamReader(stream);
+            var header = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            if (header is null)
+                return false;
+            var headers = InputSlitCsvParsing.SplitCsvFields(InputSlitCsvParsing.StripBom(header));
+            var poIdx = InputSlitCsvParsing.HeaderIndex(headers, "PO Number", "PO_No", "PO No");
+            if (poIdx < 0)
+                return false;
+            if (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is not { } line)
+                return false;
+            var cols = InputSlitCsvParsing.SplitCsvFields(line);
+            if (poIdx >= cols.Length)
+                return false;
+            var po = InputSlitCsvParsing.NormalizePo(cols[poIdx].Trim());
+            return normalizedPos.Any(p => InputSlitCsvParsing.PoEquals(p, po));
+        }
+        catch
+        {
+            return false;
+        }
+    }
 }

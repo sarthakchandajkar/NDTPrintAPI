@@ -47,6 +47,9 @@ public class NdtBundleOptions
     /// <summary>Polling interval in seconds for scanning input folders and PLC signals.</summary>
     public int PollIntervalSeconds { get; set; } = 5;
 
+    /// <summary>When false, <see cref="SlitMonitoringWorker"/> does not process input slits (use during rebuild while API stays up).</summary>
+    public bool EnableSlitMonitoringWorker { get; set; } = true;
+
     /// <summary>Shop ID for NDT_Batch_No format (2 digits, e.g. 01, 02, 03, 04).</summary>
     public string ShopId { get; set; } = "01";
 
@@ -140,6 +143,27 @@ public class NdtBundleOptions
     /// Leave empty to include all files.
     /// </summary>
     public string? MinSourceFileLastWriteUtc { get; set; }
+
+    /// <summary>Default cutoff for POST /api/Test/rebuild-ndt-from-date when FromUtc is omitted (e.g. <c>2026-06-01T00:00:00Z</c>).</summary>
+    public string? RebuildFromUtc { get; set; }
+
+    /// <summary>Default SAP planned production month for rebuild when PlannedMonth is omitted (e.g. <c>6</c> = June).</summary>
+    public int? RebuildPlannedMonth { get; set; }
+
+    /// <summary>Calendar year for planned-month slit bounds (e.g. <c>2026</c>). When null, derived from current UTC date.</summary>
+    public int? ActiveProductionYear { get; set; }
+
+    /// <summary>Active SAP planned production month for live slit filtering (e.g. <c>6</c>). When null, uses current UTC month.</summary>
+    public int? ActiveProductionPlannedMonth { get; set; }
+
+    /// <summary>When true, live slit processing skips rows whose PO Planned Month does not match <see cref="ActiveProductionPlannedMonth"/>.</summary>
+    public bool EnablePlannedMonthSlitFilter { get; set; } = true;
+
+    /// <summary>
+    /// When true, startup fails if SQL/CSV shows current-year bundles but all mill sequences remain at 0 after hydration
+    /// (prevents assigning duplicate bundle numbers after restart).
+    /// </summary>
+    public bool RequireSequenceHydration { get; set; }
 
     /// <summary>Optional per-mill PLC PO-end signals (Modbus TCP, etc.). Disabled when <see cref="PlcHandshake"/> is enabled.</summary>
     public PlcPoEndOptions PlcPoEnd { get; set; } = new();

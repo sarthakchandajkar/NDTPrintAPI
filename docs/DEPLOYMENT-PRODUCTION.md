@@ -185,3 +185,76 @@ sc.exe delete NdtBundleService
 | 8 | Use Event Log and API/health checks for monitoring |
 
 With this, NdtBundleService runs 24/7 as a Windows Service and restarts automatically after reboots and after failures (when recovery is configured).
+
+---
+
+## 11. June 2026 NDT rebuild — dry run on the VM
+
+Use this **before** purge/rebuild. Dry run does **not** delete or modify CSV/SQL.
+
+### Production config (cutover mode)
+
+`appsettings.Production.json` should include (already set in repo):
+
+| Setting | Value during dry run / rebuild |
+|---------|------------------------------|
+| `EnableSlitMonitoringWorker` | `false` — API stays up; slits are not processed live |
+| `EnableNdtTagZplAndPrint` | `false` — no labels printed |
+| `EnableUploadNdtBundleScheduler` | `false` — optional during cutover |
+| `RebuildPlannedMonth` | `6` |
+| `ActiveProductionYear` | `2026` |
+| `RebuildFromUtc` | `2026-06-01T00:00:00Z` |
+
+After successful rebuild and validation, set `EnableSlitMonitoringWorker` and `EnableNdtTagZplAndPrint` back to `true` and restart the service.
+
+### Deploy latest code
+
+```powershell
+cd C:\Apps\NdtBundleService   # or your deploy folder
+git pull
+dotnet publish src\NdtBundleService\NdtBundleService.csproj -c Release -o C:\Apps\NdtBundleService
+Stop-Service NdtBundleService
+# copy publish output if not publishing in-place
+Start-Service NdtBundleService
+```
+
+### Run dry run (PowerShell on VM)
+
+```powershell
+cd C:\path\to\NDTPrintAPI
+.\scripts\rebuild-dry-run.ps1
+# or if API is on another host:
+.\scripts\rebuild-dry-run.ps1 -ApiBase "http://localhost:5000"
+```
+
+### Review dry-run output
+
+| Field | What to check |
+|-------|----------------|
+| `targetPoByMill` | Mill 1–4 June POs (e.g. 1000058678, 1000058659, …) |
+| `startingSequenceByMill` | Non-zero per mill if May bundles exist in SQL |
+| `slitRowsReplayed` | Reasonable slit count for June |
+| `slitRowsExcluded` | May carryover slits (Planned Month 5 / May timestamps) |
+| `excludedSamples` | Sample exclusion reasons |
+
+### Swagger / curl alternatives
+
+- `GET http://localhost:5000/api/Test/rebuild-preflight?plannedMonth=6&productionYear=2026`
+- `POST http://localhost:5000/api/Test/rebuild-ndt-from-date` with body:
+
+```json
+{
+  "plannedMonth": 6,
+  "productionYear": 2026,
+  "fromUtc": "2026-06-01T00:00:00Z",
+  "dryRun": true,
+  "purgeExistingFromDate": false,
+  "source": "InputSlitCsv"
+}
+```
+
+### After dry run passes
+
+1. Backup SQL, `NdtBundleRuntimeState.json`, and NDT output folders.
+2. Run `.\scripts\rebuild-ndt-june2026.ps1 -ExecuteRebuild` (still with slit worker and ZPL off).
+3. Validate `GET /api/Status/mill-sequences`, then re-enable live settings and restart.
