@@ -21,7 +21,7 @@ function Invoke-NdtApi {
 }
 
 Write-Host "=== NDT rebuild preflight ===" -ForegroundColor Cyan
-$preflightPath = "/api/Test/rebuild-preflight?fromUtc={0}&plannedMonth={1}&productionYear={2}" -f `
+$preflightPath = '/api/Test/rebuild-preflight?fromUtc={0}&plannedMonth={1}&productionYear={2}' -f `
     [uri]::EscapeDataString($FromUtc), 6, 2026
 $preflight = Invoke-NdtApi -Method GET -Path $preflightPath
 $preflight | ConvertTo-Json -Depth 8
@@ -45,7 +45,7 @@ if (-not $SkipDryRun) {
 }
 
 if (-not $ExecuteRebuild) {
-    Write-Host "`nStopped before destructive rebuild. After backup, run: .\scripts\rebuild-ndt-june2026.ps1 -ExecuteRebuild" -ForegroundColor Yellow
+    Write-Host "`nStopped before destructive rebuild. After backup, run: .\scripts/rebuild-ndt-june2026.ps1 -ExecuteRebuild" -ForegroundColor Yellow
     exit 0
 }
 
