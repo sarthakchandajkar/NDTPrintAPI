@@ -21,7 +21,9 @@ function Invoke-NdtApi {
 }
 
 Write-Host "=== NDT rebuild preflight ===" -ForegroundColor Cyan
-$preflight = Invoke-NdtApi -Method GET -Path "/api/Test/rebuild-preflight?fromUtc=$([uri]::EscapeDataString($FromUtc))&plannedMonth=6&productionYear=2026"
+$preflightPath = "/api/Test/rebuild-preflight?fromUtc={0}&plannedMonth={1}&productionYear={2}" -f `
+    [uri]::EscapeDataString($FromUtc), 6, 2026
+$preflight = Invoke-NdtApi -Method GET -Path $preflightPath
 $preflight | ConvertTo-Json -Depth 8
 
 if ($preflight.zplPrintEnabled) {

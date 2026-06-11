@@ -33,7 +33,9 @@ catch {
 }
 
 Write-Host "`n=== Preflight (planned month $PlannedMonth / $ProductionYear) ===" -ForegroundColor Cyan
-$preflight = Invoke-NdtApi -Method GET -Path "/api/Test/rebuild-preflight?fromUtc=$([uri]::EscapeDataString($FromUtc))&plannedMonth=$PlannedMonth&productionYear=$ProductionYear"
+$preflightPath = "/api/Test/rebuild-preflight?fromUtc={0}&plannedMonth={1}&productionYear={2}" -f `
+    [uri]::EscapeDataString($FromUtc), $PlannedMonth, $ProductionYear
+$preflight = Invoke-NdtApi -Method GET -Path $preflightPath
 $preflight | ConvertTo-Json -Depth 8
 
 Write-Host "`nReview targetPoByMill (expected June POs per mill) and startingSequenceByMill before continuing." -ForegroundColor Yellow
