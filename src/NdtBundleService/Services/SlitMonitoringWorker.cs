@@ -634,7 +634,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         var raw = cols[index].Trim();
         if (string.IsNullOrEmpty(raw))
             return null;
-        return DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var dt) ? dt : null;
+        return InputSlitCsvParsing.TryParseSlitDateTime(raw, out var dt) ? dt : null;
     }
 
     private bool IsPlcHandshakeEnabled() =>

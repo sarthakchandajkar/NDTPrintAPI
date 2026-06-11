@@ -390,6 +390,7 @@ public sealed class NdtBundleRebuildService : INdtBundleRebuildService
         var excludedCount = 0;
         var filesConsidered = 0;
 
+        var fileMinUtc = ResolveRebuildFileMinUtc(fromUtc, plannedMonth, productionYear);
         var events = new List<RebuildSlitEvent>();
         foreach (var folder in EnumerateInputSlitFolders())
         {
@@ -398,6 +399,21 @@ public sealed class NdtBundleRebuildService : INdtBundleRebuildService
 
             foreach (var path in InputSlitInboxEnumeration.EnumerateFiles(folder).OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
             {
+                if (fileMinUtc.HasValue)
+                {
+                    try
+                    {
+                        var lwUtc = File.GetLastWriteTimeUtc(path);
+                        if (!SourceFileEligibility.IncludeFileUtc(lwUtc, fileMinUtc))
+                            continue;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Rebuild: skipping file with unreadable LastWriteTimeUtc: {Path}", path);
+                        continue;
+                    }
+                }
+
                 var content = await InputSlitFileReader.ReadAsync(path, cancellationToken).ConfigureAwait(false);
                 if (content is null)
                     continue;
@@ -553,6 +569,32 @@ ORDER BY COALESCE(Slit_Finish_Time, Slit_Start_Time, ImportedAtUtc), Mill_No, In
         var accepted = (Opt.InputSlitAcceptedFolder ?? string.Empty).Trim();
         if (!string.IsNullOrEmpty(accepted))
             yield return accepted;
+    }
+
+    /// <summary>
+    /// Skips reading ancient inbox files during rebuild. Uses the later of config min and (production month start - 7 days).
+    /// </summary>
+    private DateTime? ResolveRebuildFileMinUtc(DateTime fromUtc, int? plannedMonth, int? productionYear)
+    {
+        var configMin = SourceFileEligibility.ParseMinUtc(Opt);
+
+        DateTime? rebuildMin = null;
+        if (plannedMonth is >= 1 and <= 12 && productionYear is > 2000)
+        {
+            var (monthStart, _) = ProductionMonthEligibility.GetMonthBoundsUtc(productionYear.Value, plannedMonth.Value);
+            rebuildMin = monthStart.AddDays(-7);
+        }
+        else if (fromUtc != default)
+        {
+            rebuildMin = fromUtc.AddDays(-7);
+        }
+
+        if (configMin is null)
+            return rebuildMin;
+        if (rebuildMin is null)
+            return configMin;
+
+        return configMin.Value >= rebuildMin.Value ? configMin : rebuildMin;
     }
 
     private sealed record RebuildSlitEvent(

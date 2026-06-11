@@ -1,4 +1,3 @@
-using System.Globalization;
 using NdtBundleService.Models;
 
 namespace NdtBundleService.Services;
@@ -125,10 +124,6 @@ public static class InputSlitFileReader
         var raw = cols[index].Trim();
         if (string.IsNullOrEmpty(raw))
             return null;
-        if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var dt))
-            return dt;
-        if (DateTime.TryParse(raw, CultureInfo.CurrentCulture, DateTimeStyles.AssumeLocal, out dt))
-            return dt;
-        return null;
+        return InputSlitCsvParsing.TryParseSlitDateTime(raw, out var dt) ? dt : null;
     }
 }

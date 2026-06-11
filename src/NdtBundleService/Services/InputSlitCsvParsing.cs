@@ -119,6 +119,70 @@ public static class InputSlitCsvParsing
         return s;
     }
 
+    /// <summary>
+    /// Parses SAP slit timestamps (e.g. <c>11.06.2026 08:08:40</c> = 11 June 2026 local time).
+    /// Invariant <see cref="DateTime.TryParse(string?, IFormatProvider, DateTimeStyles)"/> treats dotted dates as MM.dd and must not be used alone.
+    /// </summary>
+    public static bool TryParseSlitDateTime(string? raw, out DateTime result)
+    {
+        result = default;
+        if (string.IsNullOrWhiteSpace(raw))
+            return false;
+
+        raw = raw.Trim();
+        var styles = DateTimeStyles.AllowWhiteSpaces | DateTimeStyles.AssumeLocal;
+
+        string[] dottedFormats =
+        [
+            "dd.MM.yyyy HH:mm:ss",
+            "dd.MM.yyyy H:mm:ss",
+            "dd.MM.yyyy",
+            "d.M.yyyy HH:mm:ss",
+            "d.M.yyyy H:mm:ss",
+            "d.M.yyyy"
+        ];
+
+        if (raw.Contains('.', StringComparison.Ordinal)
+            && DateTime.TryParseExact(raw, dottedFormats, CultureInfo.InvariantCulture, styles, out result))
+            return true;
+
+        string[] slashFormats =
+        [
+            "dd/MM/yyyy HH:mm:ss",
+            "dd/MM/yyyy H:mm:ss",
+            "dd/MM/yyyy",
+            "d/M/yyyy HH:mm:ss",
+            "d/M/yyyy"
+        ];
+
+        if (raw.Contains('/', StringComparison.Ordinal)
+            && DateTime.TryParseExact(raw, slashFormats, CultureInfo.InvariantCulture, styles, out result))
+            return true;
+
+        var deDe = CultureInfo.GetCultureInfo("de-DE");
+        if (DateTime.TryParse(raw, deDe, styles, out result))
+            return true;
+
+        var enGb = CultureInfo.GetCultureInfo("en-GB");
+        if (DateTime.TryParse(raw, enGb, styles, out result))
+            return true;
+
+        string[] isoFormats =
+        [
+            "yyyy-MM-dd HH:mm:ss",
+            "yyyy-MM-dd H:mm:ss",
+            "yyyy-MM-dd'T'HH:mm:ss",
+            "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF",
+            "yyyy-MM-dd",
+            "O"
+        ];
+
+        if (DateTime.TryParseExact(raw, isoFormats, CultureInfo.InvariantCulture, styles, out result))
+            return true;
+
+        return false;
+    }
+
     public static bool TryParseIntFlexible(string raw, out int value)
     {
         raw = raw.Trim();
