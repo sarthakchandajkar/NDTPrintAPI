@@ -16,6 +16,8 @@ public sealed class PlcHandshakeWorker : BackgroundService
     private readonly PlcConnectionHealth _connectionHealth;
     private readonly PlcHandshakeCoordinator _coordinator;
     private readonly IActivePoPerMillService _activePoPerMill;
+    private readonly IMillHooterPlcValuesService _hooterValues;
+    private readonly IWipBundleRunningPoProvider _wipRunningPo;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<PlcHandshakeWorker> _logger;
 
@@ -29,6 +31,8 @@ public sealed class PlcHandshakeWorker : BackgroundService
         PlcConnectionHealth connectionHealth,
         PlcHandshakeCoordinator coordinator,
         IActivePoPerMillService activePoPerMill,
+        IMillHooterPlcValuesService hooterValues,
+        IWipBundleRunningPoProvider wipRunningPo,
         ILoggerFactory loggerFactory,
         ILogger<PlcHandshakeWorker> logger)
     {
@@ -38,6 +42,8 @@ public sealed class PlcHandshakeWorker : BackgroundService
         _connectionHealth = connectionHealth;
         _coordinator = coordinator;
         _activePoPerMill = activePoPerMill;
+        _hooterValues = hooterValues;
+        _wipRunningPo = wipRunningPo;
         _loggerFactory = loggerFactory;
         _logger = logger;
     }
@@ -75,6 +81,8 @@ public sealed class PlcHandshakeWorker : BackgroundService
                 _statusRegistry,
                 _connectionHealth,
                 _activePoPerMill,
+                _hooterValues,
+                _wipRunningPo,
                 _loggerFactory.CreateLogger<PlcHandshakeService>());
 
             var millNo = mill.ResolveMillNo();

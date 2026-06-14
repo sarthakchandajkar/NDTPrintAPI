@@ -244,7 +244,16 @@ export function usePlcMillLive(): Record<number, PlcMillLiveState> {
 
 export type PlcCountsByMill = Record<
   number,
-  { ndtCount: number | null; okCount: number | null; nokCount: number | null }
+  {
+    ndtCount: number | null;
+    okCount: number | null;
+    nokCount: number | null;
+    lineRunning: boolean | null;
+    connected: boolean;
+    accumulatedValue: number | null;
+    thresholdValue: number | null;
+    hooterActive: boolean;
+  }
 >;
 
 /** Summary page: OK/NOK/NDT per mill from handshake API or plc-server socket. */
@@ -258,13 +267,25 @@ export function usePlcCountsByMill(): PlcCountsByMill {
 
     const toCounts = (m: PlcLiveMillPayload) => {
       const millNo = typeof m.millNo === "number" ? m.millNo : 0;
-      if (millNo < 1 || millNo > 4 || !m.connected) return;
+      if (millNo < 1 || millNo > 4) return;
       setPlcLive((prev) => ({
         ...prev,
         [millNo]: {
-          ndtCount: typeof m.ndtCount === "number" ? Math.trunc(m.ndtCount) : null,
-          okCount: typeof m.okCount === "number" ? Math.trunc(m.okCount) : null,
-          nokCount: typeof m.nokCount === "number" ? Math.trunc(m.nokCount) : null,
+          ndtCount: m.connected && typeof m.ndtCount === "number" ? Math.trunc(m.ndtCount) : null,
+          okCount: m.connected && typeof m.okCount === "number" ? Math.trunc(m.okCount) : null,
+          nokCount: m.connected && typeof m.nokCount === "number" ? Math.trunc(m.nokCount) : null,
+          lineRunning:
+            m.connected && typeof m.lineRunning === "boolean" ? m.lineRunning : null,
+          connected: !!m.connected,
+          accumulatedValue:
+            m.connected && typeof m.accumulatedValue === "number"
+              ? Math.trunc(m.accumulatedValue)
+              : null,
+          thresholdValue:
+            m.connected && typeof m.thresholdValue === "number"
+              ? Math.trunc(m.thresholdValue)
+              : null,
+          hooterActive: !!m.hooterActive,
         },
       }));
     };
@@ -293,7 +314,16 @@ export function usePlcCountsByMill(): PlcCountsByMill {
               : null;
           setPlcLive((prev) => ({
             ...prev,
-            [millNo]: { ndtCount: ndt, okCount: ok, nokCount: nok },
+            [millNo]: {
+              ndtCount: ndt,
+              okCount: ok,
+              nokCount: nok,
+              lineRunning: prev[millNo]?.lineRunning ?? null,
+              connected: true,
+              accumulatedValue: prev[millNo]?.accumulatedValue ?? null,
+              thresholdValue: prev[millNo]?.thresholdValue ?? null,
+              hooterActive: prev[millNo]?.hooterActive ?? false,
+            },
           }));
         };
 

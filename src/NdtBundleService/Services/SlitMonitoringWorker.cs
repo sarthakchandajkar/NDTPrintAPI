@@ -26,6 +26,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
     private readonly ISqlTraceabilityWriteTracker _sqlWriteTracker;
     private readonly IWipBundleRunningPoProvider _wipRunningPo;
     private readonly IMillNdtCountReader _millNdtCountReader;
+    private readonly IPoPlanWipEnrichmentProvider _poPlanWipEnrichment;
+    private readonly IPipeSizeProvider _pipeSizeProvider;
     private readonly ILogger<SlitMonitoringWorker> _logger;
 
     // Per input path: last LastWriteTimeUtc we treated as fully handled (seed baseline or successful run).
@@ -43,6 +45,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
         ISqlTraceabilityWriteTracker sqlWriteTracker,
         IWipBundleRunningPoProvider wipRunningPo,
         IMillNdtCountReader millNdtCountReader,
+        IPoPlanWipEnrichmentProvider poPlanWipEnrichment,
+        IPipeSizeProvider pipeSizeProvider,
         ILogger<SlitMonitoringWorker> logger)
     {
         _optionsMonitor = optionsMonitor;
@@ -55,6 +59,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
         _sqlWriteTracker = sqlWriteTracker;
         _wipRunningPo = wipRunningPo;
         _millNdtCountReader = millNdtCountReader;
+        _poPlanWipEnrichment = poPlanWipEnrichment;
+        _pipeSizeProvider = pipeSizeProvider;
         _logger = logger;
     }
 
@@ -284,6 +290,13 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 var inputRowsForSql = new List<(InputSlitRecord Record, int SourceRowNumber)>();
                 var outputRowsForSql = new List<(InputSlitRecord Record, string NdtBatchNo, int SourceRowNumber)>();
 
+                IReadOnlyDictionary<string, PoPlanWipRow> wipByPo =
+                    _poPlanWipEnrichment.TryGetCachedEnrichment()?.ByPo
+                    ?? (await _poPlanWipEnrichment.GetEnrichmentAsync(cancellationToken).ConfigureAwait(false)).ByPo;
+                IReadOnlyDictionary<string, string> pipeSizeByPo =
+                    _pipeSizeProvider.TryGetCachedPipeSizes()
+                    ?? await _pipeSizeProvider.GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
+
                 var sourceRowNumber = 2; // CSV header is row 1
                 string? poOverrideForFileName = null;
                 foreach (var row in rows)
@@ -346,8 +359,11 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     var bundleNdtPipes = useLiveThisRow && plcNdt.HasValue ? record.NdtPipes : effectiveRecord.NdtPipes;
                     var bundleRecord = CloneRecordWithNdt(effectiveRecord, bundleNdtPipes);
 
+                    var (pipeType, pipeSize) = ResolvePipeInfoForPo(bundleRecord.PoNumber, wipByPo, pipeSizeByPo);
+                    var omitBatch = NdtBatchNumberRules.ShouldOmitNdtBatchNumber(pipeType, pipeSize);
+
                     string ndtBatchNoFormatted;
-                    if (bundleRecord.NdtPipes <= 0)
+                    if (omitBatch)
                     {
                         ndtBatchNoFormatted = string.Empty;
                     }
@@ -358,36 +374,41 @@ public sealed class SlitMonitoringWorker : BackgroundService
                                 bundleRecord.PoNumber,
                                 bundleRecord.MillNo,
                                 bundleRecord.NdtPipes,
-                                cancellationToken)
+                                cancellationToken,
+                                pipeSize)
                             .ConfigureAwait(false);
 
-                        try
+                        if (bundleRecord.NdtPipes > 0)
                         {
-                            await _bundleEngine.ProcessSlitRecordAsync(
-                                bundleRecord,
-                                async (contextRecord, batchNo, totalNdtPcs) =>
-                                {
-                                    if (totalNdtPcs <= 0)
-                                        return;
+                            try
+                            {
+                                await _bundleEngine.ProcessSlitRecordAsync(
+                                    bundleRecord,
+                                    async (contextRecord, batchNo, totalNdtPcs) =>
+                                    {
+                                        if (totalNdtPcs <= 0)
+                                            return;
 
-                                    try
-                                    {
-                                        await _outputWriter.WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken).ConfigureAwait(false);
-                                        _logger.LogInformation(
-                                            "Bundle output completed for {BatchNo} ({Pcs} pcs).",
-                                            FormatNdtBatchNo(batchNo, contextRecord.MillNo),
-                                            totalNdtPcs);
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        _logger.LogError(ex, "Tag print failed for bundle {BatchNo}.", FormatNdtBatchNo(batchNo, contextRecord.MillNo));
-                                    }
-                                },
-                                cancellationToken).ConfigureAwait(false);
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogError(ex, "Bundle engine failed for record in {File}; output CSV was already written.", fileFull);
+                                        try
+                                        {
+                                            await _outputWriter.WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken).ConfigureAwait(false);
+                                            _logger.LogInformation(
+                                                "Bundle output completed for {BatchNo} ({Pcs} pcs).",
+                                                FormatNdtBatchNo(batchNo, contextRecord.MillNo),
+                                                totalNdtPcs);
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            _logger.LogError(ex, "Tag print failed for bundle {BatchNo}.", FormatNdtBatchNo(batchNo, contextRecord.MillNo));
+                                        }
+                                    },
+                                    cancellationToken,
+                                    pipeSize).ConfigureAwait(false);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogError(ex, "Bundle engine failed for record in {File}; output CSV was already written.", fileFull);
+                            }
                         }
 
                         ndtBatchNoFormatted = bn > 0
@@ -486,6 +507,27 @@ public sealed class SlitMonitoringWorker : BackgroundService
             NdtShortLengthPipe = r.NdtShortLengthPipe,
             RejectedShortLengthPipe = r.RejectedShortLengthPipe,
         };
+
+    private static (string PipeType, string PipeSize) ResolvePipeInfoForPo(
+        string poNumber,
+        IReadOnlyDictionary<string, PoPlanWipRow> wipByPo,
+        IReadOnlyDictionary<string, string> pipeSizeByPo)
+    {
+        var normalized = InputSlitCsvParsing.NormalizePo(poNumber);
+        var pipeType = string.Empty;
+        var pipeSize = string.Empty;
+
+        if (wipByPo.TryGetValue(normalized, out var wip))
+        {
+            pipeType = wip.PipeType ?? string.Empty;
+            pipeSize = wip.PipeSize ?? string.Empty;
+        }
+
+        if (string.IsNullOrWhiteSpace(pipeSize) && pipeSizeByPo.TryGetValue(normalized, out var fromMap))
+            pipeSize = fromMap;
+
+        return (pipeType.Trim(), pipeSize.Trim());
+    }
 
     private static string FormatNdtBatchNo(int sequenceNumber, int millNo)
     {

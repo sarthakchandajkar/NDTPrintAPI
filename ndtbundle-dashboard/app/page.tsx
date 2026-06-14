@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { api, type WipByMillRow } from "@/lib/api";
+import { LineRunningLamp } from "@/components/LineRunningLamp";
 import { usePlcCountsByMill } from "@/lib/usePlcMillLive";
 
 type MillRowState = {
@@ -22,7 +23,16 @@ function parseMillNo(row: WipByMillRow): number {
 /** Live PLC counts per mill (handshake API or plc-server Socket.IO). */
 type PlcLiveByMill = Record<
   number,
-  { ndtCount: number | null; okCount: number | null; nokCount: number | null }
+  {
+    ndtCount: number | null;
+    okCount: number | null;
+    nokCount: number | null;
+    lineRunning: boolean | null;
+    connected: boolean;
+    accumulatedValue: number | null;
+    thresholdValue: number | null;
+    hooterActive: boolean;
+  }
 >;
 
 /** API-backed live NDT (MillSlitLive.ApplyToMillNo) when socket unavailable. */
@@ -209,7 +219,9 @@ export default function SummaryPage() {
             config). Pipe details merge from the PO plan WIP folder when the PO matches. OK / NOK / NDT counts come from
             NdtBundleService (<code className="text-xs bg-gray-100 px-1 rounded">/api/Status/plc-live</code>) when PO
             handshake is enabled, otherwise from{" "}
-            <code className="text-xs bg-gray-100 px-1 rounded">plc-server</code> Socket.IO.
+            <code className="text-xs bg-gray-100 px-1 rounded">plc-server</code> Socket.IO. Line status
+            (green/red) reads <code className="text-xs bg-gray-100 px-1 rounded">DB250.DBX2.0</code> from each
+            mill PLC when handshake is enabled.
           </p>
         </div>
         <div className="overflow-x-auto">
@@ -217,6 +229,9 @@ export default function SummaryPage() {
             <thead className="bg-gray-50">
               <tr>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">Mill</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">
+                  Line
+                </th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide">
                   PO number
                 </th>
@@ -252,7 +267,7 @@ export default function SummaryPage() {
             <tbody className="divide-y divide-gray-200">
               {millRows.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="px-4 py-8 text-gray-500">
+                  <td colSpan={12} className="px-4 py-8 text-gray-500">
                     No mill data. Ensure the PO plan CSV has a &quot;Mill Number&quot; column and rows for mills 1–4.
                   </td>
                 </tr>
@@ -278,6 +293,12 @@ export default function SummaryPage() {
                     <tr key={Number.isFinite(parsedMillNo) ? `mill-${parsedMillNo}` : `mill-${String(m)}`} className="hover:bg-gray-50">
                       <td className="px-4 py-3 font-semibold text-gray-900 whitespace-nowrap">
                         Mill-{m}
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        <LineRunningLamp
+                          running={plc?.lineRunning}
+                          connected={plc?.connected}
+                        />
                       </td>
                       <td className="px-4 py-3 text-gray-900 font-medium whitespace-nowrap">
                         {(row.poNumber ?? "").trim() || "—"}

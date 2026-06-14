@@ -2,6 +2,13 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { api, type InputSlitFile, type InputSlitContent } from "@/lib/api";
+import { DateRangeFilter } from "@/components/DateRangeFilter";
+import {
+  EMPTY_DATE_RANGE,
+  isInDateRange,
+  isDateRangeActive,
+  type DateRange,
+} from "@/lib/dateRangeFilter";
 
 type FileContentState =
   | { status: "idle" }
@@ -71,6 +78,7 @@ function mapToSlitRow(content: InputSlitContent, row: string[]): SlitRow {
 
 export default function InputSlitsPage() {
   const [files, setFiles] = useState<InputSlitFile[]>([]);
+  const [dateRange, setDateRange] = useState<DateRange>(EMPTY_DATE_RANGE);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [secondsUntilRefresh, setSecondsUntilRefresh] = useState(30);
@@ -108,10 +116,14 @@ export default function InputSlitsPage() {
     return () => clearInterval(interval);
   }, []);
 
+  const filteredFiles = useMemo(() => {
+    if (!isDateRangeActive(dateRange)) return files;
+    return files.filter((f) => isInDateRange(f.lastModified, dateRange));
+  }, [files, dateRange]);
+
   useEffect(() => {
     // Auto-load content for each file so operators can see everything at a glance.
-    // We keep previously-loaded content while refreshing the list.
-    const fileNames = (files ?? [])
+    const fileNames = (filteredFiles ?? [])
       .map((f) => (f.fileName ?? "").trim())
       .filter((x) => x.length > 0);
 
@@ -139,26 +151,34 @@ export default function InputSlitsPage() {
           }))
         );
     }
-  }, [files]);
+  }, [filteredFiles]);
 
   const excelRows = useMemo(() => {
-    const out: Array<SlitRow & { _key: string }> = [];
-    const fileNames = (files ?? [])
+    const out: Array<SlitRow & { _key: string; _fileModified?: string }> = [];
+    const fileNames = (filteredFiles ?? [])
       .map((f) => (f.fileName ?? "").trim())
       .filter((x) => x.length > 0);
+
+    const fileModifiedByName = new Map(
+      filteredFiles.map((f) => [(f.fileName ?? "").trim(), f.lastModified ?? ""])
+    );
 
     for (const fileName of fileNames) {
       const st = fileContents[fileName];
       if (!st || st.status !== "loaded") continue;
       const c = st.content;
       const rows = Array.isArray(c?.rows) ? c.rows : [];
+      const fileModified = fileModifiedByName.get(fileName);
       for (let i = 0; i < rows.length; i++) {
         const r = rows[i];
-        out.push({ _key: `${fileName}:${i}`, ...mapToSlitRow(c, r) });
+        const mapped = mapToSlitRow(c, r);
+        const rowDate = mapped.slitFinishTime || mapped.slitStartTime || fileModified;
+        if (isDateRangeActive(dateRange) && !isInDateRange(rowDate, dateRange)) continue;
+        out.push({ _key: `${fileName}:${i}`, _fileModified: fileModified, ...mapped });
       }
     }
     return out;
-  }, [files, fileContents]);
+  }, [filteredFiles, fileContents, dateRange]);
 
   return (
     <div className="space-y-6">
@@ -181,14 +201,32 @@ export default function InputSlitsPage() {
         </div>
       )}
 
+      <DateRangeFilter
+        value={dateRange}
+        onChange={setDateRange}
+        summary={
+          isDateRangeActive(dateRange)
+            ? `${excelRows.length} row(s) · ${filteredFiles.length} of ${files.length} file(s)`
+            : `${files.length} file(s)`
+        }
+        hint="Rows match Slit Finish Time, then Slit Start Time, then the file last-modified date."
+      />
+
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
         <h2 className="px-5 py-3 bg-primary-50 text-gray-900 font-semibold border-b border-gray-200">
           Input Slit Rows (Excel View)
+          {isDateRangeActive(dateRange) && (
+            <span className="ml-2 text-sm font-normal text-gray-600">
+              — {excelRows.length} row(s) in range
+            </span>
+          )}
         </h2>
         {loading ? (
           <p className="px-5 py-8 text-gray-500">Loading...</p>
         ) : files.length === 0 ? (
           <p className="px-5 py-8 text-gray-500 text-sm">No CSV files in input slit folder.</p>
+        ) : filteredFiles.length === 0 ? (
+          <p className="px-5 py-8 text-gray-500 text-sm">No files in the selected date range.</p>
         ) : excelRows.length === 0 ? (
           <p className="px-5 py-8 text-gray-500 text-sm">No rows loaded yet (files may still be reading).</p>
         ) : (

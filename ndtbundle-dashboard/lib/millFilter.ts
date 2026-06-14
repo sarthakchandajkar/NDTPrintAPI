@@ -1,5 +1,8 @@
 import type { ReconcileBundle } from "@/lib/api";
 
+import type { DateRange } from "@/lib/dateRangeFilter";
+import { isInDateRange, isDateRangeActive } from "@/lib/dateRangeFilter";
+
 export type MillFilterValue = "all" | 1 | 2 | 3 | 4;
 
 export const MILL_FILTER_OPTIONS: { value: MillFilterValue; label: string }[] = [
@@ -45,4 +48,21 @@ export function countBundlesByMill(bundles: ReconcileBundle[]): Record<MillFilte
     if (m >= 1 && m <= 4) counts[m as 1 | 2 | 3 | 4] += 1;
   }
   return counts;
+}
+
+/** Prefer slit finish, then slit start, for bundle date filtering. */
+export function resolveBundleEntryDate(bundle: ReconcileBundle): string | null {
+  const finish = bundle.slitFinishTime?.trim();
+  if (finish) return finish;
+  const start = bundle.slitStartTime?.trim();
+  if (start) return start;
+  return null;
+}
+
+export function filterBundlesByDateRange(
+  bundles: ReconcileBundle[],
+  range: DateRange
+): ReconcileBundle[] {
+  if (!isDateRangeActive(range)) return bundles;
+  return bundles.filter((b) => isInDateRange(resolveBundleEntryDate(b), range));
 }

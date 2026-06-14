@@ -134,6 +134,35 @@ public class NdtBundleOptions
     public bool PreferSqlForReconcileReads { get; set; } = true;
 
     /// <summary>
+    /// When true and SQL is configured, pipe size and PO plan WIP enrichment read from <c>dbo.PO_Plan_WIP</c>
+    /// instead of scanning PO plan CSV folders on UNC (falls back to CSV when SQL is unavailable or empty).
+    /// </summary>
+    public bool PreferSqlForPoPlanWip { get; set; } = true;
+
+    /// <summary>
+    /// When <see cref="PreferSqlForPoPlanWip"/> is true, optionally merge pipe sizes from TM WIP bundle CSV folders
+    /// for POs missing in SQL. Default false to avoid slow UNC scans on every cache refresh.
+    /// </summary>
+    public bool MergeWipBundlePipeSizesWhenUsingSqlPoPlan { get; set; }
+
+    /// <summary>
+    /// When true and SQL is configured, import eligible files from <see cref="PoPlanFolder"/> (PO Accepted)
+    /// into <c>dbo.PO_Plan_WIP</c> on startup and periodically. Skips files already imported at the same last-write time.
+    /// </summary>
+    public bool ImportPoPlanWipFromFolder { get; set; } = true;
+
+    /// <summary>
+    /// Minutes between PO Accepted folder scans for new/changed files. 0 = startup import only.
+    /// </summary>
+    public int ImportPoPlanWipPollMinutes { get; set; } = 5;
+
+    /// <summary>
+    /// UTC cutoff for PO Accepted import into <c>PO_Plan_WIP</c> (ISO-8601, e.g. <c>2026-06-01T00:00:00Z</c>).
+    /// When empty, falls back to <see cref="MinSourceFileLastWriteUtc"/> (no rolling window for import).
+    /// </summary>
+    public string? PoPlanImportMinLastWriteUtc { get; set; } = "2026-06-01T00:00:00Z";
+
+    /// <summary>
     /// When false and SQL bundle list fails, returns an empty list instead of scanning all output CSV files (prevents long hangs / timeouts on the dashboard).
     /// </summary>
     public bool AllowCsvFallbackForBundleReads { get; set; } = true;
@@ -167,5 +196,8 @@ public class NdtBundleOptions
 
     /// <summary>Password-protected dashboard settings (formation chart thresholds, per-mill printers).</summary>
     public DashboardSettingsOptions DashboardSettings { get; set; } = new();
+
+    /// <summary>Prunes idle completed PO/mill slots from persisted runtime state (see <see cref="RuntimeStatePruningOptions"/>).</summary>
+    public RuntimeStatePruningOptions RuntimeStatePruning { get; set; } = new();
 }
 

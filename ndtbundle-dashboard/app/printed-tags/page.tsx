@@ -2,20 +2,27 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { api, type ReconcileBundle } from "@/lib/api";
+import { DateRangeFilter } from "@/components/DateRangeFilter";
 import { MillFilter } from "@/components/MillFilter";
-import { filterBundlesByMill, type MillFilterValue } from "@/lib/millFilter";
+import {
+  filterBundlesByDateRange,
+  filterBundlesByMill,
+  type MillFilterValue,
+} from "@/lib/millFilter";
+import { EMPTY_DATE_RANGE, formatDisplayDate, isDateRangeActive, type DateRange } from "@/lib/dateRangeFilter";
 
 export default function PrintedTagsPage() {
   const [bundles, setBundles] = useState<ReconcileBundle[]>([]);
   const [millFilter, setMillFilter] = useState<MillFilterValue>("all");
+  const [dateRange, setDateRange] = useState<DateRange>(EMPTY_DATE_RANGE);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [secondsUntilRefresh, setSecondsUntilRefresh] = useState(30);
 
-  const filteredBundles = useMemo(
-    () => filterBundlesByMill(bundles, millFilter),
-    [bundles, millFilter]
-  );
+  const filteredBundles = useMemo(() => {
+    const byMill = filterBundlesByMill(bundles, millFilter);
+    return filterBundlesByDateRange(byMill, dateRange);
+  }, [bundles, millFilter, dateRange]);
 
   const refresh = async () => {
     setLoading(true);
@@ -77,10 +84,21 @@ export default function PrintedTagsPage() {
         className="bg-white rounded-lg border border-gray-200 shadow-sm p-4"
       />
 
+      <DateRangeFilter
+        value={dateRange}
+        onChange={setDateRange}
+        summary={
+          isDateRangeActive(dateRange) || millFilter !== "all"
+            ? `${filteredBundles.length} of ${bundles.length} bundle(s)`
+            : `${bundles.length} bundle(s)`
+        }
+        hint="Uses Slit Finish Time, then Slit Start Time. Bundles without a date are hidden when a date range is set."
+      />
+
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
         <h2 className="px-5 py-3 bg-primary-50 text-gray-900 font-semibold border-b border-gray-200">
           Bundles (printed tags)
-          {!loading && bundles.length > 0 && millFilter !== "all" && (
+          {!loading && bundles.length > 0 && (millFilter !== "all" || isDateRangeActive(dateRange)) && (
             <span className="ml-2 text-sm font-normal text-gray-600">
               — {filteredBundles.length} of {bundles.length}
             </span>
@@ -92,7 +110,7 @@ export default function PrintedTagsPage() {
           <p className="px-5 py-8 text-gray-500 text-sm">
             {bundles.length === 0
               ? "No printed bundles yet."
-              : `No bundles for ${millFilter === "all" ? "this filter" : `Mill ${millFilter}`}. Try another mill or All mills.`}
+              : "No bundles match the selected mill and date range. Try clearing filters or widening the dates."}
           </p>
         ) : (
           <div className="overflow-x-auto">
@@ -103,6 +121,7 @@ export default function PrintedTagsPage() {
                   <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">PO Number</th>
                   <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">Mill No</th>
                   <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">Slit No</th>
+                  <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">Slit finish</th>
                   <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">NDT Pipes</th>
                 </tr>
               </thead>
@@ -113,6 +132,9 @@ export default function PrintedTagsPage() {
                     <td className="px-5 py-2 text-sm text-gray-700">{b.poNumber}</td>
                     <td className="px-5 py-2 text-sm text-gray-700">{b.millNo}</td>
                     <td className="px-5 py-2 text-sm text-gray-700">{b.slitNo}</td>
+                    <td className="px-5 py-2 text-sm text-gray-700 whitespace-nowrap">
+                      {formatDisplayDate(b.slitFinishTime || b.slitStartTime)}
+                    </td>
                     <td className="px-5 py-2 text-sm text-gray-700">{b.totalNdtPcs}</td>
                   </tr>
                 ))}

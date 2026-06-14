@@ -53,6 +53,42 @@ public interface IFormationChartProvider
 /// Provides pipe size per PO Number from an external file (e.g. CSV with PO Number and Pipe Size columns).
 /// Used for Formation Chart lookup and size-based bundle logic; Input Slit CSV no longer supplies pipe size.
 /// </summary>
+public interface IPoPlanWipRepository
+{
+    Task<bool> IsAvailableAsync(CancellationToken cancellationToken);
+
+    Task<string?> TryGetDataSignatureAsync(CancellationToken cancellationToken);
+
+    Task<IReadOnlyDictionary<string, string>> GetLatestPipeSizeByPoAsync(CancellationToken cancellationToken);
+
+    Task<PoPlanWipSqlSnapshot> GetLatestEnrichmentAsync(CancellationToken cancellationToken);
+
+    Task<PoPlanWipRow?> TryGetLatestByPoAsync(string poNumber, CancellationToken cancellationToken);
+
+    /// <summary>Verifies SQL and <c>dbo.PO_Plan_WIP</c> exist for folder import (does not require <see cref="NdtBundleOptions.PreferSqlForPoPlanWip"/>).</summary>
+    Task<bool> EnsureImportReadyAsync(CancellationToken cancellationToken);
+
+    /// <summary>Returns true when this exact file version (<c>path|w:ticks</c>) was already imported.</summary>
+    Task<bool> IsImportSourceFilePresentAsync(string sourceFileKey, CancellationToken cancellationToken);
+
+    /// <summary>Inserts one row per PO from a PO Accepted CSV import batch.</summary>
+    Task<int> InsertImportRowsAsync(
+        string sourceFileKey,
+        IEnumerable<PoPlanWipRow> rows,
+        CancellationToken cancellationToken);
+}
+
+public sealed class PoPlanWipSqlSnapshot
+{
+    public IReadOnlyDictionary<int, PoPlanWipRow> ByMill { get; init; } =
+        new Dictionary<int, PoPlanWipRow>();
+
+    public IReadOnlyDictionary<string, PoPlanWipRow> ByPo { get; init; } =
+        new Dictionary<string, PoPlanWipRow>(StringComparer.OrdinalIgnoreCase);
+
+    public string SourceDescription { get; init; } = string.Empty;
+}
+
 public interface IPipeSizeProvider
 {
     /// <summary>Returns PO Number -> Pipe Size. Empty or missing PO means no size (Default formation used for threshold; no per-size count).</summary>
@@ -60,6 +96,9 @@ public interface IPipeSizeProvider
 
     /// <summary>Returns the cached map when available; null when the cache has not been built yet.</summary>
     IReadOnlyDictionary<string, string>? TryGetCachedPipeSizes();
+
+    /// <summary>Resolves pipe size for one PO without forcing a full PO-plan folder rescan when SQL cache is warm.</summary>
+    Task<string?> TryGetPipeSizeForPoAsync(string poNumber, CancellationToken cancellationToken);
 }
 
 /// <summary>Cached PO plan WIP rows for dashboard enrichment (pipe grade, SAP pieces/bundle, etc.).</summary>
@@ -114,7 +153,8 @@ public interface IBundleEngine
     Task ProcessSlitRecordAsync(
         InputSlitRecord record,
         Func<InputSlitRecord, int, int, Task> onBundleClosedAsync,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        string? knownPipeSize = null);
 
     /// <summary>
     /// Handles PO end signal for the current PO and closes any pending partial bundles.
@@ -214,9 +254,14 @@ public interface INdtBatchStateService
     /// <summary>
     /// Updates running total for (poNumber, millNo) by ndtPipes and returns the batch number for this record,
     /// the new total so far, and the threshold used (from formation chart by pipe size).
-    /// When <paramref name="ndtPipes"/> is 0, state is unchanged and <c>BatchNumber</c> is 0 (no NDT bundle label).
+    /// When <paramref name="ndtPipes"/> is 0, running total is unchanged and the current batch number (offset + 1) is still returned for output CSV rows.
     /// </summary>
-    Task<(int BatchNumber, int TotalSoFar, int Threshold)> GetBatchForRecordAsync(string poNumber, int millNo, int ndtPipes, CancellationToken cancellationToken);
+    Task<(int BatchNumber, int TotalSoFar, int Threshold)> GetBatchForRecordAsync(
+        string poNumber,
+        int millNo,
+        int ndtPipes,
+        CancellationToken cancellationToken,
+        string? knownPipeSize = null);
 
     /// <summary>
     /// Call when PO End is triggered (e.g. Simulate PO End). Resets total and advances batch for the next bundle.

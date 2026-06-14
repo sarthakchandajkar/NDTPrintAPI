@@ -10,9 +10,12 @@ namespace NdtBundleService.Services;
 public static class SourceFileEligibility
 {
     /// <summary>Parses <see cref="NdtBundleOptions.MinSourceFileLastWriteUtc"/> (ISO-8601, e.g. <c>2026-04-05T00:00:00Z</c>).</summary>
-    public static DateTime? ParseMinUtc(NdtBundleOptions options)
+    public static DateTime? ParseMinUtc(NdtBundleOptions options) =>
+        ParseMinUtcFromRaw(options.MinSourceFileLastWriteUtc);
+
+    public static DateTime? ParseMinUtcFromRaw(string? rawValue)
     {
-        var raw = options.MinSourceFileLastWriteUtc?.Trim();
+        var raw = rawValue?.Trim();
         if (string.IsNullOrEmpty(raw))
             return null;
 

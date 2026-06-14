@@ -102,6 +102,8 @@ export interface ReconcileBundle {
   millNo?: number;
   totalNdtPcs?: number;
   slitNo?: string;
+  slitStartTime?: string | null;
+  slitFinishTime?: string | null;
 }
 
 export interface ReconcileSlitItem {
@@ -154,6 +156,14 @@ export interface PlcLiveMillPayload {
   okCount?: number | null;
   nokCount?: number | null;
   ndtCount?: number | null;
+  /** DB250.DBX2.0 — line running (SCADA lamp). */
+  lineRunning?: boolean | null;
+  /** MW56 — accumulated bed count (Mill-1 hooter). */
+  accumulatedValue?: number | null;
+  /** MW58 — size threshold (Mill-1 hooter). */
+  thresholdValue?: number | null;
+  /** Q6.7 hooter output active. */
+  hooterActive?: boolean;
   poId?: number | null;
   slitId?: number | null;
   poEndActive?: boolean;
@@ -191,6 +201,14 @@ export interface FormationChartEntryRow {
   requiredNdtPcs?: number;
 }
 
+export interface SettingsPlcMesHooter {
+  poNumber?: string | null;
+  pipeSize?: string | null;
+  threshold?: number;
+  accumulated?: number;
+  bundleNear?: boolean;
+}
+
 export interface SettingsPlcMill {
   millNo?: number;
   name?: string;
@@ -207,6 +225,34 @@ export interface SettingsPlcMill {
   lastPoChangeUtc?: string | null;
   lastError?: string | null;
   testAvailable?: boolean;
+  /** DB250.DBX2.0 line running (read from PLC). */
+  lineRunning?: boolean | null;
+  lineRunningAddress?: string | null;
+  /** MW56 last written / tracked by handshake. */
+  accumulatedValue?: number | null;
+  /** MW58 last written from formation chart. */
+  thresholdValue?: number | null;
+  hooterActive?: boolean;
+  hooterEnabled?: boolean;
+  hooterAccumAddress?: string | null;
+  hooterThresholdAddress?: string | null;
+  hooterOutputAddress?: string | null;
+  hooterPasEnableAddress?: string | null;
+  hooterDurationMs?: number | null;
+  okCount?: number | null;
+  nokCount?: number | null;
+  ndtCount?: number | null;
+  poId?: number | null;
+  countsUpdatedUtc?: string | null;
+  /** MES-computed values before PLC write (formation chart + bundle engine). */
+  mesHooter?: SettingsPlcMesHooter | null;
+}
+
+export interface SettingsPlcLineRunningSignal {
+  address?: string;
+  dbNumber?: number;
+  byteOffset?: number;
+  bit?: number;
 }
 
 export interface SettingsPlcDiagnostics {
@@ -216,6 +262,8 @@ export interface SettingsPlcDiagnostics {
   lastReadOk?: boolean;
   lastPlcError?: string | null;
   lastPlcCheckUtc?: string | null;
+  readLineRunning?: boolean;
+  lineRunningSignal?: SettingsPlcLineRunningSignal | null;
   poEndByMill?: Record<string, boolean>;
   mills?: SettingsPlcMill[];
 }

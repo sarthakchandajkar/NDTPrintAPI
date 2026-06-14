@@ -15,22 +15,38 @@ public static class WipCsvLabelLookup
         string poNumber,
         int millNo,
         ILogger logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        WipLabelInfo? seedFromSql = null,
+        bool skipPoPlanFolderScan = false)
     {
         if (string.IsNullOrWhiteSpace(poNumber) || millNo is < 1 or > 4)
             return null;
 
         var merged = new MutableWipLabelInfo();
-        var sawAny = false;
+        if (seedFromSql is not null)
+            merged.Merge(
+                seedFromSql.PipeGrade,
+                seedFromSql.PipeSize,
+                seedFromSql.PipeThickness,
+                seedFromSql.PipeLength,
+                seedFromSql.PipeWeightPerMeter,
+                seedFromSql.PipeType);
 
-        foreach (var path in EnumeratePoPlanPaths(options, currentPoPlanPath))
+        var sawAny = seedFromSql is not null;
+        if (merged.HasPrimaryFields())
+            return merged.ToModel();
+
+        if (!skipPoPlanFolderScan)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (await TryMergeFromCsvFileAsync(path, poNumber, millNo, merged, cancellationToken).ConfigureAwait(false))
+            foreach (var path in EnumeratePoPlanPaths(options, currentPoPlanPath))
             {
-                sawAny = true;
-                if (merged.HasPrimaryFields())
-                    return merged.ToModel();
+                cancellationToken.ThrowIfCancellationRequested();
+                if (await TryMergeFromCsvFileAsync(path, poNumber, millNo, merged, cancellationToken).ConfigureAwait(false))
+                {
+                    sawAny = true;
+                    if (merged.HasPrimaryFields())
+                        return merged.ToModel();
+                }
             }
         }
 

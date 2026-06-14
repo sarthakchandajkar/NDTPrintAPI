@@ -6,11 +6,13 @@ using NdtBundleService.Models;
 namespace NdtBundleService.Services;
 
 /// <summary>
-/// Cached merge of PO plan WIP CSVs for dashboard enrichment. Builds once and survives client disconnects.
+/// Cached PO plan WIP rows for dashboard enrichment and slit hollow-pipe checks.
+/// Reads from <c>dbo.PO_Plan_WIP</c> when SQL is preferred, otherwise merges PO plan CSV folders.
 /// </summary>
 public sealed class PoPlanWipEnrichmentProvider : IPoPlanWipEnrichmentProvider
 {
     private readonly NdtBundleOptions _options;
+    private readonly IPoPlanWipRepository _poPlanWipRepository;
     private readonly ICurrentPoPlanService? _currentPoPlanService;
     private readonly ILogger<PoPlanWipEnrichmentProvider> _logger;
     private readonly object _cacheLock = new();
@@ -20,10 +22,12 @@ public sealed class PoPlanWipEnrichmentProvider : IPoPlanWipEnrichmentProvider
 
     public PoPlanWipEnrichmentProvider(
         IOptions<NdtBundleOptions> options,
+        IPoPlanWipRepository poPlanWipRepository,
         ILogger<PoPlanWipEnrichmentProvider> logger,
         ICurrentPoPlanService? currentPoPlanService = null)
     {
         _options = options.Value;
+        _poPlanWipRepository = poPlanWipRepository;
         _logger = logger;
         _currentPoPlanService = currentPoPlanService;
     }
@@ -71,6 +75,13 @@ public sealed class PoPlanWipEnrichmentProvider : IPoPlanWipEnrichmentProvider
 
     private async Task<string> BuildSignatureAsync(CancellationToken cancellationToken)
     {
+        if (PoPlanWipSql.IsEnabled(_options))
+        {
+            var sqlSignature = await _poPlanWipRepository.TryGetDataSignatureAsync(cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(sqlSignature))
+                return sqlSignature;
+        }
+
         var planFolder = (_options.PoPlanFolder ?? string.Empty).Trim();
         if (!string.IsNullOrWhiteSpace(planFolder) && Directory.Exists(planFolder))
         {
@@ -103,6 +114,15 @@ public sealed class PoPlanWipEnrichmentProvider : IPoPlanWipEnrichmentProvider
 
     private async Task<PoPlanWipEnrichmentSnapshot> BuildSnapshotAsync(string signature, CancellationToken cancellationToken)
     {
+        if (signature.StartsWith("sql:", StringComparison.Ordinal))
+        {
+            var sqlSnapshot = await _poPlanWipRepository.GetLatestEnrichmentAsync(cancellationToken).ConfigureAwait(false);
+            return new PoPlanWipEnrichmentSnapshot(
+                sqlSnapshot.ByMill,
+                sqlSnapshot.ByPo,
+                sqlSnapshot.SourceDescription);
+        }
+
         var merge = new PoPlanWipCsvMerger.MergeResult();
         string sourceDescription;
 

@@ -5,21 +5,25 @@ using NdtBundleService.Configuration;
 namespace NdtBundleService.Services;
 
 /// <summary>
-/// Loads PO Number -> Pipe Size from a CSV file. When PoPlanFolder is set, scans eligible PO plan CSVs in that folder (newer files override older rows for the same PO). Otherwise uses PipeSizeCsvPath.
-/// Expected columns: PO Number (or PO_No), Pipe Size.
+/// Loads PO Number -> Pipe Size from <c>dbo.PO_Plan_WIP</c> when SQL is preferred, otherwise from PO plan CSV folders.
 /// </summary>
 public sealed class PipeSizeCsvProvider : IPipeSizeProvider
 {
     private readonly NdtBundleOptions _options;
+    private readonly IPoPlanWipRepository _poPlanWipRepository;
     private readonly ILogger<PipeSizeCsvProvider> _logger;
     private readonly object _cacheLock = new();
     private readonly SemaphoreSlim _buildLock = new(1, 1);
     private IReadOnlyDictionary<string, string>? _cached;
     private string? _cacheSignature;
 
-    public PipeSizeCsvProvider(IOptions<NdtBundleOptions> options, ILogger<PipeSizeCsvProvider> logger)
+    public PipeSizeCsvProvider(
+        IOptions<NdtBundleOptions> options,
+        IPoPlanWipRepository poPlanWipRepository,
+        ILogger<PipeSizeCsvProvider> logger)
     {
         _options = options.Value;
+        _poPlanWipRepository = poPlanWipRepository;
         _logger = logger;
     }
 
@@ -31,11 +35,92 @@ public sealed class PipeSizeCsvProvider : IPipeSizeProvider
         }
     }
 
+    public async Task<string?> TryGetPipeSizeForPoAsync(string poNumber, CancellationToken cancellationToken)
+    {
+        var normalized = InputSlitCsvParsing.NormalizePo(poNumber);
+        if (string.IsNullOrWhiteSpace(normalized))
+            return null;
+
+        lock (_cacheLock)
+        {
+            if (_cached is not null && _cached.TryGetValue(normalized, out var cachedSize) && !string.IsNullOrWhiteSpace(cachedSize))
+                return cachedSize.Trim();
+        }
+
+        var map = await GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
+        return map.TryGetValue(normalized, out var size) && !string.IsNullOrWhiteSpace(size)
+            ? size.Trim()
+            : null;
+    }
+
     public async Task<IReadOnlyDictionary<string, string>> GetPipeSizeByPoAsync(CancellationToken cancellationToken)
+    {
+        if (PoPlanWipSql.IsEnabled(_options))
+        {
+            var sqlSignature = await _poPlanWipRepository.TryGetDataSignatureAsync(cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(sqlSignature))
+                return await GetPipeSizeFromSqlAsync(sqlSignature, cancellationToken).ConfigureAwait(false);
+        }
+
+        return await GetPipeSizeFromCsvAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<IReadOnlyDictionary<string, string>> GetPipeSizeFromSqlAsync(
+        string signature,
+        CancellationToken cancellationToken)
+    {
+        lock (_cacheLock)
+        {
+            if (_cached is not null && string.Equals(_cacheSignature, signature, StringComparison.Ordinal))
+                return _cached;
+        }
+
+        await _buildLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            lock (_cacheLock)
+            {
+                if (_cached is not null && string.Equals(_cacheSignature, signature, StringComparison.Ordinal))
+                    return _cached;
+            }
+
+            var result = new Dictionary<string, string>(
+                await _poPlanWipRepository.GetLatestPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false),
+                StringComparer.OrdinalIgnoreCase);
+
+            if (_options.MergeWipBundlePipeSizesWhenUsingSqlPoPlan)
+                await MergeWipBundlePipeSizesAsync(result, ResolveWipBundleFolders(), CancellationToken.None).ConfigureAwait(false);
+
+            if (result.Count == 0)
+            {
+                _logger.LogWarning(
+                    "No pipe sizes found in dbo.PO_Plan_WIP; falling back to PO plan CSV folders.");
+                return await GetPipeSizeFromCsvAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            _logger.LogInformation(
+                "Loaded pipe size for {Count} PO(s) from JazeeraMES_Prod.dbo.PO_Plan_WIP.",
+                result.Count);
+
+            lock (_cacheLock)
+            {
+                _cached = result;
+                _cacheSignature = signature;
+            }
+
+            return result;
+        }
+        finally
+        {
+            _buildLock.Release();
+        }
+    }
+
+    private async Task<IReadOnlyDictionary<string, string>> GetPipeSizeFromCsvAsync(CancellationToken cancellationToken)
     {
         var paths = ResolvePipeSizeSourcePaths();
         var wipFolders = ResolveWipBundleFolders();
-        var signature = BuildCacheSignature(paths, wipFolders);
+        var signature = "csv:" + BuildCacheSignature(paths, wipFolders);
         lock (_cacheLock)
         {
             if (_cached is not null && string.Equals(_cacheSignature, signature, StringComparison.Ordinal))
@@ -62,7 +147,7 @@ public sealed class PipeSizeCsvProvider : IPipeSizeProvider
                 _logger.LogWarning(
                     "Pipe size not found in PoPlanFolder, PipeSizeCsvPath, or TM WIP bundle CSVs. Size-based bundle logic will use Default formation only.");
             }
-            else
+            else if (paths.Count > 0)
             {
                 _logger.LogInformation("Loaded pipe size for {Count} PO(s).", result.Count);
             }

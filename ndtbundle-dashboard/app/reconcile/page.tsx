@@ -2,8 +2,19 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { api, type ReconcileBundle, type ReconcileSlitItem } from "@/lib/api";
+import { DateRangeFilter } from "@/components/DateRangeFilter";
 import { MillFilter } from "@/components/MillFilter";
-import { filterBundlesByMill, type MillFilterValue } from "@/lib/millFilter";
+import {
+  filterBundlesByDateRange,
+  filterBundlesByMill,
+  type MillFilterValue,
+} from "@/lib/millFilter";
+import {
+  EMPTY_DATE_RANGE,
+  formatDisplayDate,
+  isDateRangeActive,
+  type DateRange,
+} from "@/lib/dateRangeFilter";
 
 type ReconcileMode = "OutputBundle" | "Visual" | "Hydrotesting" | "Revisual";
 type HydroType = "FourHeadHydrotesting" | "BigHydrotesting";
@@ -12,12 +23,13 @@ export default function ReconcilePage() {
   const [mode, setMode] = useState<ReconcileMode>("OutputBundle");
   const [bundles, setBundles] = useState<ReconcileBundle[]>([]);
   const [millFilter, setMillFilter] = useState<MillFilterValue>("all");
+  const [dateRange, setDateRange] = useState<DateRange>(EMPTY_DATE_RANGE);
   const [selectedBatchNo, setSelectedBatchNo] = useState("");
 
-  const filteredBundles = useMemo(
-    () => filterBundlesByMill(bundles, millFilter),
-    [bundles, millFilter]
-  );
+  const filteredBundles = useMemo(() => {
+    const byMill = filterBundlesByMill(bundles, millFilter);
+    return filterBundlesByDateRange(byMill, dateRange);
+  }, [bundles, millFilter, dateRange]);
   const [slits, setSlits] = useState<ReconcileSlitItem[]>([]);
   const [slitsLoading, setSlitsLoading] = useState(false);
   const [selectedSlitNo, setSelectedSlitNo] = useState("");
@@ -55,7 +67,7 @@ export default function ReconcilePage() {
       const next = Array.isArray(list) ? list : [];
       setBundles(next);
       if (mode === "OutputBundle") {
-        const filtered = filterBundlesByMill(next, millFilter);
+        const filtered = filterBundlesByDateRange(filterBundlesByMill(next, millFilter), dateRange);
         setSelectedBatchNo((prev) => {
           if (!filtered.length) return "";
           if (prev && filtered.some((b) => b.bundleNo === prev)) return prev;
@@ -81,7 +93,7 @@ export default function ReconcilePage() {
       if (prev && filteredBundles.some((b) => b.bundleNo === prev)) return prev;
       return filteredBundles[0]?.bundleNo ?? "";
     });
-  }, [millFilter, filteredBundles, mode]);
+  }, [millFilter, filteredBundles, mode, dateRange]);
 
   useEffect(() => {
     if (mode !== "OutputBundle") return;
@@ -422,7 +434,8 @@ export default function ReconcilePage() {
               <div className="text-sm text-gray-500">Bundle list</div>
               <div className="text-sm font-medium text-gray-900">
                 {filteredBundles.length} shown
-                {millFilter !== "all" ? ` (Mill ${millFilter})` : ""} · {bundles.length} total
+                {(millFilter !== "all" || isDateRangeActive(dateRange)) &&
+                  ` · ${bundles.length} total`}
               </div>
               <div className="text-xs text-gray-500 pt-1">Select from the left panel below.</div>
             </div>
@@ -563,12 +576,18 @@ export default function ReconcilePage() {
           bundles={bundles}
           className="bg-white rounded-lg border border-gray-200 shadow-sm p-4"
         />
+        <DateRangeFilter
+          value={dateRange}
+          onChange={setDateRange}
+          summary={`${filteredBundles.length} of ${bundles.length} bundle(s)`}
+          hint="Uses Slit Finish Time, then Slit Start Time. Bundles without a date are hidden when a date range is set."
+        />
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <section className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
           <div className="px-5 py-3 bg-primary-50 text-gray-900 font-semibold border-b border-gray-200 flex items-center justify-between">
             <span>
               Bundles
-              {!loading && bundles.length > 0 && millFilter !== "all" && (
+              {!loading && bundles.length > 0 && (millFilter !== "all" || isDateRangeActive(dateRange)) && (
                 <span className="ml-2 text-sm font-normal text-gray-600">
                   ({filteredBundles.length} of {bundles.length})
                 </span>
@@ -589,7 +608,7 @@ export default function ReconcilePage() {
               <p className="text-sm text-gray-500">
                 {bundles.length === 0
                   ? "No bundles found."
-                  : `No bundles for Mill ${millFilter}. Try another mill or All mills.`}
+                  : "No bundles match the selected mill and date range. Try clearing filters or widening the dates."}
               </p>
             ) : (
               <div className="max-h-[560px] overflow-y-auto divide-y divide-gray-100 border border-gray-200 rounded-md">
@@ -609,6 +628,9 @@ export default function ReconcilePage() {
                       <div className="font-semibold text-gray-900">{b.bundleNo}</div>
                       <div className="text-xs text-gray-600 pt-1">
                         PO: {b.poNumber ?? "—"} | Mill: {b.millNo ?? "—"} | Current: {b.totalNdtPcs ?? 0}
+                      </div>
+                      <div className="text-xs text-gray-400 pt-0.5">
+                        {formatDisplayDate(b.slitFinishTime || b.slitStartTime)}
                       </div>
                     </button>
                   );

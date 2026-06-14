@@ -24,6 +24,7 @@ public sealed class SettingsController : ControllerBase
     private readonly PoEndDetectionDiagnostics _poEndDiagnostics;
     private readonly PlcHandshakeStatusRegistry _handshakeStatus;
     private readonly PlcHandshakeCoordinator _handshakeCoordinator;
+    private readonly IMillHooterPlcValuesService _hooterValues;
     private readonly NdtBundleOptions _options;
     private readonly ILogger<SettingsController> _logger;
 
@@ -36,6 +37,7 @@ public sealed class SettingsController : ControllerBase
         PoEndDetectionDiagnostics poEndDiagnostics,
         PlcHandshakeStatusRegistry handshakeStatus,
         PlcHandshakeCoordinator handshakeCoordinator,
+        IMillHooterPlcValuesService hooterValues,
         IOptions<NdtBundleOptions> options,
         ILogger<SettingsController> logger)
     {
@@ -47,6 +49,7 @@ public sealed class SettingsController : ControllerBase
         _poEndDiagnostics = poEndDiagnostics;
         _handshakeStatus = handshakeStatus;
         _handshakeCoordinator = handshakeCoordinator;
+        _hooterValues = hooterValues;
         _options = options.Value;
         _logger = logger;
     }
@@ -154,6 +157,21 @@ public sealed class SettingsController : ControllerBase
                 var reachable = !string.IsNullOrEmpty(host) &&
                                 await TcpProbeAsync(host, 102, cancellationToken).ConfigureAwait(false);
 
+                object? mesHooter = null;
+                if (cfg.Hooter?.Enabled == true && millNo is >= 1 and <= 4)
+                {
+                    var resolved = await _hooterValues.ResolveAsync(millNo, cancellationToken).ConfigureAwait(false);
+                    mesHooter = new
+                    {
+                        poNumber = resolved.PoNumber,
+                        pipeSize = resolved.PipeSize,
+                        threshold = resolved.Threshold,
+                        accumulated = resolved.Accumulated,
+                        bundleNear = resolved.Threshold > 0 &&
+                                     resolved.Accumulated > resolved.Threshold
+                    };
+                }
+
                 mills.Add(new
                 {
                     millNo,
@@ -170,7 +188,32 @@ public sealed class SettingsController : ControllerBase
                     handshakeState = live?.HandshakeState ?? "Unknown",
                     lastPoChangeUtc = live?.LastPoChangeUtc,
                     lastError = live?.LastError,
-                    testAvailable = _handshakeCoordinator.IsMillRegistered(millNo)
+                    testAvailable = _handshakeCoordinator.IsMillRegistered(millNo),
+                    lineRunning = live?.LineRunning,
+                    lineRunningAddress = FormatLineRunningAddress(handshakeCfg),
+                    accumulatedValue = live?.AccumulatedValue,
+                    thresholdValue = live?.ThresholdValue,
+                    hooterActive = live?.HooterActive ?? false,
+                    okCount = live?.OkCount,
+                    nokCount = live?.NokCount,
+                    ndtCount = live?.NdtCount,
+                    poId = live?.PoId,
+                    countsUpdatedUtc = live?.CountsUpdatedUtc,
+                    hooterEnabled = cfg.Hooter?.Enabled ?? false,
+                    hooterAccumAddress = cfg.Hooter?.Enabled == true
+                        ? $"MW{cfg.Hooter.AccumulatedWordOffset}"
+                        : null,
+                    hooterThresholdAddress = cfg.Hooter?.Enabled == true
+                        ? $"MW{cfg.Hooter.ThresholdWordOffset}"
+                        : null,
+                    hooterOutputAddress = cfg.Hooter?.Enabled == true
+                        ? $"Q{cfg.Hooter.OutputByte}.{cfg.Hooter.OutputBit}"
+                        : null,
+                    hooterPasEnableAddress = cfg.Hooter?.Enabled == true
+                        ? $"DB{cfg.Hooter.PasEnableDbNumber}.DBX{cfg.Hooter.PasEnableByteOffset}.{cfg.Hooter.PasEnableBit}"
+                        : null,
+                    hooterDurationMs = cfg.Hooter?.DurationMs,
+                    mesHooter
                 });
             }
 
@@ -184,6 +227,14 @@ public sealed class SettingsController : ControllerBase
                 lastPlcCheckUtc = snapshot.Count > 0
                     ? snapshot.Max(m => m.LastUpdateUtc)
                     : _plcHealth.LastUpdateUtc,
+                readLineRunning = handshakeCfg.ReadLineRunning,
+                lineRunningSignal = new
+                {
+                    address = FormatLineRunningAddress(handshakeCfg),
+                    dbNumber = handshakeCfg.LineRunningDbNumber,
+                    byteOffset = handshakeCfg.LineRunningByteOffset,
+                    bit = handshakeCfg.LineRunningBit
+                },
                 poEndByMill = Enumerable.Range(1, 4).ToDictionary(
                     m => m.ToString(),
                     m => poEndByMill.TryGetValue(m, out var v) && v),
@@ -422,6 +473,9 @@ public sealed class SettingsController : ControllerBase
         Request.Headers.TryGetValue("X-Settings-Token", out var values)
             ? values.FirstOrDefault()
             : null;
+
+    private static string FormatLineRunningAddress(PlcHandshakeOptions options) =>
+        $"DB{options.LineRunningDbNumber}.DBX{options.LineRunningByteOffset}.{options.LineRunningBit}";
 
     private static async Task<bool> TcpProbeAsync(string host, int port, CancellationToken cancellationToken)
     {

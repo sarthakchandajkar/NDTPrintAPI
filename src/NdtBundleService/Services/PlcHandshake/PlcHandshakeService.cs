@@ -19,6 +19,8 @@ public sealed class PlcHandshakeService
     private readonly PlcHandshakeStatusRegistry _statusRegistry;
     private readonly PlcConnectionHealth _connectionHealth;
     private readonly IActivePoPerMillService _activePoPerMill;
+    private readonly IMillHooterPlcValuesService? _hooterValues;
+    private readonly IWipBundleRunningPoProvider _wipRunningPo;
     private readonly ILogger<PlcHandshakeService> _logger;
 
     private readonly object _plcLock = new();
@@ -36,6 +38,12 @@ public sealed class PlcHandshakeService
     private bool _suppressNdtUntilPoChange;
     private int _poIdWhenSuppressed;
 
+    private bool _hooterPulseActive;
+    private DateTimeOffset _hooterResetUtc;
+    private string? _hooterTrackedPo;
+    private int _hooterLastWrittenThreshold = -1;
+    private int _hooterLastWrittenAccumulated = -1;
+
     public PlcHandshakeService(
         MillConfig mill,
         PlcHandshakeOptions options,
@@ -43,6 +51,8 @@ public sealed class PlcHandshakeService
         PlcHandshakeStatusRegistry statusRegistry,
         PlcConnectionHealth connectionHealth,
         IActivePoPerMillService activePoPerMill,
+        IMillHooterPlcValuesService? hooterValues,
+        IWipBundleRunningPoProvider wipRunningPo,
         ILogger<PlcHandshakeService> logger)
     {
         _mill = mill;
@@ -51,6 +61,8 @@ public sealed class PlcHandshakeService
         _statusRegistry = statusRegistry;
         _connectionHealth = connectionHealth;
         _activePoPerMill = activePoPerMill;
+        _hooterValues = hooterValues;
+        _wipRunningPo = wipRunningPo;
         _logger = logger;
 
         var millNo = mill.ResolveMillNo();
@@ -98,6 +110,7 @@ public sealed class PlcHandshakeService
                 });
 
                 TryUpdateDb251Counts(millNo);
+                await TryUpdateMillSignalsAsync(millNo, stoppingToken).ConfigureAwait(false);
 
                 _connectionHealth.RecordModbusPoll(true, _statusRegistry.AllConnected());
 
@@ -237,6 +250,7 @@ public sealed class PlcHandshakeService
         {
             await _poChangeHandler.HandlePoChangeAsync(_mill, stoppingToken).ConfigureAwait(false);
             UpdateStatus(millNo, s => s.LastPoChangeUtc = DateTimeOffset.UtcNow);
+            await SyncHooterMemoryAfterPoEndAsync(millNo, stoppingToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -487,6 +501,251 @@ public sealed class PlcHandshakeService
                 return 0;
             var v = Convert.ToInt32(raw);
             return v < 0 ? 0 : v;
+        }
+    }
+
+    private async Task TryUpdateMillSignalsAsync(int millNo, CancellationToken cancellationToken)
+    {
+        bool? lineRunning = null;
+        int? accumulated = null;
+        int? threshold = null;
+        var hooterActive = _hooterPulseActive;
+
+        try
+        {
+            if (_options.ReadLineRunning)
+                lineRunning = ReadDbBit(_options.LineRunningDbNumber, _options.LineRunningByteOffset, _options.LineRunningBit);
+
+            var hooterCfg = _mill.Hooter;
+            if (hooterCfg?.Enabled == true && _hooterValues != null)
+            {
+                var resolved = await _hooterValues.ResolveAsync(millNo, cancellationToken).ConfigureAwait(false);
+                SyncHooterMemoryWords(hooterCfg, resolved, forcePoResync: false);
+                accumulated = resolved.Accumulated;
+                threshold = resolved.Threshold;
+                hooterActive = ProcessHooterPulse(hooterCfg, accumulated.Value, threshold.Value);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "{MillName}: mill signal read/hooter failed.", _mill.Name);
+        }
+
+        var capturedLineRunning = lineRunning;
+        var capturedAccumulated = accumulated;
+        var capturedThreshold = threshold;
+        var capturedHooterActive = hooterActive;
+        UpdateStatus(millNo, s =>
+        {
+            if (capturedLineRunning.HasValue)
+                s.LineRunning = capturedLineRunning.Value;
+            s.AccumulatedValue = capturedAccumulated;
+            s.ThresholdValue = capturedThreshold;
+            s.HooterActive = capturedHooterActive;
+        });
+    }
+
+    private async Task SyncHooterMemoryAfterPoEndAsync(int millNo, CancellationToken cancellationToken)
+    {
+        var hooterCfg = _mill.Hooter;
+        if (hooterCfg?.Enabled != true || _hooterValues == null)
+            return;
+
+        try
+        {
+            if (_plc is null || !_plc.IsConnected)
+                return;
+
+            WriteMemoryInt(hooterCfg.AccumulatedWordOffset, 0);
+            _hooterLastWrittenAccumulated = 0;
+            _hooterTrackedPo = null;
+
+            if (_wipRunningPo.IsWaitingForNewWipAfterPoEnd(millNo))
+            {
+                WriteMemoryInt(hooterCfg.ThresholdWordOffset, 0);
+                _hooterLastWrittenThreshold = 0;
+                _logger.LogInformation(
+                    "{MillName}: PO end — cleared MW{AccumWord}/MW{ThresholdWord}; waiting for new WIP bundle PO.",
+                    _mill.Name,
+                    hooterCfg.AccumulatedWordOffset,
+                    hooterCfg.ThresholdWordOffset);
+                return;
+            }
+
+            var resolved = await _hooterValues.ResolveAsync(millNo, cancellationToken).ConfigureAwait(false);
+            SyncHooterMemoryWords(hooterCfg, resolved, forcePoResync: true);
+            _logger.LogInformation(
+                "{MillName}: PO end — rewrote MW{ThresholdWord}={Threshold} (formation chart, PO {PO}, size {Size}) and MW{AccumWord}={Accumulated}.",
+                _mill.Name,
+                hooterCfg.ThresholdWordOffset,
+                resolved.Threshold,
+                resolved.PoNumber ?? "(none)",
+                resolved.PipeSize ?? "—",
+                hooterCfg.AccumulatedWordOffset,
+                resolved.Accumulated);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "{MillName}: failed to rewrite MW56/MW58 after PO end.", _mill.Name);
+        }
+    }
+
+    private void SyncHooterMemoryWords(MillHooterOptions cfg, MillHooterResolvedValues values, bool forcePoResync)
+    {
+        if (!values.HasPo)
+        {
+            if (_hooterTrackedPo == null && !forcePoResync)
+                return;
+
+            WriteMemoryInt(cfg.ThresholdWordOffset, 0);
+            WriteMemoryInt(cfg.AccumulatedWordOffset, 0);
+            _hooterTrackedPo = null;
+            _hooterLastWrittenThreshold = 0;
+            _hooterLastWrittenAccumulated = 0;
+            _logger.LogDebug("{MillName}: no running PO; cleared MW{ThresholdWord} and MW{AccumWord}.", _mill.Name, cfg.ThresholdWordOffset, cfg.AccumulatedWordOffset);
+            return;
+        }
+
+        var poChanged = forcePoResync ||
+            !string.Equals(_hooterTrackedPo, values.PoNumber, StringComparison.OrdinalIgnoreCase);
+
+        if (poChanged)
+        {
+            WriteMemoryInt(cfg.ThresholdWordOffset, values.Threshold);
+            WriteMemoryInt(cfg.AccumulatedWordOffset, values.Accumulated);
+            _hooterTrackedPo = values.PoNumber;
+            _hooterLastWrittenThreshold = values.Threshold;
+            _hooterLastWrittenAccumulated = values.Accumulated;
+            _logger.LogInformation(
+                "{MillName}: wrote MW{ThresholdWord}={Threshold} MW{AccumWord}={Accumulated} for PO {PO} (size {Size}).",
+                _mill.Name,
+                cfg.ThresholdWordOffset,
+                values.Threshold,
+                cfg.AccumulatedWordOffset,
+                values.Accumulated,
+                values.PoNumber,
+                values.PipeSize ?? "—");
+            return;
+        }
+
+        if (values.Threshold != _hooterLastWrittenThreshold)
+        {
+            WriteMemoryInt(cfg.ThresholdWordOffset, values.Threshold);
+            _hooterLastWrittenThreshold = values.Threshold;
+            _logger.LogDebug(
+                "{MillName}: updated MW{Word}={Threshold} for PO {PO}.",
+                _mill.Name,
+                cfg.ThresholdWordOffset,
+                values.Threshold,
+                values.PoNumber);
+        }
+
+        if (values.Accumulated != _hooterLastWrittenAccumulated)
+        {
+            WriteMemoryInt(cfg.AccumulatedWordOffset, values.Accumulated);
+            _hooterLastWrittenAccumulated = values.Accumulated;
+            _logger.LogDebug(
+                "{MillName}: updated MW{Word}={Accumulated} for PO {PO}.",
+                _mill.Name,
+                cfg.AccumulatedWordOffset,
+                values.Accumulated,
+                values.PoNumber);
+        }
+    }
+
+    private void WriteMemoryInt(int wordOffset, int value)
+    {
+        var clamped = Math.Clamp(value, 0, short.MaxValue);
+        lock (_plcLock)
+        {
+            if (_plc is null || !_plc.IsConnected)
+                throw new InvalidOperationException("PLC not connected.");
+
+            _plc.Write(DataType.Memory, 0, wordOffset, (short)clamped);
+        }
+    }
+
+    /// <summary>
+    /// Replicates PLC networks 90–92: SET Q when PAS enable and MW56 &gt; MW58 (and hooter off);
+    /// RESET Q after <see cref="MillHooterOptions.DurationMs"/>.
+    /// </summary>
+    private bool ProcessHooterPulse(MillHooterOptions cfg, int accumulated, int threshold)
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (_hooterPulseActive)
+        {
+            if (now >= _hooterResetUtc)
+            {
+                WriteOutputBit(cfg.OutputByte, cfg.OutputBit, false);
+                _hooterPulseActive = false;
+                _logger.LogInformation(
+                    "{MillName}: NDT bundle hooter Q{Byte}.{Bit} reset after {DurationMs}ms (MW56={Accumulated}, MW58={Threshold}).",
+                    _mill.Name,
+                    cfg.OutputByte,
+                    cfg.OutputBit,
+                    cfg.DurationMs,
+                    accumulated,
+                    threshold);
+            }
+
+            return _hooterPulseActive;
+        }
+
+        if (accumulated <= threshold)
+            return false;
+
+        var pasEnable = ReadDbBit(cfg.PasEnableDbNumber, cfg.PasEnableByteOffset, cfg.PasEnableBit);
+        if (!pasEnable)
+            return false;
+
+        if (ReadOutputBit(cfg.OutputByte, cfg.OutputBit))
+            return false;
+
+        WriteOutputBit(cfg.OutputByte, cfg.OutputBit, true);
+        _hooterPulseActive = true;
+        _hooterResetUtc = now.AddMilliseconds(Math.Max(1000, cfg.DurationMs));
+        _logger.LogInformation(
+            "{MillName}: NDT bundle hooter Q{Byte}.{Bit} ON — MW56={Accumulated} &gt; MW58={Threshold} (PAS enable on).",
+            _mill.Name,
+            cfg.OutputByte,
+            cfg.OutputBit,
+            accumulated,
+            threshold);
+        return true;
+    }
+
+    private bool ReadDbBit(int dbNumber, int byteOffset, int bit)
+    {
+        lock (_plcLock)
+        {
+            if (_plc is null || !_plc.IsConnected)
+                throw new InvalidOperationException("PLC not connected.");
+
+            var value = _plc.Read(DataType.DataBlock, dbNumber, byteOffset, VarType.Bit, 1, (byte)bit);
+            return value is true;
+        }
+    }
+
+    private bool ReadOutputBit(int byteOffset, int bit)
+    {
+        lock (_plcLock)
+        {
+            if (_plc is null || !_plc.IsConnected)
+                throw new InvalidOperationException("PLC not connected.");
+
+            var value = _plc.Read(DataType.Output, 0, byteOffset, VarType.Bit, 1, (byte)bit);
+            return value is true;
+        }
+    }
+
+    private void WriteOutputBit(int byteOffset, int bit, bool value)
+    {
+        lock (_plcLock)
+        {
+            if (_plc is null || !_plc.IsConnected)
+                throw new InvalidOperationException("PLC not connected.");
+
+            _plc.Write(DataType.Output, 0, byteOffset, value, bit);
         }
     }
 

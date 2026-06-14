@@ -9,6 +9,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="NdtBundleService.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Swagger UI for testing the flow and simulating PO end -->
     <PackageReference Include="NModbus" Version="3.0.81" />
     <PackageReference Include="S7netplus" Version="0.20.0" />

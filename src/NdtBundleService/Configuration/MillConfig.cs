@@ -48,6 +48,9 @@ public sealed class MillConfig
     /// <summary>Max wait for trigger to clear after ack (ms).</summary>
     public int TriggerClearTimeoutMs { get; set; } = 60_000;
 
+    /// <summary>Optional NDT bundle hooter (Mill-1: MW56/MW58 compare → Q6.7 pulse).</summary>
+    public MillHooterOptions? Hooter { get; set; }
+
     public int ResolveMillNo()
     {
         if (MillNo is >= 1 and <= 4)

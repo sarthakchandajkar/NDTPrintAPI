@@ -40,6 +40,16 @@ public sealed class PlcHandshakeOptions
     /// <summary>Byte offset of Slit ID INT (DBW10).</summary>
     public int SlitIdByteOffset { get; set; } = 10;
 
+    /// <summary>When true, read line-running bit from each mill PLC for dashboard SCADA lamp.</summary>
+    public bool ReadLineRunning { get; set; } = true;
+
+    /// <summary>DB250.DBX2.0 — line running for Mill-1 … Mill-4 (same offset on each mill PLC).</summary>
+    public int LineRunningDbNumber { get; set; } = 250;
+
+    public int LineRunningByteOffset { get; set; } = 2;
+
+    public int LineRunningBit { get; set; } = 0;
+
     /// <summary>
     /// Consecutive poll cycles with trigger FALSE required after a completed handshake before the next
     /// rising edge is accepted (filters immediate PLC re-pulses on the same PO change).

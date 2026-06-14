@@ -50,6 +50,7 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
 
     private readonly IOptionsMonitor<NdtBundleOptions> _optionsMonitor;
     private readonly INdtBundleRepository _bundleRepository;
+    private readonly IActivePoPerMillService _activePoPerMill;
     private readonly ILogger<NdtBundleRuntimeStateStore> _logger;
     private readonly SemaphoreSlim _initLock = new(1, 1);
     private readonly object _stateLock = new();
@@ -60,10 +61,12 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
     public NdtBundleRuntimeStateStore(
         IOptionsMonitor<NdtBundleOptions> optionsMonitor,
         INdtBundleRepository bundleRepository,
+        IActivePoPerMillService activePoPerMill,
         ILogger<NdtBundleRuntimeStateStore> logger)
     {
         _optionsMonitor = optionsMonitor;
         _bundleRepository = bundleRepository;
+        _activePoPerMill = activePoPerMill;
         _logger = logger;
     }
 
@@ -104,6 +107,8 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
                     FormatMillFloorsSnapshot());
             }
 
+            await PruneCompletedSlotsOnStartupAsync(cancellationToken).ConfigureAwait(false);
+
             if (Opt.EnableNdtBundleRuntimeStatePersistence)
                 await SaveCoreAsync(cancellationToken).ConfigureAwait(false);
 
@@ -132,17 +137,18 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         lock (_stateLock)
         {
             var slot = GetSlot(poNumber, millNo);
+            TouchSlotActivity(slot);
+
             if (ndtPipes <= 0)
             {
                 totalSoFar = slot.RunningTotal;
-                batchNumberForRow = 0;
+                batchNumberForRow = NdtBundleRuntimeStateLogic.ResolveOpenBatchNumber(slot.BatchOffset);
                 return;
             }
 
             slot.RunningTotal += ndtPipes;
             totalSoFar = slot.RunningTotal;
-            SyncSlotToMillFloor(slot);
-            batchNumberForRow = slot.BatchOffset + 1;
+            batchNumberForRow = NdtBundleRuntimeStateLogic.ResolveOpenBatchNumber(slot.BatchOffset);
 
             if (slot.RunningTotal >= threshold)
             {
@@ -158,6 +164,7 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         lock (_stateLock)
         {
             var slot = GetSlot(poNumber, millNo);
+            TouchSlotActivity(slot);
             if (closedTotalPcs <= 0)
                 return slot.EngineBatchNo;
 
@@ -175,6 +182,7 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         lock (_stateLock)
         {
             var slot = GetSlot(poNumber, millNo);
+            TouchSlotActivity(slot);
             var total = slot.RunningTotal;
             if (total <= 0)
             {
@@ -202,6 +210,7 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         lock (_stateLock)
         {
             var slot = GetSlot(poNumber, millNo);
+            TouchSlotActivity(slot);
             slot.EngineBatchNo = batchNo;
             if (batchNo > slot.BatchOffset)
                 slot.BatchOffset = batchNo;
@@ -218,7 +227,11 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
     public void SetSizeCounts(string poNumber, int millNo, IReadOnlyDictionary<string, int> counts)
     {
         lock (_stateLock)
-            GetSlot(poNumber, millNo).SizeCounts = new Dictionary<string, int>(counts, StringComparer.OrdinalIgnoreCase);
+        {
+            var slot = GetSlot(poNumber, millNo);
+            TouchSlotActivity(slot);
+            slot.SizeCounts = new Dictionary<string, int>(counts, StringComparer.OrdinalIgnoreCase);
+        }
     }
 
     public InputSlitRecord? GetLastRecord(string poNumber, int millNo)
@@ -230,7 +243,11 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
     public void SetLastRecord(string poNumber, int millNo, InputSlitRecord? record)
     {
         lock (_stateLock)
-            GetSlot(poNumber, millNo).LastRecord = record;
+        {
+            var slot = GetSlot(poNumber, millNo);
+            TouchSlotActivity(slot);
+            slot.LastRecord = record;
+        }
     }
 
     public async Task SaveAsync(CancellationToken cancellationToken)
@@ -266,6 +283,49 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         var temp = path + ".tmp";
         await File.WriteAllTextAsync(temp, JsonSerializer.Serialize(snapshot, JsonOptions), cancellationToken).ConfigureAwait(false);
         File.Move(temp, path, overwrite: true);
+    }
+
+    private async Task PruneCompletedSlotsOnStartupAsync(CancellationToken cancellationToken)
+    {
+        var options = Opt.RuntimeStatePruning ?? new RuntimeStatePruningOptions();
+        if (!options.Enabled || !options.RunOnStartup)
+            return;
+
+        IReadOnlyDictionary<int, string> activePoByMill;
+        try
+        {
+            activePoByMill = await _activePoPerMill.GetLatestPoByMillAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Skipping NDT runtime state prune on startup: could not resolve active PO per mill.");
+            return;
+        }
+
+        var utcNow = DateTime.UtcNow;
+        List<string> removedKeys;
+        lock (_stateLock)
+        {
+            var snapshots = _root.Mills.ToDictionary(
+                kv => kv.Key,
+                kv => ToSnapshot(kv.Value),
+                StringComparer.OrdinalIgnoreCase);
+            removedKeys = NdtBundleRuntimeStateLogic
+                .SelectSlotsToPrune(snapshots, _root.MillMaxSequence, _root.UpdatedUtc, activePoByMill, utcNow, options)
+                .ToList();
+
+            foreach (var key in removedKeys)
+                _root.Mills.Remove(key);
+        }
+
+        if (removedKeys.Count == 0)
+            return;
+
+        _logger.LogInformation(
+            "Pruned {Count} idle NDT runtime state slot(s) on startup (grace {GraceDays} day(s); active PO slots retained). Mill floors: {MillFloors}.",
+            removedKeys.Count,
+            options.GracePeriodDays,
+            FormatMillFloorsSnapshot());
     }
 
     private bool TryLoadFromDisk(out PersistedRoot loaded)
@@ -337,7 +397,7 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
             foreach (var (key, maxSeq) in byKey)
             {
                 var (po, mill) = ParseKey(key);
-                var slot = GetSlot(po, mill);
+                var slot = GetSlotWithoutMillFloorSync(po, mill);
                 if (mergeIntoExisting && maxSeq <= slot.BatchOffset && maxSeq <= slot.EngineBatchNo)
                     continue;
 
@@ -425,13 +485,16 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
     private void SyncSlotToMillFloor(PersistedMillSlot slot)
     {
         var floor = GetMillMaxSequence(slot.MillNo);
-        if (floor <= 0)
-            return;
-
-        if (slot.BatchOffset < floor)
-            slot.BatchOffset = floor;
-        if (slot.EngineBatchNo < floor)
-            slot.EngineBatchNo = floor;
+        var batchOffset = slot.BatchOffset;
+        var engineBatchNo = slot.EngineBatchNo;
+        NdtBundleRuntimeStateLogic.ApplyMillFloorIfAllowed(
+            ref batchOffset,
+            ref engineBatchNo,
+            slot.RunningTotal,
+            slot.SizeCounts,
+            floor);
+        slot.BatchOffset = batchOffset;
+        slot.EngineBatchNo = engineBatchNo;
     }
 
     private int GetMillMaxSequence(int millNo)
@@ -440,15 +503,8 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         return _root.MillMaxSequence.TryGetValue(key, out var max) ? max : 0;
     }
 
-    private void RaiseMillMaxSequence(int millNo, int sequence)
-    {
-        if (millNo is < 1 or > 4 || sequence <= 0)
-            return;
-
-        var key = millNo.ToString(CultureInfo.InvariantCulture);
-        if (!_root.MillMaxSequence.TryGetValue(key, out var current) || sequence > current)
-            _root.MillMaxSequence[key] = sequence;
-    }
+    private void RaiseMillMaxSequence(int millNo, int sequence) =>
+        NdtBundleRuntimeStateLogic.RaiseMillMaxSequence(_root.MillMaxSequence, millNo, sequence);
 
     private string FormatMillFloorsSnapshot()
     {
@@ -477,19 +533,41 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         return Path.Combine(folder, "NdtBundleRuntimeState.json");
     }
 
-    private PersistedMillSlot GetSlot(string poNumber, int millNo)
+    private PersistedMillSlot GetSlot(string poNumber, int millNo) =>
+        GetOrCreateSlot(poNumber, millNo, syncMillFloor: true);
+
+    private PersistedMillSlot GetSlotWithoutMillFloorSync(string poNumber, int millNo) =>
+        GetOrCreateSlot(poNumber, millNo, syncMillFloor: false);
+
+    private PersistedMillSlot GetOrCreateSlot(string poNumber, int millNo, bool syncMillFloor)
     {
         var po = InputSlitCsvParsing.NormalizePo(poNumber);
         var key = MakeKey(po, millNo);
-        if (!_root.Mills.TryGetValue(key, out var slot))
+        var isNew = !_root.Mills.TryGetValue(key, out var slot);
+        if (isNew)
         {
             slot = new PersistedMillSlot { PoNumber = po, MillNo = millNo };
             _root.Mills[key] = slot;
         }
 
-        SyncSlotToMillFloor(slot);
+        if (syncMillFloor && (isNew || !NdtBundleRuntimeStateLogic.HasOpenPartialBundle(slot.RunningTotal, slot.SizeCounts)))
+            SyncSlotToMillFloor(slot);
+
         return slot;
     }
+
+    private static void TouchSlotActivity(PersistedMillSlot slot) =>
+        slot.LastActivityUtc = DateTime.UtcNow;
+
+    private static RuntimeStateSlotSnapshot ToSnapshot(PersistedMillSlot slot) =>
+        new(
+            slot.PoNumber,
+            slot.MillNo,
+            slot.BatchOffset,
+            slot.RunningTotal,
+            slot.EngineBatchNo,
+            slot.SizeCounts,
+            slot.LastActivityUtc);
 
     private static string MakeKey(string poNumber, int millNo) =>
         $"{InputSlitCsvParsing.NormalizePo(poNumber)}|{millNo}";
@@ -519,7 +597,8 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
                 RunningTotal = v.RunningTotal,
                 EngineBatchNo = v.EngineBatchNo,
                 SizeCounts = new Dictionary<string, int>(v.SizeCounts, StringComparer.OrdinalIgnoreCase),
-                LastRecord = v.LastRecord
+                LastRecord = v.LastRecord,
+                LastActivityUtc = v.LastActivityUtc
             };
         }
 
@@ -544,5 +623,6 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         public int EngineBatchNo { get; set; }
         public Dictionary<string, int> SizeCounts { get; set; } = new(StringComparer.OrdinalIgnoreCase);
         public InputSlitRecord? LastRecord { get; set; }
+        public DateTime LastActivityUtc { get; set; }
     }
 }

@@ -29,15 +29,24 @@ public sealed class NdtBundleEngine : IBundleEngine
     public async Task ProcessSlitRecordAsync(
         InputSlitRecord record,
         Func<InputSlitRecord, int, int, Task> onBundleClosedAsync,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? knownPipeSize = null)
     {
         if (record.NdtPipes <= 0)
             return;
 
         await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
 
-        var pipeSizeByPo = await _pipeSizeProvider.GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
-        pipeSizeByPo.TryGetValue(record.PoNumber, out var pipeSize);
+        string? pipeSize = knownPipeSize;
+        if (string.IsNullOrWhiteSpace(pipeSize))
+        {
+            pipeSize = await _pipeSizeProvider.TryGetPipeSizeForPoAsync(record.PoNumber, cancellationToken).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(pipeSize))
+            {
+                var pipeSizeByPo = await _pipeSizeProvider.GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
+                pipeSizeByPo.TryGetValue(record.PoNumber, out pipeSize);
+            }
+        }
 
         var formation = await _formationChartProvider.GetFormationChartAsync(cancellationToken).ConfigureAwait(false);
         var sizeThreshold = FormationChartLookup.ResolveThreshold(formation, pipeSize);

@@ -81,6 +81,7 @@ internal static class PoPlanWipCsvMerger
                 PlannedMonth = Cell(Idx("Planned Month")),
                 PipeGrade = Cell(Idx("Pipe Grade")),
                 PipeSize = Cell(Idx("Pipe Size")),
+                PipeType = Cell(Idx("Pipe Type")),
                 PipeLength = Cell(Idx("Pipe Length")),
                 PiecesPerBundle = Cell(Idx("Pieces Per Bundle")),
                 TotalPieces = Cell(Idx("Total Pieces")),
@@ -101,6 +102,22 @@ internal static class PoPlanWipCsvMerger
         return Directory.EnumerateFiles(planFolder, "*.csv")
             .Select(f => new FileInfo(f))
             .Where(f => SourceFileEligibility.IncludePoPlanFolderFileUtc(f.LastWriteTimeUtc, options))
+            .OrderBy(f => f.LastWriteTimeUtc)
+            .ThenBy(f => f.FullName, StringComparer.OrdinalIgnoreCase)
+            .Select(f => f.FullName)
+            .ToList();
+    }
+
+    internal static List<string> ResolveEligiblePoPlanImportFiles(NdtBundleOptions options)
+    {
+        var planFolder = (options.PoPlanFolder ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(planFolder) || !Directory.Exists(planFolder))
+            return new List<string>();
+
+        var minUtc = PoPlanWipImportSettings.GetImportMinUtc(options);
+        return Directory.EnumerateFiles(planFolder, "*.csv")
+            .Select(f => new FileInfo(f))
+            .Where(f => SourceFileEligibility.IncludeFileUtc(f.LastWriteTimeUtc, minUtc))
             .OrderBy(f => f.LastWriteTimeUtc)
             .ThenBy(f => f.FullName, StringComparer.OrdinalIgnoreCase)
             .Select(f => f.FullName)

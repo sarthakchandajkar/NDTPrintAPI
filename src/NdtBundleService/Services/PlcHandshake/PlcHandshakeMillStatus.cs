@@ -46,6 +46,18 @@ public sealed class PlcHandshakeMillStatus
 
     public DateTimeOffset? CountsUpdatedUtc { get; set; }
 
+    /// <summary>DB250.DBX2.0 — true when the mill line is running.</summary>
+    public bool? LineRunning { get; set; }
+
+    /// <summary>MW56 — accumulated value (Mill-1 hooter).</summary>
+    public int? AccumulatedValue { get; set; }
+
+    /// <summary>MW58 — threshold value (Mill-1 hooter).</summary>
+    public int? ThresholdValue { get; set; }
+
+    /// <summary>Q6.7 hooter output is currently ON (software pulse).</summary>
+    public bool HooterActive { get; set; }
+
     public PlcHandshakeLastPoEnd? LastPoEnd { get; set; }
 }
 
@@ -132,6 +144,10 @@ public sealed class PlcHandshakeStatusRegistry
             PoId = m.PoId,
             SlitId = m.SlitId,
             CountsUpdatedUtc = m.CountsUpdatedUtc,
+            LineRunning = m.LineRunning,
+            AccumulatedValue = m.AccumulatedValue,
+            ThresholdValue = m.ThresholdValue,
+            HooterActive = m.HooterActive,
             LastPoEnd = m.LastPoEnd is null
                 ? null
                 : new PlcHandshakeLastPoEnd

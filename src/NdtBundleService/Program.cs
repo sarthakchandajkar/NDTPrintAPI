@@ -31,6 +31,8 @@ builder.Services.AddSingleton<AppLogReader>();
 
 // Core services
 builder.Services.AddSingleton<IPoPlanProvider, PoPlanCsvProvider>();
+builder.Services.AddSingleton<IPoPlanWipRepository, PoPlanWipRepository>();
+builder.Services.AddSingleton<IPoPlanWipImporter, PoPlanWipImporter>();
 builder.Services.AddSingleton<IFormationChartProvider, FormationChartCsvProvider>();
 builder.Services.AddSingleton<IPipeSizeProvider, PipeSizeCsvProvider>();
 builder.Services.AddSingleton<IPoPlanWipEnrichmentProvider, PoPlanWipEnrichmentProvider>();
@@ -62,6 +64,7 @@ builder.Services.AddSingleton<PlcConnectionHealth>();
 builder.Services.AddSingleton<PlcHandshakeStatusRegistry>();
 builder.Services.AddSingleton<PlcHandshakeCoordinator>();
 builder.Services.AddSingleton<IPoChangeHandler, PoChangeHandler>();
+builder.Services.AddSingleton<IMillHooterPlcValuesService, MillHooterPlcValuesService>();
 builder.Services.AddSingleton<IPlcClient>(sp =>
 {
     var bundleOptions = sp.GetRequiredService<IOptions<NdtBundleOptions>>().Value;
@@ -98,6 +101,7 @@ builder.Services.AddSingleton<ISqlTraceabilityWriteTracker, SqlTraceabilityWrite
 builder.Services.AddSingleton<ISqlTraceabilityHealth, SqlTraceabilityHealth>();
 
 builder.Services.AddHostedService<SqlTraceabilityStartupCheck>();
+builder.Services.AddHostedService<PoPlanWipImportHostedService>();
 builder.Services.AddHostedService<PoPlanCacheWarmupService>();
 
 builder.Services.AddCors(options =>
