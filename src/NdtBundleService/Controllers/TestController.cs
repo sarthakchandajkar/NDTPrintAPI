@@ -25,6 +25,7 @@ namespace NdtBundleService.Controllers;
     private readonly IFormationChartProvider _formationChartProvider;
     private readonly IPipeSizeProvider _pipeSizeProvider;
     private readonly IPoPlanWipEnrichmentProvider _poPlanWipEnrichment;
+    private readonly IPoPlanWipRepository _poPlanWipRepository;
     private readonly IActivePoPerMillService _activePoPerMill;
     private readonly IWipBundleRunningPoProvider _wipBundleRunningPo;
     private readonly IMillNdtCountReader _millNdtCountReader;
@@ -41,6 +42,7 @@ namespace NdtBundleService.Controllers;
         IFormationChartProvider formationChartProvider,
         IPipeSizeProvider pipeSizeProvider,
         IPoPlanWipEnrichmentProvider poPlanWipEnrichment,
+        IPoPlanWipRepository poPlanWipRepository,
         IActivePoPerMillService activePoPerMill,
         IWipBundleRunningPoProvider wipBundleRunningPo,
         IMillNdtCountReader millNdtCountReader,
@@ -53,6 +55,7 @@ namespace NdtBundleService.Controllers;
         _formationChartProvider = formationChartProvider;
         _pipeSizeProvider = pipeSizeProvider;
         _poPlanWipEnrichment = poPlanWipEnrichment;
+        _poPlanWipRepository = poPlanWipRepository;
         _activePoPerMill = activePoPerMill;
         _wipBundleRunningPo = wipBundleRunningPo;
         _millNdtCountReader = millNdtCountReader;
@@ -265,30 +268,29 @@ namespace NdtBundleService.Controllers;
 
             PoPlanWipEnrichmentSnapshot wipEnrichment;
             string sourcePath;
+            string? poPlanFolderWarning = null;
             if (TryGetUnreachablePoPlanFolderMessage(out var unreachablePoPlan))
             {
+                poPlanFolderWarning = unreachablePoPlan;
                 _logger.LogWarning("{Message}", unreachablePoPlan);
-                wipEnrichment = EmptyWipEnrichment();
-                sourcePath =
-                    $"{_options.PoPlanFolder} (not reachable from service account; PO per mill from slits / WIP bundle filenames only)";
             }
-            else
-            {
-                try
-                {
-                    wipEnrichment = _poPlanWipEnrichment.TryGetCachedEnrichment()
-                                    ?? await _poPlanWipEnrichment.GetEnrichmentAsync(loadToken).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "GetEnrichmentAsync failed; continuing with empty PO plan enrichment for wip-by-mills.");
-                    wipEnrichment = EmptyWipEnrichment();
-                }
 
-                sourcePath = string.IsNullOrWhiteSpace(wipEnrichment.SourceDescription)
-                    ? $"{_options.PoPlanFolder ?? _options.PoPlanCsvPath ?? "PO plan"} (enrichment unavailable)"
-                    : wipEnrichment.SourceDescription;
+            try
+            {
+                wipEnrichment = _poPlanWipEnrichment.TryGetCachedEnrichment()
+                                ?? await _poPlanWipEnrichment.GetEnrichmentAsync(loadToken).ConfigureAwait(false);
             }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "GetEnrichmentAsync failed; continuing with empty PO plan enrichment for wip-by-mills.");
+                wipEnrichment = EmptyWipEnrichment();
+            }
+
+            sourcePath = string.IsNullOrWhiteSpace(wipEnrichment.SourceDescription)
+                ? $"{_options.PoPlanFolder ?? _options.PoPlanCsvPath ?? "PO plan"} (enrichment unavailable)"
+                : wipEnrichment.SourceDescription;
+            if (!string.IsNullOrWhiteSpace(poPlanFolderWarning))
+                sourcePath += $"; {poPlanFolderWarning}";
 
             var mills = new List<WipByMillRowDto>(4);
             for (var m = 1; m <= 4; m++)
@@ -311,6 +313,8 @@ namespace NdtBundleService.Controllers;
                         CopyWipDetails(row, byPo);
                     else if (wipRowForMill != null && InputSlitCsvParsing.PoEquals(wipRowForMill.PoNumber, resolvedPo))
                         CopyWipDetails(row, wipRowForMill);
+
+                    await TryFillWipDetailsFromSqlAsync(row, normalizedPo, loadToken).ConfigureAwait(false);
 
                     mills.Add(row);
                 }
@@ -468,12 +472,43 @@ namespace NdtBundleService.Controllers;
 
     private static void CopyWipDetails(WipByMillRowDto target, PoPlanWipRow source)
     {
-        target.PlannedMonth = source.PlannedMonth;
-        target.PipeGrade = source.PipeGrade;
-        target.PipeSize = source.PipeSize;
-        target.PipeLength = source.PipeLength;
-        target.PiecesPerBundle = source.PiecesPerBundle;
-        target.TotalPieces = source.TotalPieces;
+        if (!string.IsNullOrWhiteSpace(source.PlannedMonth))
+            target.PlannedMonth = source.PlannedMonth;
+        if (!string.IsNullOrWhiteSpace(source.PipeGrade))
+            target.PipeGrade = source.PipeGrade;
+        if (!string.IsNullOrWhiteSpace(source.PipeSize))
+            target.PipeSize = source.PipeSize;
+        if (!string.IsNullOrWhiteSpace(source.PipeLength))
+            target.PipeLength = source.PipeLength;
+        if (!string.IsNullOrWhiteSpace(source.PiecesPerBundle))
+            target.PiecesPerBundle = source.PiecesPerBundle;
+        if (!string.IsNullOrWhiteSpace(source.TotalPieces))
+            target.TotalPieces = source.TotalPieces;
+    }
+
+    private async Task TryFillWipDetailsFromSqlAsync(
+        WipByMillRowDto row,
+        string normalizedPo,
+        CancellationToken cancellationToken)
+    {
+        if (!PoPlanWipSql.IsEnabled(_options)
+            || string.IsNullOrWhiteSpace(normalizedPo)
+            || !string.IsNullOrWhiteSpace(row.PipeSize))
+        {
+            return;
+        }
+
+        try
+        {
+            var sqlRow = await _poPlanWipRepository.TryGetLatestByPoAsync(normalizedPo, cancellationToken)
+                .ConfigureAwait(false);
+            if (sqlRow is not null)
+                CopyWipDetails(row, sqlRow);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Per-PO SQL WIP lookup failed for PO {Po} on wip-by-mills.", normalizedPo);
+        }
     }
 
     private static WipByMillRowDto ToWipByMillRowDto(PoPlanWipRow source) =>
