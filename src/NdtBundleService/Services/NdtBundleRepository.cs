@@ -177,7 +177,6 @@ WITH Ranked AS (
         Rejected_P,
         NDT_Short_Length_Pipe,
         Rejected_Short_Length_Pipe,
-        PrintedAt,
         ROW_NUMBER() OVER (PARTITION BY Bundle_No ORDER BY PrintedAt DESC) AS rn
     FROM dbo.NDT_Bundle
 )
