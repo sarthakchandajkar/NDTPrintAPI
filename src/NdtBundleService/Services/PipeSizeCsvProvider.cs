@@ -13,6 +13,7 @@ public sealed class PipeSizeCsvProvider : IPipeSizeProvider
     private readonly NdtBundleOptions _options;
     private readonly ILogger<PipeSizeCsvProvider> _logger;
     private readonly object _cacheLock = new();
+    private readonly SemaphoreSlim _buildLock = new(1, 1);
     private IReadOnlyDictionary<string, string>? _cached;
     private string? _cacheSignature;
 
@@ -20,6 +21,14 @@ public sealed class PipeSizeCsvProvider : IPipeSizeProvider
     {
         _options = options.Value;
         _logger = logger;
+    }
+
+    public IReadOnlyDictionary<string, string>? TryGetCachedPipeSizes()
+    {
+        lock (_cacheLock)
+        {
+            return _cached;
+        }
     }
 
     public async Task<IReadOnlyDictionary<string, string>> GetPipeSizeByPoAsync(CancellationToken cancellationToken)
@@ -33,29 +42,43 @@ public sealed class PipeSizeCsvProvider : IPipeSizeProvider
                 return _cached;
         }
 
-        var result = paths.Count > 0
-            ? new Dictionary<string, string>(await LoadPipeSizeMapAsync(paths, cancellationToken).ConfigureAwait(false), StringComparer.OrdinalIgnoreCase)
-            : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-        await MergeWipBundlePipeSizesAsync(result, wipFolders, cancellationToken).ConfigureAwait(false);
-
-        if (result.Count == 0)
+        await _buildLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            _logger.LogWarning(
-                "Pipe size not found in PoPlanFolder, PipeSizeCsvPath, or TM WIP bundle CSVs. Size-based bundle logic will use Default formation only.");
-        }
-        else
-        {
-            _logger.LogInformation("Loaded pipe size for {Count} PO(s).", result.Count);
-        }
+            lock (_cacheLock)
+            {
+                if (_cached is not null && string.Equals(_cacheSignature, signature, StringComparison.Ordinal))
+                    return _cached;
+            }
 
-        lock (_cacheLock)
-        {
-            _cached = result;
-            _cacheSignature = signature;
-        }
+            var result = paths.Count > 0
+                ? new Dictionary<string, string>(await LoadPipeSizeMapAsync(paths, CancellationToken.None).ConfigureAwait(false), StringComparer.OrdinalIgnoreCase)
+                : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        return result;
+            await MergeWipBundlePipeSizesAsync(result, wipFolders, CancellationToken.None).ConfigureAwait(false);
+
+            if (result.Count == 0)
+            {
+                _logger.LogWarning(
+                    "Pipe size not found in PoPlanFolder, PipeSizeCsvPath, or TM WIP bundle CSVs. Size-based bundle logic will use Default formation only.");
+            }
+            else
+            {
+                _logger.LogInformation("Loaded pipe size for {Count} PO(s).", result.Count);
+            }
+
+            lock (_cacheLock)
+            {
+                _cached = result;
+                _cacheSignature = signature;
+            }
+
+            return result;
+        }
+        finally
+        {
+            _buildLock.Release();
+        }
     }
 
     private List<string> ResolvePipeSizeSourcePaths()
@@ -91,7 +114,7 @@ public sealed class PipeSizeCsvProvider : IPipeSizeProvider
             {
                 try
                 {
-                    return $"{folder}|{Directory.GetLastWriteTimeUtc(folder).Ticks}";
+                    return $"{folder}|{LatestWipFileWriteTicks(folder)}";
                 }
                 catch
                 {
@@ -100,6 +123,15 @@ public sealed class PipeSizeCsvProvider : IPipeSizeProvider
             }));
 
         return planPart + "||" + wipPart;
+    }
+
+    private static long LatestWipFileWriteTicks(string folder)
+    {
+        return Directory.EnumerateFiles(folder)
+            .Where(name => Path.GetFileName(name).StartsWith("WIP_", StringComparison.OrdinalIgnoreCase))
+            .Select(path => File.GetLastWriteTimeUtc(path).Ticks)
+            .DefaultIfEmpty(0)
+            .Max();
     }
 
     private List<string> ResolveWipBundleFolders()
@@ -145,7 +177,6 @@ public sealed class PipeSizeCsvProvider : IPipeSizeProvider
 
             foreach (var path in files)
             {
-                cancellationToken.ThrowIfCancellationRequested();
                 await TryMergePipeSizeFromWipCsvAsync(path, result, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -199,8 +230,6 @@ public sealed class PipeSizeCsvProvider : IPipeSizeProvider
 
         foreach (var path in paths)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
             await using var stream = File.OpenRead(path);
             using var reader = new StreamReader(stream);
 

@@ -58,16 +58,24 @@ public sealed class ReconcileController : ControllerBase
     [HttpGet("bundles")]
     public async Task<IActionResult> GetBundles(CancellationToken cancellationToken)
     {
-        var list = await _bundleRepository.GetBundlesAsync(cancellationToken).ConfigureAwait(false);
-        var filtered = await ExcludeOpenPartialLatestBatchesAsync(list, cancellationToken).ConfigureAwait(false);
-        return Ok(filtered.Select(b => new
+        try
         {
-            b.BundleNo,
-            b.PoNumber,
-            b.MillNo,
-            b.TotalNdtPcs,
-            b.SlitNo
-        }).ToList());
+            var list = await _bundleRepository.GetBundlesAsync(cancellationToken).ConfigureAwait(false);
+            var filtered = await ExcludeOpenPartialLatestBatchesAsync(list, CancellationToken.None).ConfigureAwait(false);
+            return Ok(filtered.Select(b => new
+            {
+                b.BundleNo,
+                b.PoNumber,
+                b.MillNo,
+                b.TotalNdtPcs,
+                b.SlitNo
+            }).ToList());
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning("GetBundles canceled before bundle list could be returned.");
+            return StatusCode(499, new { Message = "Request canceled." });
+        }
     }
 
     private async Task<IReadOnlyList<NdtBundleRecord>> ExcludeOpenPartialLatestBatchesAsync(
@@ -76,8 +84,14 @@ public sealed class ReconcileController : ControllerBase
     {
         try
         {
-            var pipeSizes = await _pipeSizeProvider.GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
-            var formation = await _formationChartProvider.GetFormationChartAsync(cancellationToken).ConfigureAwait(false);
+            var pipeSizes = _pipeSizeProvider.TryGetCachedPipeSizes();
+            if (pipeSizes is null)
+            {
+                _ = _pipeSizeProvider.GetPipeSizeByPoAsync(CancellationToken.None);
+                return SortBundlesNewestFirst(bundles);
+            }
+
+            var formation = await _formationChartProvider.GetFormationChartAsync(CancellationToken.None).ConfigureAwait(false);
 
             var byPoMill = bundles.GroupBy(b => (b.PoNumber, b.MillNo));
             var result = new List<NdtBundleRecord>();

@@ -33,6 +33,7 @@ builder.Services.AddSingleton<AppLogReader>();
 builder.Services.AddSingleton<IPoPlanProvider, PoPlanCsvProvider>();
 builder.Services.AddSingleton<IFormationChartProvider, FormationChartCsvProvider>();
 builder.Services.AddSingleton<IPipeSizeProvider, PipeSizeCsvProvider>();
+builder.Services.AddSingleton<IPoPlanWipEnrichmentProvider, PoPlanWipEnrichmentProvider>();
 builder.Services.AddSingleton<IBundleLabelInfoProvider, BundleLabelCsvProvider>();
 builder.Services.AddSingleton<ICurrentPoPlanService, CurrentPoPlanService>();
 builder.Services.AddSingleton<INdtBundleRepository, NdtBundleRepository>();
@@ -97,6 +98,7 @@ builder.Services.AddSingleton<ISqlTraceabilityWriteTracker, SqlTraceabilityWrite
 builder.Services.AddSingleton<ISqlTraceabilityHealth, SqlTraceabilityHealth>();
 
 builder.Services.AddHostedService<SqlTraceabilityStartupCheck>();
+builder.Services.AddHostedService<PoPlanCacheWarmupService>();
 
 builder.Services.AddCors(options =>
 {

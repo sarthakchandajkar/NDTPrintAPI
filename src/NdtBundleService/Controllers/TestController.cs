@@ -24,6 +24,7 @@ namespace NdtBundleService.Controllers;
     private readonly IZplGenerationToggle _zplToggle;
     private readonly IFormationChartProvider _formationChartProvider;
     private readonly IPipeSizeProvider _pipeSizeProvider;
+    private readonly IPoPlanWipEnrichmentProvider _poPlanWipEnrichment;
     private readonly IActivePoPerMillService _activePoPerMill;
     private readonly IWipBundleRunningPoProvider _wipBundleRunningPo;
     private readonly IMillNdtCountReader _millNdtCountReader;
@@ -39,6 +40,7 @@ namespace NdtBundleService.Controllers;
         IZplGenerationToggle zplToggle,
         IFormationChartProvider formationChartProvider,
         IPipeSizeProvider pipeSizeProvider,
+        IPoPlanWipEnrichmentProvider poPlanWipEnrichment,
         IActivePoPerMillService activePoPerMill,
         IWipBundleRunningPoProvider wipBundleRunningPo,
         IMillNdtCountReader millNdtCountReader,
@@ -50,6 +52,7 @@ namespace NdtBundleService.Controllers;
         _zplToggle = zplToggle;
         _formationChartProvider = formationChartProvider;
         _pipeSizeProvider = pipeSizeProvider;
+        _poPlanWipEnrichment = poPlanWipEnrichment;
         _activePoPerMill = activePoPerMill;
         _wipBundleRunningPo = wipBundleRunningPo;
         _millNdtCountReader = millNdtCountReader;
@@ -246,65 +249,6 @@ namespace NdtBundleService.Controllers;
     {
         try
         {
-            var wipByMill = new Dictionary<int, WipByMillRowDto>();
-            var wipByPo = new Dictionary<string, WipByMillRowDto>(StringComparer.OrdinalIgnoreCase);
-            string sourcePath;
-
-            var planFolder = _options.PoPlanFolder?.Trim();
-            if (TryGetUnreachablePoPlanFolderMessage(out var unreachablePoPlan))
-            {
-                _logger.LogWarning("{Message}", unreachablePoPlan);
-                sourcePath =
-                    $"{planFolder} (not reachable from service account; PO per mill from slits / WIP bundle filenames only)";
-            }
-            else if (!string.IsNullOrWhiteSpace(planFolder) && Directory.Exists(planFolder))
-            {
-                var files = Directory.EnumerateFiles(planFolder, "*.csv")
-                    .Select(f => new FileInfo(f))
-                    .Where(f => SourceFileEligibility.IncludePoPlanFolderFileUtc(f.LastWriteTimeUtc, _options))
-                    .OrderBy(f => f.LastWriteTimeUtc)
-                    .ThenBy(f => f.FullName, StringComparer.OrdinalIgnoreCase)
-                    .Select(f => f.FullName)
-                    .ToArray();
-
-                if (files.Length == 0)
-                    return NotFound(new { Message = "PoPlanFolder has no eligible CSV files (check MinSourceFileLastWriteUtc, PoPlanFolderRollingDays, or folder path).", Path = planFolder });
-
-                foreach (var file in files)
-                {
-                    try
-                    {
-                        await MergeWipFileIntoByMillAsync(file, wipByMill, wipByPo, cancellationToken).ConfigureAwait(false);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Skipping PO plan WIP file after read/parse error: {File}", file);
-                    }
-                }
-
-                sourcePath = $"{planFolder} ({files.Length} WIP CSV file(s); PO per mill from slits, else TM Bundle / Bundle Accepted WIP filenames)";
-            }
-            else
-            {
-                var path = await ResolveWipPlanCsvPathAsync(cancellationToken).ConfigureAwait(false);
-                if (string.IsNullOrWhiteSpace(path))
-                {
-                    if (TryGetUnreachablePoPlanFolderMessage(out unreachablePoPlan))
-                        return NotFound(new { Message = unreachablePoPlan, Path = _options.PoPlanFolder });
-                    return NotFound(new { Message = "WIP CSV path not configured (PoPlanCsvPath or PoPlanFolder)." });
-                }
-                if (path.StartsWith("NOTFOUND:", StringComparison.Ordinal))
-                    return NotFound(new { Message = "WIP CSV file not found.", Path = path["NOTFOUND:".Length..] });
-
-                if (!SourceFileEligibility.IncludePoPlanFolderFileUtc(System.IO.File.GetLastWriteTimeUtc(path), _options))
-                    return NotFound(new { Message = "WIP CSV file is outside the PO plan date window (MinSourceFileLastWriteUtc / PoPlanFolderRollingDays).", Path = path });
-
-                if (!await MergeWipFileIntoByMillAsync(path, wipByMill, wipByPo, cancellationToken).ConfigureAwait(false))
-                    return BadRequest(new { Message = "WIP CSV must include \"Mill Number\" or \"Mill No\", and \"PO_No\", \"PO Number\", or \"PO No\"." });
-
-                sourcePath = path;
-            }
-
             IReadOnlyDictionary<int, string> slitPoByMill;
             try
             {
@@ -316,10 +260,30 @@ namespace NdtBundleService.Controllers;
                 slitPoByMill = new Dictionary<int, string>();
             }
 
+            PoPlanWipEnrichmentSnapshot wipEnrichment;
+            string sourcePath;
+            if (TryGetUnreachablePoPlanFolderMessage(out var unreachablePoPlan))
+            {
+                _logger.LogWarning("{Message}", unreachablePoPlan);
+                wipEnrichment = EmptyWipEnrichment();
+                sourcePath =
+                    $"{_options.PoPlanFolder} (not reachable from service account; PO per mill from slits / WIP bundle filenames only)";
+            }
+            else
+            {
+                var cachedEnrichment = _poPlanWipEnrichment.TryGetCachedEnrichment();
+                wipEnrichment = cachedEnrichment ?? EmptyWipEnrichment();
+                sourcePath = string.IsNullOrWhiteSpace(wipEnrichment.SourceDescription)
+                    ? $"{_options.PoPlanFolder ?? _options.PoPlanCsvPath ?? "PO plan"} (enrichment loading in background)"
+                    : wipEnrichment.SourceDescription;
+                if (cachedEnrichment is null)
+                    _ = _poPlanWipEnrichment.GetEnrichmentAsync(CancellationToken.None);
+            }
+
             var mills = new List<WipByMillRowDto>(4);
             for (var m = 1; m <= 4; m++)
             {
-                wipByMill.TryGetValue(m, out var wipRowForMill);
+                wipEnrichment.ByMill.TryGetValue(m, out var wipRowForMill);
                 slitPoByMill.TryGetValue(m, out var slitPo);
 
                 var bundleFilePo = string.IsNullOrWhiteSpace(slitPo)
@@ -332,7 +296,8 @@ namespace NdtBundleService.Controllers;
                 if (!string.IsNullOrWhiteSpace(resolvedPo))
                 {
                     var row = new WipByMillRowDto { MillNo = m, PoNumber = resolvedPo };
-                    if (wipByPo.TryGetValue(resolvedPo, out var byPo))
+                    var normalizedPo = InputSlitCsvParsing.NormalizePo(resolvedPo);
+                    if (wipEnrichment.ByPo.TryGetValue(normalizedPo, out var byPo))
                         CopyWipDetails(row, byPo);
                     else if (wipRowForMill != null && InputSlitCsvParsing.PoEquals(wipRowForMill.PoNumber, resolvedPo))
                         CopyWipDetails(row, wipRowForMill);
@@ -341,7 +306,7 @@ namespace NdtBundleService.Controllers;
                 }
                 else if (wipRowForMill != null && !string.IsNullOrWhiteSpace(wipRowForMill.PoNumber))
                 {
-                    mills.Add(wipRowForMill);
+                    mills.Add(ToWipByMillRowDto(wipRowForMill));
                 }
                 else
                 {
@@ -357,16 +322,11 @@ namespace NdtBundleService.Controllers;
                 await WipBundleWipCsvEnricher.TryEnrichRowAsync(row, liveOpts, _logger, cancellationToken).ConfigureAwait(false);
             }
 
-            IReadOnlyDictionary<string, string> pipeSizeByPo;
-            try
-            {
-                pipeSizeByPo = await _pipeSizeProvider.GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "GetPipeSizeByPoAsync failed; pipe sizes on wip-by-mills may be empty.");
-                pipeSizeByPo = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            }
+            IReadOnlyDictionary<string, string> pipeSizeByPo =
+                _pipeSizeProvider.TryGetCachedPipeSizes()
+                ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (pipeSizeByPo.Count == 0)
+                _ = _pipeSizeProvider.GetPipeSizeByPoAsync(CancellationToken.None);
             foreach (var row in mills)
             {
                 if (string.IsNullOrWhiteSpace(row.PoNumber) || !string.IsNullOrWhiteSpace(row.PipeSize))
@@ -472,7 +432,7 @@ namespace NdtBundleService.Controllers;
     private static bool MillSlitLiveS7EndpointConfigured(MillSlitLiveOptions live) =>
         live.S7 is not null && !string.IsNullOrWhiteSpace(live.S7.Host);
 
-    private static void CopyWipDetails(WipByMillRowDto target, WipByMillRowDto source)
+    private static void CopyWipDetails(WipByMillRowDto target, PoPlanWipRow source)
     {
         target.PlannedMonth = source.PlannedMonth;
         target.PipeGrade = source.PipeGrade;
@@ -482,86 +442,24 @@ namespace NdtBundleService.Controllers;
         target.TotalPieces = source.TotalPieces;
     }
 
-    /// <summary>Merges data rows from one WIP CSV into <paramref name="byMill"/> (later calls / later rows overwrite same mill).</summary>
-    /// <returns><c>false</c> if headers are missing required columns (caller may treat as hard error for single-file mode).</returns>
-    private async Task<bool> MergeWipFileIntoByMillAsync(
-        string filePath,
-        Dictionary<int, WipByMillRowDto> byMill,
-        Dictionary<string, WipByMillRowDto> wipByPo,
-        CancellationToken cancellationToken)
-    {
-        await using var stream = System.IO.File.OpenRead(filePath);
-        using var reader = new StreamReader(stream);
-
-        var headerLine = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
-        if (headerLine is null)
+    private static WipByMillRowDto ToWipByMillRowDto(PoPlanWipRow source) =>
+        new()
         {
-            _logger.LogWarning("WIP file has no header line: {File}", filePath);
-            return false;
-        }
+            MillNo = source.MillNo,
+            PoNumber = source.PoNumber,
+            PlannedMonth = source.PlannedMonth,
+            PipeGrade = source.PipeGrade,
+            PipeSize = source.PipeSize,
+            PipeLength = source.PipeLength,
+            PiecesPerBundle = source.PiecesPerBundle,
+            TotalPieces = source.TotalPieces,
+        };
 
-        var headers = headerLine.Split(',');
-
-        static int HeaderIndex(IReadOnlyList<string> hdrs, params string[] names)
-        {
-            foreach (var name in names)
-            {
-                for (var i = 0; i < hdrs.Count; i++)
-                {
-                    if (string.Equals(hdrs[i].Trim(), name, StringComparison.OrdinalIgnoreCase))
-                        return i;
-                }
-            }
-
-            return -1;
-        }
-
-        var poIdx = HeaderIndex(headers, "PO_No", "PO Number", "PO No");
-        var millIdx = HeaderIndex(headers, "Mill Number", "Mill No");
-        if (millIdx < 0 || poIdx < 0)
-        {
-            _logger.LogWarning(
-                "Skipping WIP file (missing PO or mill column): {File}. Expected Mill Number/Mill No and PO_No/PO Number/PO No.",
-                filePath);
-            return false;
-        }
-
-        int Idx(string columnName) => HeaderIndex(headers, columnName);
-
-        while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
-        {
-            if (string.IsNullOrWhiteSpace(line))
-                continue;
-            var cols = line.Split(',');
-            if (cols.Length <= millIdx)
-                continue;
-            var millRaw = cols[millIdx].Trim();
-            if (!InputSlitCsvParsing.TryParseMillNo(millRaw, out var millNo))
-                continue;
-
-            string Cell(int idx) => idx >= 0 && idx < cols.Length ? cols[idx].Trim() : string.Empty;
-
-            var po = Cell(poIdx);
-            if (string.IsNullOrWhiteSpace(po))
-                continue;
-
-            var dto = new WipByMillRowDto
-            {
-                MillNo = millNo,
-                PoNumber = po,
-                PlannedMonth = Cell(Idx("Planned Month")),
-                PipeGrade = Cell(Idx("Pipe Grade")),
-                PipeSize = Cell(Idx("Pipe Size")),
-                PipeLength = Cell(Idx("Pipe Length")),
-                PiecesPerBundle = Cell(Idx("Pieces Per Bundle")),
-                TotalPieces = Cell(Idx("Total Pieces")),
-            };
-            byMill[millNo] = dto;
-            wipByPo[InputSlitCsvParsing.NormalizePo(po)] = dto;
-        }
-
-        return true;
-    }
+    private static PoPlanWipEnrichmentSnapshot EmptyWipEnrichment() =>
+        new(
+            new Dictionary<int, PoPlanWipRow>(),
+            new Dictionary<string, PoPlanWipRow>(StringComparer.OrdinalIgnoreCase),
+            string.Empty);
 
     /// <summary>
     /// True when <see cref="NdtBundleOptions.PoPlanFolder"/> is set but <see cref="Directory.Exists"/> is false

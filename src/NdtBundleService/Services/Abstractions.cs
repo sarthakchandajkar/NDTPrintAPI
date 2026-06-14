@@ -57,6 +57,18 @@ public interface IPipeSizeProvider
 {
     /// <summary>Returns PO Number -> Pipe Size. Empty or missing PO means no size (Default formation used for threshold; no per-size count).</summary>
     Task<IReadOnlyDictionary<string, string>> GetPipeSizeByPoAsync(CancellationToken cancellationToken);
+
+    /// <summary>Returns the cached map when available; null when the cache has not been built yet.</summary>
+    IReadOnlyDictionary<string, string>? TryGetCachedPipeSizes();
+}
+
+/// <summary>Cached PO plan WIP rows for dashboard enrichment (pipe grade, SAP pieces/bundle, etc.).</summary>
+public interface IPoPlanWipEnrichmentProvider
+{
+    Task<PoPlanWipEnrichmentSnapshot> GetEnrichmentAsync(CancellationToken cancellationToken);
+
+    /// <summary>Returns the cached snapshot when available; null when the cache has not been built yet.</summary>
+    PoPlanWipEnrichmentSnapshot? TryGetCachedEnrichment();
 }
 
 /// <summary>

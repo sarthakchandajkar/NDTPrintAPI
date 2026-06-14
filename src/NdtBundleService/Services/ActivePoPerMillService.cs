@@ -38,16 +38,16 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
     /// <inheritdoc />
     public async Task<IReadOnlyDictionary<int, string>> GetLatestPoByMillAsync(CancellationToken cancellationToken)
     {
-        var fromLatestFiles = await GetLatestPoPerMillFromLatestFilesAsync(cancellationToken).ConfigureAwait(false);
-        if (fromLatestFiles.Count == 4)
-            return await MergeRunningPoFromWipAsync(fromLatestFiles, cancellationToken).ConfigureAwait(false);
-
         if (UseDatabaseForSummary)
         {
             var fromDb = await GetLatestPoPerMillFromDatabaseAsync(cancellationToken).ConfigureAwait(false);
             if (fromDb.Count > 0)
                 return await MergeRunningPoFromWipAsync(fromDb, cancellationToken).ConfigureAwait(false);
         }
+
+        var fromLatestFiles = await GetLatestPoPerMillFromLatestFilesAsync(cancellationToken).ConfigureAwait(false);
+        if (fromLatestFiles.Count > 0)
+            return await MergeRunningPoFromWipAsync(fromLatestFiles, cancellationToken).ConfigureAwait(false);
 
         var result = new Dictionary<int, string>();
         var files = GetEligibleInputSlitCsvFilesOrdered();
