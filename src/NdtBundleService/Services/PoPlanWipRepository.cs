@@ -44,7 +44,7 @@ WHERE PO_Number = @PoNumber
 ORDER BY ImportedAtUtc DESC, PO_Plan_WIP_ID DESC;";
 
     private const string SignatureSql = @"
-SELECT COUNT_BIG(1) AS RowCount, MAX(ImportedAtUtc) AS MaxImportedUtc, MAX(PO_Plan_WIP_ID) AS MaxId
+SELECT COUNT_BIG(1) AS TotalRows, MAX(ImportedAtUtc) AS MaxImportedUtc, MAX(PO_Plan_WIP_ID) AS MaxId
 FROM dbo.PO_Plan_WIP;";
 
     private const string ImportSourcePresentSql = @"
