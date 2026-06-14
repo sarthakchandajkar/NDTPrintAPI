@@ -34,40 +34,6 @@ public interface INdtBundleRepository
         string batchNo,
         IReadOnlyList<string> slitNos,
         CancellationToken cancellationToken);
-
-    /// <summary>Deletes NDT_Bundle rows and bundle summary/per-slit output CSVs from the cutoff date onward.</summary>
-    Task<NdtBundleCsvPurgeResult> PurgeDerivedCsvAndBundlesFromDateAsync(DateTime fromUtc, CancellationToken cancellationToken);
-
-    /// <summary>Max 5-digit sequence per mill for the current calendar year (SQL first, CSV fallback).</summary>
-    Task<IReadOnlyDictionary<int, int>> GetMaxSequenceByMillForCurrentYearAsync(CancellationToken cancellationToken);
-
-    /// <summary>Max 5-digit sequence per mill for bundles printed before <paramref name="beforeUtc"/> in the current year.</summary>
-    Task<IReadOnlyDictionary<int, int>> GetMaxSequenceByMillBeforeUtcAsync(DateTime beforeUtc, CancellationToken cancellationToken);
-
-    /// <summary>Max 5-digit sequence per mill for bundles whose PO is in <paramref name="poNumbers"/>.</summary>
-    Task<IReadOnlyDictionary<int, int>> GetMaxSequenceByMillForPoNumbersAsync(IReadOnlySet<string> poNumbers, CancellationToken cancellationToken);
-
-    /// <summary>Deletes bundle SQL/CSV artifacts for the given PO numbers (and optional date floor).</summary>
-    Task<NdtBundleCsvPurgeResult> PurgeDerivedForPoNumbersAsync(IReadOnlySet<string> poNumbers, DateTime? alsoFromUtc, CancellationToken cancellationToken);
-}
-
-public sealed class MillSequenceStatusSnapshot
-{
-    public bool Initialized { get; init; }
-    public string? StateFilePath { get; init; }
-    public bool StateFileLoaded { get; init; }
-    public bool StateFileWritable { get; init; }
-    public IReadOnlyList<string> HydrationSources { get; init; } = Array.Empty<string>();
-    public IReadOnlyDictionary<int, int> BatchOffsetByMill { get; init; } = new Dictionary<int, int>();
-    public IReadOnlyDictionary<int, int> EngineBatchNoByMill { get; init; } = new Dictionary<int, int>();
-}
-
-public sealed class NdtBundleCsvPurgeResult
-{
-    public int BundleSummaryFilesDeleted { get; init; }
-    public int PerSlitOutputFilesDeleted { get; init; }
-    public int NdtProcessFilesDeleted { get; init; }
-    public int SqlBundlesDeleted { get; init; }
 }
 
 public interface IPoPlanProvider
@@ -190,10 +156,19 @@ public interface IActivePoPerMillService
     IReadOnlyList<string> GetInputSlitReadFolderPaths();
 }
 
-/// <summary>Running PO for a mill from latest <c>WIP_MM_…</c> file in the TM bundle folder.</summary>
+/// <summary>
+/// Running PO for a mill from the latest <c>WIP_MM_…</c> file in the TM Bundle folder.
+/// After PO end, waits for a newer WIP file for that mill before returning the next PO.
+/// </summary>
 public interface IWipBundleRunningPoProvider
 {
     Task<string?> TryGetRunningPoForMillAsync(int millNo, CancellationToken cancellationToken);
+
+    /// <summary>Call after PO end workflow completes; mill waits for a new WIP bundle file before the next PO is active.</summary>
+    void NotifyPoEndForMill(int millNo, string endedPo);
+
+    /// <summary>True when PO end completed but no qualifying new WIP bundle file has arrived yet for this mill.</summary>
+    bool IsWaitingForNewWipAfterPoEnd(int millNo);
 }
 
 /// <summary>Live NDT pipe counter from the mill Siemens PLC (data block INT).</summary>

@@ -1,5 +1,3 @@
-using System.Globalization;
-using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using NdtBundleService.Configuration;
 using NdtBundleService.Models;
@@ -11,14 +9,6 @@ namespace NdtBundleService.Services;
 /// </summary>
 public static class WipCsvLabelLookup
 {
-    private static readonly Regex WipFileNameFull = new(
-        @"^WIP_(\d{2})_(\d+)_(\d+)_(\d{6})_(\d{6})(\.csv)?$",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-
-    private static readonly Regex WipFileNameShort = new(
-        @"^WIP_(\d{2})_(\d+)_(\d{6})_(\d{6})\.csv$",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-
     public static async Task<WipLabelInfo?> ResolveAsync(
         NdtBundleOptions options,
         string? currentPoPlanPath,
@@ -106,24 +96,36 @@ public static class WipCsvLabelLookup
     private static IEnumerable<string> EnumerateWipBundleCsvPaths(NdtBundleOptions options, string poNumber, int millNo)
     {
         var live = options.MillSlitLive ?? new MillSlitLiveOptions();
-        foreach (var folder in new[] { live.WipBundleFolder, live.WipBundleAcceptedFolder })
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var folder in new[]
+                 {
+                     live.WipBundleFolder,
+                     live.WipBundleAcceptedFolder,
+                     options.FgBundleFolder,
+                     options.FgBundleAcceptedFolder
+                 })
         {
             var root = (folder ?? string.Empty).Trim();
             if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
                 continue;
 
-            foreach (var path in Directory.EnumerateFiles(root, "WIP_*.csv")
+            foreach (var path in Directory.EnumerateFiles(root)
                          .OrderByDescending(File.GetLastWriteTimeUtc)
                          .ThenBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase))
             {
-                var name = Path.GetFileName(path);
-                var meta = ParseWipFileName(name);
-                if (meta is null)
+                if (!seen.Add(path))
                     continue;
-                if (!int.TryParse(meta.MillDigits, NumberStyles.Integer, CultureInfo.InvariantCulture, out var fileMill) || fileMill != millNo)
+
+                var name = Path.GetFileName(path);
+                if (!name.StartsWith("WIP_", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var meta = WipBundleFileName.TryParse(name);
+                if (meta is null || meta.MillNo != millNo)
                     continue;
                 if (!InputSlitCsvParsing.PoEquals(meta.PoNumber, poNumber))
                     continue;
+
                 yield return path;
             }
         }
@@ -145,14 +147,20 @@ public static class WipCsvLabelLookup
         if (headerRaw is null)
             return false;
 
-        var headers = InputSlitCsvParsing.SplitCsvFields(InputSlitCsvParsing.StripBom(headerRaw));
+        var headers = InputSlitCsvParsing.SplitDataFields(InputSlitCsvParsing.StripBom(headerRaw));
         var poIdx = InputSlitCsvParsing.HeaderIndex(headers, "PO_No", "PO Number", "PO No");
-        var millIdx = InputSlitCsvParsing.HeaderIndex(headers, "Mill Number", "Mill No");
+        var millIdx = InputSlitCsvParsing.HeaderIndex(headers, "Mill Number", "Mill No", "Mill Line No");
         var gradeIdx = InputSlitCsvParsing.HeaderIndex(headers, "Pipe Grade", "Grade");
         var sizeIdx = InputSlitCsvParsing.HeaderIndex(headers, "Pipe Size", "Size");
         var thicknessIdx = InputSlitCsvParsing.HeaderIndex(headers, "Pipe Thickness", "Thickness");
         var lengthIdx = InputSlitCsvParsing.HeaderIndex(headers, "Pipe Length", "Length");
-        var weightIdx = InputSlitCsvParsing.HeaderIndex(headers, "Pipe Weight Per Meter", "Weight Per Meter", "Pipe Weight");
+        var weightIdx = InputSlitCsvParsing.HeaderIndex(
+            headers,
+            "Pipe Weight Per Meter",
+            "Weight Per Meter",
+            "Pipe Weight",
+            "Pipe Wt/mtr",
+            "Pipe Wt/m");
         var typeIdx = InputSlitCsvParsing.HeaderIndex(headers, "Pipe Type", "Type");
 
         if (poIdx < 0)
@@ -164,7 +172,7 @@ public static class WipCsvLabelLookup
             if (string.IsNullOrWhiteSpace(line))
                 continue;
 
-            var cols = InputSlitCsvParsing.SplitCsvFields(line);
+            var cols = InputSlitCsvParsing.SplitDataFields(line);
             if (poIdx >= cols.Length)
                 continue;
 
@@ -187,21 +195,6 @@ public static class WipCsvLabelLookup
 
         return matched;
     }
-
-    private static WipMeta? ParseWipFileName(string fileName)
-    {
-        var m = WipFileNameFull.Match(fileName);
-        if (m.Success)
-            return new WipMeta(m.Groups[1].Value, m.Groups[2].Value);
-
-        m = WipFileNameShort.Match(fileName);
-        if (m.Success)
-            return new WipMeta(m.Groups[1].Value, m.Groups[2].Value);
-
-        return null;
-    }
-
-    private sealed record WipMeta(string MillDigits, string PoNumber);
 
     private sealed class MutableWipLabelInfo
     {
@@ -230,6 +223,7 @@ public static class WipCsvLabelLookup
 
         public bool HasPrimaryFields() =>
             !string.IsNullOrWhiteSpace(PipeSize)
+            || !string.IsNullOrWhiteSpace(PipeThickness)
             || !string.IsNullOrWhiteSpace(PipeLength)
             || !string.IsNullOrWhiteSpace(PipeWeightPerMeter)
             || !string.IsNullOrWhiteSpace(PipeGrade);

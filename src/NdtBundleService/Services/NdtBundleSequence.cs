@@ -17,7 +17,11 @@ public static class NdtBundleSequence
     }
 
     /// <summary>Returns the 5-digit sequence when the batch matches the current calendar year and mill; otherwise 0.</summary>
-    public static bool TryParseSequenceForCurrentYear(string? bundleNo, int millNo, out int sequence)
+    public static bool TryParseSequenceForCurrentYear(string? bundleNo, int millNo, out int sequence) =>
+        TryParseSequence(bundleNo, millNo, out sequence, DateTime.Now);
+
+    /// <summary>Returns the 5-digit sequence when the batch matches the given year and mill.</summary>
+    public static bool TryParseSequence(string? bundleNo, int millNo, out int sequence, DateTime? asOf = null)
     {
         sequence = 0;
         if (string.IsNullOrWhiteSpace(bundleNo) || bundleNo.Trim().Length != BatchNoLength)
@@ -27,7 +31,7 @@ public static class NdtBundleSequence
         if (!s.StartsWith("12", StringComparison.Ordinal))
             return false;
 
-        var yy = DateTime.Now.Year % 100;
+        var yy = (asOf ?? DateTime.Now).Year % 100;
         if (!int.TryParse(s.AsSpan(2, 2), NumberStyles.None, CultureInfo.InvariantCulture, out var fileYy))
             return false;
         if (fileYy != yy)

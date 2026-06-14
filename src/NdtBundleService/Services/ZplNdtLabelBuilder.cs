@@ -8,7 +8,7 @@ namespace NdtBundleService.Services;
 /// - Top: Code 128 barcode with NDT Batch Number (human-readable line printed by the barcode command)
 /// - Middle content (3 lines):
 ///   Mill, PO Number, NDT Batch Number on one line
-///   Grade, Pipe Size, Pipe Length, Bundle/pipe weight on one line
+///   Grade, Pipe Size, Pipe Thickness, Pipe Length, Bundle/pipe weight on one line
 ///   Date, Number of NDT pipes, Pipe type/WIP/FG and optional "Reprint" on one line
 /// - Bottom: two stacked Code 128 barcodes with the same NDT Batch Number.
 /// </summary>
@@ -60,13 +60,13 @@ public static class ZplNdtLabelBuilder
         zpl.AppendFormat("^FO80,{0}^FB640,1,0,C,0^FDMill- {1}  PO: {2}  Bund: {3}^FS", y, millNo, escapedPo, escapedBatch);
         y += lineHeight;
 
-        // Middle content – line 2: Grade, Pipe Size, Pipe Length, Weight
-        // (Weight uses the available WIP field, typically per-meter or bundle weight)
+        // Middle content – line 2: Grade, Pipe Size, Pipe Thickness, Pipe Length, Weight
         var gradePart = string.IsNullOrEmpty(escapedGrade) ? "Gr- -" : $"Gr- {escapedGrade}";
-        zpl.AppendFormat("^FO80,{0}^FB640,1,0,C,0^FD{1}  Size: {2}  Len: {3}  Wt: {4}^FS",
+        zpl.AppendFormat("^FO80,{0}^FB640,1,0,C,0^FD{1}  Size: {2}  Thk: {3}  Len: {4}  Wt: {5}^FS",
             y,
             gradePart,
             string.IsNullOrEmpty(escapedSize) ? "-" : escapedSize,
+            string.IsNullOrEmpty(escapedThickness) ? "-" : escapedThickness,
             string.IsNullOrEmpty(escapedLength) ? "-" : escapedLength,
             string.IsNullOrEmpty(escapedWeight) ? "-" : escapedWeight);
         y += lineHeight;

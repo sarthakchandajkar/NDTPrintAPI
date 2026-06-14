@@ -25,20 +25,29 @@ public sealed class PipeSizeCsvProvider : IPipeSizeProvider
     public async Task<IReadOnlyDictionary<string, string>> GetPipeSizeByPoAsync(CancellationToken cancellationToken)
     {
         var paths = ResolvePipeSizeSourcePaths();
-        if (paths.Count == 0)
-        {
-            _logger.LogWarning("Pipe size CSV source not found (PoPlanFolder/PipeSizeCsvPath). Size-based bundle logic will use Default formation only.");
-            return EmptyPipeSizeMap();
-        }
-
-        var signature = BuildCacheSignature(paths);
+        var wipFolders = ResolveWipBundleFolders();
+        var signature = BuildCacheSignature(paths, wipFolders);
         lock (_cacheLock)
         {
             if (_cached is not null && string.Equals(_cacheSignature, signature, StringComparison.Ordinal))
                 return _cached;
         }
 
-        var result = await LoadPipeSizeMapAsync(paths, cancellationToken).ConfigureAwait(false);
+        var result = paths.Count > 0
+            ? new Dictionary<string, string>(await LoadPipeSizeMapAsync(paths, cancellationToken).ConfigureAwait(false), StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        await MergeWipBundlePipeSizesAsync(result, wipFolders, cancellationToken).ConfigureAwait(false);
+
+        if (result.Count == 0)
+        {
+            _logger.LogWarning(
+                "Pipe size not found in PoPlanFolder, PipeSizeCsvPath, or TM WIP bundle CSVs. Size-based bundle logic will use Default formation only.");
+        }
+        else
+        {
+            _logger.LogInformation("Loaded pipe size for {Count} PO(s).", result.Count);
+        }
 
         lock (_cacheLock)
         {
@@ -70,14 +79,116 @@ public sealed class PipeSizeCsvProvider : IPipeSizeProvider
         return paths;
     }
 
-    private static string BuildCacheSignature(IReadOnlyList<string> paths)
+    private static string BuildCacheSignature(IReadOnlyList<string> paths, IReadOnlyList<string> wipFolders)
     {
-        if (paths.Count == 0)
-            return string.Empty;
+        var planPart = paths.Count == 0
+            ? string.Empty
+            : string.Join(';', paths.Select(path => $"{path}|{File.GetLastWriteTimeUtc(path).Ticks}"));
 
-        return string.Join(
-            ';',
-            paths.Select(path => $"{path}|{File.GetLastWriteTimeUtc(path).Ticks}"));
+        var wipPart = wipFolders.Count == 0
+            ? string.Empty
+            : string.Join(';', wipFolders.Select(folder =>
+            {
+                try
+                {
+                    return $"{folder}|{Directory.GetLastWriteTimeUtc(folder).Ticks}";
+                }
+                catch
+                {
+                    return folder;
+                }
+            }));
+
+        return planPart + "||" + wipPart;
+    }
+
+    private List<string> ResolveWipBundleFolders()
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var live = _options.MillSlitLive ?? new MillSlitLiveOptions();
+        var folders = new List<string>();
+        foreach (var folder in new[]
+                 {
+                     live.WipBundleFolder,
+                     live.WipBundleAcceptedFolder,
+                     _options.FgBundleFolder,
+                     _options.FgBundleAcceptedFolder
+                 })
+        {
+            var trimmed = (folder ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(trimmed) || !Directory.Exists(trimmed) || !seen.Add(trimmed))
+                continue;
+            folders.Add(trimmed);
+        }
+
+        return folders;
+    }
+
+    private static async Task MergeWipBundlePipeSizesAsync(
+        Dictionary<string, string> result,
+        IReadOnlyList<string> wipFolders,
+        CancellationToken cancellationToken)
+    {
+        foreach (var folder in wipFolders)
+        {
+            IEnumerable<string> files;
+            try
+            {
+                files = Directory.EnumerateFiles(folder)
+                    .Where(name => Path.GetFileName(name).StartsWith("WIP_", StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(path => File.GetLastWriteTimeUtc(path));
+            }
+            catch
+            {
+                continue;
+            }
+
+            foreach (var path in files)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                await TryMergePipeSizeFromWipCsvAsync(path, result, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private static async Task TryMergePipeSizeFromWipCsvAsync(
+        string filePath,
+        Dictionary<string, string> result,
+        CancellationToken cancellationToken)
+    {
+        var fileName = Path.GetFileName(filePath);
+        var meta = WipBundleFileName.TryParse(fileName);
+
+        await using var stream = File.OpenRead(filePath);
+        using var reader = new StreamReader(stream);
+        var headerLine = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+        if (headerLine is null)
+            return;
+
+        var headers = InputSlitCsvParsing.SplitDataFields(InputSlitCsvParsing.StripBom(headerLine));
+        var poIndex = InputSlitCsvParsing.HeaderIndex(headers, "PO Number", "PO_No", "PO No");
+        var sizeIndex = InputSlitCsvParsing.HeaderIndex(headers, "Pipe Size", "Size");
+        if (sizeIndex < 0)
+            return;
+
+        while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+        {
+            if (string.IsNullOrWhiteSpace(line))
+                continue;
+
+            var cols = InputSlitCsvParsing.SplitDataFields(line);
+            if (cols.Length <= sizeIndex)
+                continue;
+
+            var poNumber = poIndex >= 0 && poIndex < cols.Length
+                ? InputSlitCsvParsing.NormalizePo(cols[poIndex].Trim())
+                : meta?.PoNumber ?? string.Empty;
+            var pipeSize = cols[sizeIndex].Trim();
+            if (string.IsNullOrWhiteSpace(poNumber) || string.IsNullOrWhiteSpace(pipeSize))
+                continue;
+
+            result[poNumber] = pipeSize;
+        }
     }
 
     private async Task<IReadOnlyDictionary<string, string>> LoadPipeSizeMapAsync(
@@ -112,7 +223,7 @@ public sealed class PipeSizeCsvProvider : IPipeSizeProvider
                 if (string.IsNullOrWhiteSpace(line))
                     continue;
 
-                var cols = InputSlitCsvParsing.SplitCsvFields(line);
+                var cols = InputSlitCsvParsing.SplitDataFields(line);
                 if (cols.Length <= Math.Max(poIndex, sizeIndex))
                     continue;
 
@@ -125,10 +236,7 @@ public sealed class PipeSizeCsvProvider : IPipeSizeProvider
             }
         }
 
-        _logger.LogInformation("Loaded pipe size for {Count} PO(s) from {Files} file(s).", result.Count, paths.Count);
+        _logger.LogInformation("Loaded pipe size for {Count} PO(s) from {Files} PO plan file(s).", result.Count, paths.Count);
         return result;
     }
-
-    private static IReadOnlyDictionary<string, string> EmptyPipeSizeMap() =>
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 }

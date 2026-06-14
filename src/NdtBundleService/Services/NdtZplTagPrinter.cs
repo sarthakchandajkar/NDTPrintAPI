@@ -67,11 +67,12 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
         if (wip is null
             || (string.IsNullOrWhiteSpace(pipeGrade)
                 && string.IsNullOrWhiteSpace(pipeSize)
+                && string.IsNullOrWhiteSpace(pipeThickness)
                 && string.IsNullOrWhiteSpace(pipeLength)
                 && string.IsNullOrWhiteSpace(pipeWeight)))
         {
             _logger.LogWarning(
-                "NDT tag for batch {BatchNo} PO {PoNumber} mill {MillNo} is missing WIP label fields (grade/size/length/weight). Check PO plan and WIP bundle CSVs.",
+                "NDT tag for batch {BatchNo} PO {PoNumber} mill {MillNo} is missing WIP label fields (grade/size/thickness/length/weight). Check PO plan and WIP bundle CSVs.",
                 ndtBatchNoFormatted,
                 record.PoNumber,
                 record.MillNo);

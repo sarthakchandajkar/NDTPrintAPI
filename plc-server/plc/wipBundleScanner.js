@@ -36,6 +36,11 @@ function parseWipFileName(fileName) {
 }
 
 function splitCsvLine(line) {
+  const tabCount = (line.match(/\t/g) || []).length;
+  const commaCount = (line.match(/,/g) || []).length;
+  if (tabCount > 0 && tabCount >= commaCount) {
+    return line.split("\t").map((s) => s.trim());
+  }
   const out = [];
   let cur = "";
   let inQ = false;
@@ -81,12 +86,17 @@ async function readWipCsvFields(filePath) {
   };
   return {
     poNo: idx("PO_No", "PO No", "PO Number"),
-    millNumber: idx("Mill Number", "Mill No"),
+    millNumber: idx("Mill Number", "Mill No", "Mill Line No"),
     pipeGrade: idx("Pipe Grade"),
     pipeSize: idx("Pipe Size"),
-    pipeThickness: idx("Pipe Thickness"),
+    pipeThickness: idx("Pipe Thickness", "Thickness"),
     pipeLength: idx("Pipe Length"),
-    pipeWeightPerMeter: idx("Pipe Weight Per Meter", "Pipe Weight per Meter"),
+    pipeWeightPerMeter: idx(
+      "Pipe Weight Per Meter",
+      "Pipe Weight per Meter",
+      "Pipe Wt/mtr",
+      "Pipe Wt/m"
+    ),
     pipeType: idx("Pipe Type"),
     piecesPerBundle: idx("Pieces Per Bundle"),
     outputItemcode: idx("Output Itemcode"),

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
@@ -11,9 +12,7 @@ public interface INdtBundleRuntimeStateStore
 {
     Task EnsureInitializedAsync(CancellationToken cancellationToken);
 
-    Task<MillSequenceStatusSnapshot> GetStatusAsync(CancellationToken cancellationToken);
-
-    /// <summary>Completed bundle count for the mill. Next printed/indexed bundle is <see cref="GetBatchOffset"/> + 1.</summary>
+    /// <summary>Completed bundle count for (PO, mill). Next printed/indexed bundle is <see cref="GetBatchOffset"/> + 1.</summary>
     int GetBatchOffset(string poNumber, int millNo);
 
     int GetRunningTotal(string poNumber, int millNo);
@@ -37,22 +36,11 @@ public interface INdtBundleRuntimeStateStore
 
     void SetLastRecord(string poNumber, int millNo, InputSlitRecord? record);
 
-    /// <summary>Per-mill high-water marks (batch offset and engine batch no).</summary>
-    IReadOnlyDictionary<int, (int BatchOffset, int EngineBatchNo)> GetMillSequenceSnapshot();
-
-    /// <summary>Clears PO/mill aggregation and optionally sets mill sequence counters (for rebuild).</summary>
-    void ResetAllStateForRebuild(IReadOnlyDictionary<int, int>? startingSequenceByMill = null);
-
-    /// <summary>Resets in-memory state for rebuild and skips disk hydration on subsequent EnsureInitialized calls.</summary>
-    void PrepareForRebuild(IReadOnlyDictionary<int, int>? startingSequenceByMill = null);
-
     Task SaveAsync(CancellationToken cancellationToken);
 }
 
 public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
 {
-    private const int CurrentSchemaVersion = 2;
-
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
@@ -68,8 +56,6 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
 
     private PersistedRoot _root = new();
     private bool _initialized;
-    private bool _stateFileLoaded;
-    private readonly List<string> _hydrationSources = new();
 
     public NdtBundleRuntimeStateStore(
         IOptionsMonitor<NdtBundleOptions> optionsMonitor,
@@ -94,28 +80,29 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
             if (_initialized)
                 return;
 
-            _hydrationSources.Clear();
-            _stateFileLoaded = false;
-
-            if (Opt.EnableNdtBundleRuntimeStatePersistence && TryLoadFromDisk(out var loaded))
+            if (Opt.EnableNdtBundleRuntimeStatePersistence && TryLoadFromDisk(out var loaded) && loaded.Mills.Count > 0)
             {
                 _root = loaded;
-                _stateFileLoaded = true;
-                _hydrationSources.Add("StateFile");
                 _logger.LogInformation(
-                    "Loaded NDT bundle runtime state from {Path} (schema v{Version}, {MillCount} mill sequence(s), {PoCount} PO/mill slot(s)).",
+                    "Loaded NDT bundle runtime state from {Path} ({Count} PO/mill slot(s)).",
                     GetStateFilePath(),
-                    loaded.Version,
-                    loaded.MillSequences.Count,
                     loaded.Mills.Count);
-                await MergeMaxSequenceFromAuthoritativeSourcesAsync(mergeIntoExisting: true, cancellationToken).ConfigureAwait(false);
+                await MergeMaxSequenceFromBundlesAsync(cancellationToken).ConfigureAwait(false);
             }
             else
             {
                 await HydrateFromBundlesAsync(cancellationToken).ConfigureAwait(false);
             }
 
-            await ValidateSequenceHydrationAsync(cancellationToken).ConfigureAwait(false);
+            lock (_stateLock)
+            {
+                RebuildMillMaxFromSlots();
+                ApplyInitialMillBatchNumberSeeds();
+                SyncAllSlotsToMillFloors();
+                _logger.LogInformation(
+                    "NDT batch sequence floors after initialization: {MillFloors}. Next bundle per mill is floor + 1 when a new bundle closes.",
+                    FormatMillFloorsSnapshot());
+            }
 
             if (Opt.EnableNdtBundleRuntimeStatePersistence)
                 await SaveCoreAsync(cancellationToken).ConfigureAwait(false);
@@ -131,36 +118,37 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
     public int GetBatchOffset(string poNumber, int millNo)
     {
         lock (_stateLock)
-            return GetMillSequence(millNo).BatchOffset;
+            return GetSlot(poNumber, millNo).BatchOffset;
     }
 
     public int GetRunningTotal(string poNumber, int millNo)
     {
         lock (_stateLock)
-            return GetPoSlot(poNumber, millNo).RunningTotal;
+            return GetSlot(poNumber, millNo).RunningTotal;
     }
 
     public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int batchNumberForRow, out int totalSoFar)
     {
         lock (_stateLock)
         {
-            var poSlot = GetPoSlot(poNumber, millNo);
-            var millSeq = GetMillSequence(millNo);
+            var slot = GetSlot(poNumber, millNo);
             if (ndtPipes <= 0)
             {
-                totalSoFar = poSlot.RunningTotal;
+                totalSoFar = slot.RunningTotal;
                 batchNumberForRow = 0;
                 return;
             }
 
-            poSlot.RunningTotal += ndtPipes;
-            totalSoFar = poSlot.RunningTotal;
-            batchNumberForRow = millSeq.BatchOffset + 1;
+            slot.RunningTotal += ndtPipes;
+            totalSoFar = slot.RunningTotal;
+            SyncSlotToMillFloor(slot);
+            batchNumberForRow = slot.BatchOffset + 1;
 
-            if (poSlot.RunningTotal >= threshold)
+            if (slot.RunningTotal >= threshold)
             {
-                millSeq.BatchOffset += 1;
-                poSlot.RunningTotal = 0;
+                slot.BatchOffset += 1;
+                RaiseMillMaxSequence(millNo, slot.BatchOffset);
+                slot.RunningTotal = 0;
             }
         }
     }
@@ -169,15 +157,16 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
     {
         lock (_stateLock)
         {
-            var millSeq = GetMillSequence(millNo);
+            var slot = GetSlot(poNumber, millNo);
             if (closedTotalPcs <= 0)
-                return millSeq.EngineBatchNo;
+                return slot.EngineBatchNo;
 
-            millSeq.EngineBatchNo += 1;
-            if (millSeq.BatchOffset < millSeq.EngineBatchNo)
-                millSeq.BatchOffset = millSeq.EngineBatchNo;
+            slot.EngineBatchNo += 1;
+            if (slot.BatchOffset < slot.EngineBatchNo)
+                slot.BatchOffset = slot.EngineBatchNo;
+            RaiseMillMaxSequence(millNo, slot.EngineBatchNo);
 
-            return millSeq.EngineBatchNo;
+            return slot.EngineBatchNo;
         }
     }
 
@@ -185,155 +174,63 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
     {
         lock (_stateLock)
         {
-            var poSlot = GetPoSlot(poNumber, millNo);
-            var millSeq = GetMillSequence(millNo);
-            var total = poSlot.RunningTotal;
+            var slot = GetSlot(poNumber, millNo);
+            var total = slot.RunningTotal;
             if (total <= 0)
             {
-                poSlot.RunningTotal = 0;
+                slot.RunningTotal = 0;
                 return;
             }
 
-            var offset = millSeq.BatchOffset;
+            var offset = slot.BatchOffset;
             var sequence = Math.Max(1, ((total - 1) / threshold) + 1);
-            millSeq.BatchOffset = offset + sequence;
-            poSlot.RunningTotal = 0;
-            millSeq.EngineBatchNo = millSeq.BatchOffset;
+            slot.BatchOffset = offset + sequence;
+            slot.RunningTotal = 0;
+            slot.EngineBatchNo = slot.BatchOffset;
+            RaiseMillMaxSequence(millNo, slot.BatchOffset);
         }
     }
 
     public int GetEngineBatchNo(string poNumber, int millNo)
     {
         lock (_stateLock)
-            return GetMillSequence(millNo).EngineBatchNo;
+            return GetSlot(poNumber, millNo).EngineBatchNo;
     }
 
     public void SetEngineBatchNo(string poNumber, int millNo, int batchNo)
     {
         lock (_stateLock)
         {
-            var millSeq = GetMillSequence(millNo);
-            millSeq.EngineBatchNo = batchNo;
-            if (batchNo > millSeq.BatchOffset)
-                millSeq.BatchOffset = batchNo;
+            var slot = GetSlot(poNumber, millNo);
+            slot.EngineBatchNo = batchNo;
+            if (batchNo > slot.BatchOffset)
+                slot.BatchOffset = batchNo;
+            RaiseMillMaxSequence(millNo, batchNo);
         }
     }
 
     public Dictionary<string, int> GetSizeCounts(string poNumber, int millNo)
     {
         lock (_stateLock)
-            return new Dictionary<string, int>(GetPoSlot(poNumber, millNo).SizeCounts, StringComparer.OrdinalIgnoreCase);
+            return new Dictionary<string, int>(GetSlot(poNumber, millNo).SizeCounts, StringComparer.OrdinalIgnoreCase);
     }
 
     public void SetSizeCounts(string poNumber, int millNo, IReadOnlyDictionary<string, int> counts)
     {
         lock (_stateLock)
-            GetPoSlot(poNumber, millNo).SizeCounts = new Dictionary<string, int>(counts, StringComparer.OrdinalIgnoreCase);
+            GetSlot(poNumber, millNo).SizeCounts = new Dictionary<string, int>(counts, StringComparer.OrdinalIgnoreCase);
     }
 
     public InputSlitRecord? GetLastRecord(string poNumber, int millNo)
     {
         lock (_stateLock)
-            return GetPoSlot(poNumber, millNo).LastRecord;
+            return GetSlot(poNumber, millNo).LastRecord;
     }
 
     public void SetLastRecord(string poNumber, int millNo, InputSlitRecord? record)
     {
         lock (_stateLock)
-            GetPoSlot(poNumber, millNo).LastRecord = record;
-    }
-
-    public IReadOnlyDictionary<int, (int BatchOffset, int EngineBatchNo)> GetMillSequenceSnapshot()
-    {
-        lock (_stateLock)
-        {
-            var snapshot = new Dictionary<int, (int BatchOffset, int EngineBatchNo)>();
-            foreach (var mill in Enumerable.Range(1, 4))
-            {
-                if (_root.MillSequences.TryGetValue(MillKey(mill), out var seq))
-                    snapshot[mill] = (seq.BatchOffset, seq.EngineBatchNo);
-                else
-                    snapshot[mill] = (0, 0);
-            }
-
-            return snapshot;
-        }
-    }
-
-    public void ResetAllStateForRebuild(IReadOnlyDictionary<int, int>? startingSequenceByMill = null)
-    {
-        lock (_stateLock)
-        {
-            _root = new PersistedRoot { Version = CurrentSchemaVersion, UpdatedUtc = DateTime.UtcNow };
-            ApplyStartingSequences(startingSequenceByMill);
-        }
-    }
-
-    public void PrepareForRebuild(IReadOnlyDictionary<int, int>? startingSequenceByMill = null)
-    {
-        lock (_stateLock)
-        {
-            _root = new PersistedRoot { Version = CurrentSchemaVersion, UpdatedUtc = DateTime.UtcNow };
-            ApplyStartingSequences(startingSequenceByMill);
-            _initialized = true;
-        }
-    }
-
-    private void ApplyStartingSequences(IReadOnlyDictionary<int, int>? startingSequenceByMill)
-    {
-        if (startingSequenceByMill is null)
-            return;
-
-        foreach (var (mill, start) in startingSequenceByMill)
-        {
-            if (mill is < 1 or > 4 || start < 0)
-                continue;
-            _root.MillSequences[MillKey(mill)] = new PersistedMillSequence
-            {
-                MillNo = mill,
-                BatchOffset = start,
-                EngineBatchNo = start
-            };
-        }
-    }
-
-    public async Task<MillSequenceStatusSnapshot> GetStatusAsync(CancellationToken cancellationToken)
-    {
-        await EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
-
-        var path = GetStateFilePath();
-        var writable = false;
-        if (Opt.EnableNdtBundleRuntimeStatePersistence && !string.IsNullOrWhiteSpace(path))
-        {
-            try
-            {
-                var dir = Path.GetDirectoryName(path);
-                if (!string.IsNullOrEmpty(dir))
-                {
-                    Directory.CreateDirectory(dir);
-                    var probe = Path.Combine(dir, ".ndt_state_write_probe");
-                    await File.WriteAllTextAsync(probe, "ok", cancellationToken).ConfigureAwait(false);
-                    File.Delete(probe);
-                    writable = true;
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "NDT bundle runtime state path is not writable: {Path}", path);
-            }
-        }
-
-        var snapshot = GetMillSequenceSnapshot();
-        return new MillSequenceStatusSnapshot
-        {
-            Initialized = _initialized,
-            StateFilePath = path,
-            StateFileLoaded = _stateFileLoaded,
-            StateFileWritable = writable,
-            HydrationSources = _hydrationSources.ToArray(),
-            BatchOffsetByMill = snapshot.ToDictionary(kv => kv.Key, kv => kv.Value.BatchOffset),
-            EngineBatchNoByMill = snapshot.ToDictionary(kv => kv.Key, kv => kv.Value.EngineBatchNo)
-        };
+            GetSlot(poNumber, millNo).LastRecord = record;
     }
 
     public async Task SaveAsync(CancellationToken cancellationToken)
@@ -357,7 +254,6 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         PersistedRoot snapshot;
         lock (_stateLock)
         {
-            _root.Version = CurrentSchemaVersion;
             _root.UpdatedUtc = DateTime.UtcNow;
             snapshot = CloneRoot(_root);
         }
@@ -383,12 +279,10 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         {
             var json = File.ReadAllText(path);
             var parsed = JsonSerializer.Deserialize<PersistedRoot>(json, JsonOptions);
-            if (parsed is null)
+            if (parsed is null || parsed.Mills.Count == 0)
                 return false;
-
-            MigrateToV2IfNeeded(parsed);
             loaded = parsed;
-            return loaded.MillSequences.Count > 0 || loaded.Mills.Count > 0;
+            return true;
         }
         catch (Exception ex)
         {
@@ -397,59 +291,27 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         }
     }
 
-    private static void MigrateToV2IfNeeded(PersistedRoot root)
-    {
-        if (root.Version >= CurrentSchemaVersion && root.MillSequences.Count > 0)
-            return;
-
-        foreach (var slot in root.Mills.Values)
-        {
-            if (slot.MillNo is < 1 or > 4)
-                continue;
-
-            var key = MillKey(slot.MillNo);
-            if (!root.MillSequences.TryGetValue(key, out var millSeq))
-            {
-                millSeq = new PersistedMillSequence { MillNo = slot.MillNo };
-                root.MillSequences[key] = millSeq;
-            }
-
-            if (slot.BatchOffset > millSeq.BatchOffset)
-                millSeq.BatchOffset = slot.BatchOffset;
-            if (slot.EngineBatchNo > millSeq.EngineBatchNo)
-                millSeq.EngineBatchNo = slot.EngineBatchNo;
-        }
-
-        root.Version = CurrentSchemaVersion;
-    }
-
     private Task MergeMaxSequenceFromBundlesAsync(CancellationToken cancellationToken) =>
-        MergeMaxSequenceFromAuthoritativeSourcesAsync(mergeIntoExisting: true, cancellationToken);
+        ApplyMaxSequencesFromBundlesAsync(mergeIntoExisting: true, cancellationToken);
 
     private async Task HydrateFromBundlesAsync(CancellationToken cancellationToken)
     {
-        _root = new PersistedRoot { Version = CurrentSchemaVersion };
-        await MergeMaxSequenceFromAuthoritativeSourcesAsync(mergeIntoExisting: false, cancellationToken).ConfigureAwait(false);
+        _root = new PersistedRoot();
+        await ApplyMaxSequencesFromBundlesAsync(mergeIntoExisting: false, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task MergeMaxSequenceFromAuthoritativeSourcesAsync(bool mergeIntoExisting, CancellationToken cancellationToken)
+    private async Task ApplyMaxSequencesFromBundlesAsync(bool mergeIntoExisting, CancellationToken cancellationToken)
     {
-        var byMill = new Dictionary<int, int>();
-
-        try
-        {
-            var fromSql = await _bundleRepository.GetMaxSequenceByMillForCurrentYearAsync(cancellationToken).ConfigureAwait(false);
-            foreach (var (mill, seq) in fromSql)
-                byMill[mill] = seq;
-            if (fromSql.Count > 0)
-                _hydrationSources.Add("SqlMaxSequence");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Could not load max NDT bundle sequence per mill from SQL.");
-        }
-
         var bundles = await _bundleRepository.GetBundlesAsync(cancellationToken).ConfigureAwait(false);
+        if (bundles.Count == 0)
+        {
+            if (!mergeIntoExisting)
+                _logger.LogInformation("No existing NDT bundles found; runtime state starts at sequence 0 for all PO/mill pairs.");
+            return;
+        }
+
+        var byKey = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var byMill = new Dictionary<int, int>();
         foreach (var b in bundles)
         {
             if (b.MillNo is < 1 or > 4)
@@ -457,108 +319,149 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
             if (!NdtBundleSequence.TryParseSequenceForCurrentYear(b.BundleNo, b.MillNo, out var seq))
                 continue;
 
-            if (!byMill.TryGetValue(b.MillNo, out var max) || seq > max)
+            if (!byMill.TryGetValue(b.MillNo, out var millMax) || seq > millMax)
                 byMill[b.MillNo] = seq;
+
+            var po = InputSlitCsvParsing.NormalizePo(b.PoNumber);
+            var key = MakeKey(po, b.MillNo);
+            if (!byKey.TryGetValue(key, out var max) || seq > max)
+                byKey[key] = seq;
         }
 
-        if (bundles.Count > 0 && byMill.Count > 0 && !_hydrationSources.Contains("SqlMaxSequence"))
-            _hydrationSources.Add("BundleScan");
-
-        if (byMill.Count == 0)
+        var raised = 0;
+        lock (_stateLock)
         {
-            if (!mergeIntoExisting)
-                _logger.LogInformation("No existing NDT bundles found; runtime state starts at sequence 0 for all mills.");
-            return;
-        }
+            foreach (var (mill, maxSeq) in byMill)
+                RaiseMillMaxSequence(mill, maxSeq);
 
-        var raised = ApplyMaxSequencesToState(byMill, mergeIntoExisting);
+            foreach (var (key, maxSeq) in byKey)
+            {
+                var (po, mill) = ParseKey(key);
+                var slot = GetSlot(po, mill);
+                if (mergeIntoExisting && maxSeq <= slot.BatchOffset && maxSeq <= slot.EngineBatchNo)
+                    continue;
+
+                if (maxSeq > slot.BatchOffset)
+                    slot.BatchOffset = maxSeq;
+                if (maxSeq > slot.EngineBatchNo)
+                    slot.EngineBatchNo = maxSeq;
+                raised++;
+            }
+        }
 
         if (mergeIntoExisting && raised > 0)
         {
             _logger.LogWarning(
-                "Raised NDT bundle sequence for {Count} mill(s) to match printed bundles in SQL/CSV (state file was behind).",
+                "Raised NDT bundle sequence for {Count} PO/mill slot(s) to match printed bundles in SQL/CSV (state file was behind).",
                 raised);
         }
         else if (!mergeIntoExisting)
         {
             _logger.LogInformation(
-                "Hydrated NDT bundle runtime state from {BundleCount} bundle record(s); {MillCount} mill(s) with sequence restored.",
+                "Hydrated NDT bundle runtime state from {BundleCount} bundle record(s); {SlotCount} PO/mill slot(s) with sequence restored; mill floors: {MillFloors}.",
                 bundles.Count,
-                byMill.Count);
+                byKey.Count,
+                FormatMillFloorsSnapshot());
         }
     }
 
-    private int ApplyMaxSequencesToState(IReadOnlyDictionary<int, int> byMill, bool mergeIntoExisting)
+    private void RebuildMillMaxFromSlots()
     {
-        var raised = 0;
-        lock (_stateLock)
+        foreach (var slot in _root.Mills.Values)
         {
-            foreach (var (mill, maxSeq) in byMill)
-            {
-                var millSeq = GetMillSequence(mill);
-                if (mergeIntoExisting && maxSeq <= millSeq.BatchOffset && maxSeq <= millSeq.EngineBatchNo)
-                    continue;
-
-                if (maxSeq > millSeq.BatchOffset)
-                    millSeq.BatchOffset = maxSeq;
-                if (maxSeq > millSeq.EngineBatchNo)
-                    millSeq.EngineBatchNo = maxSeq;
-                raised++;
-
-                _logger.LogInformation(
-                    "Mill-{Mill} resumed at NDT bundle sequence {Seq} (formatted example: {Example}).",
-                    mill,
-                    maxSeq,
-                    NdtBundleSequence.Format(maxSeq, mill));
-            }
+            RaiseMillMaxSequence(slot.MillNo, slot.BatchOffset);
+            RaiseMillMaxSequence(slot.MillNo, slot.EngineBatchNo);
         }
-
-        return raised;
     }
 
-    private async Task ValidateSequenceHydrationAsync(CancellationToken cancellationToken)
+    private void ApplyInitialMillBatchNumberSeeds()
     {
-        if (!Opt.RequireSequenceHydration || !Opt.EnableSlitMonitoringWorker)
+        var seeds = Opt.InitialMillBatchNumbers;
+        if (seeds is null || seeds.Count == 0)
             return;
 
-        IReadOnlyDictionary<int, int> authoritative;
-        try
+        foreach (var (millKey, batchNoRaw) in seeds)
         {
-            authoritative = await _bundleRepository.GetMaxSequenceByMillForCurrentYearAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch
-        {
-            return;
-        }
-
-        if (authoritative.Count == 0)
-            return;
-
-        var snapshot = GetMillSequenceSnapshot();
-        var staleMills = new List<int>();
-        foreach (var (mill, maxSeq) in authoritative)
-        {
-            if (!snapshot.TryGetValue(mill, out var current))
+            if (!int.TryParse(millKey, NumberStyles.None, CultureInfo.InvariantCulture, out var millNo)
+                || millNo is < 1 or > 4)
             {
-                staleMills.Add(mill);
+                _logger.LogWarning("Ignoring InitialMillBatchNumbers entry with invalid mill key {Key}.", millKey);
                 continue;
             }
 
-            var currentMax = Math.Max(current.BatchOffset, current.EngineBatchNo);
-            if (currentMax < maxSeq)
-                staleMills.Add(mill);
-        }
+            var batchNo = (batchNoRaw ?? string.Empty).Trim();
+            if (string.IsNullOrEmpty(batchNo))
+                continue;
 
-        if (staleMills.Count == 0)
+            if (!NdtBundleSequence.TryParseSequence(batchNo, millNo, out var seq)
+                && (!int.TryParse(batchNo, NumberStyles.None, CultureInfo.InvariantCulture, out seq) || seq <= 0))
+            {
+                _logger.LogWarning(
+                    "Ignoring InitialMillBatchNumbers entry for mill {Mill}: could not parse {Value}.",
+                    millNo,
+                    batchNo);
+                continue;
+            }
+
+            var previous = GetMillMaxSequence(millNo);
+            RaiseMillMaxSequence(millNo, seq);
+            if (seq > previous)
+            {
+                _logger.LogInformation(
+                    "NDT batch sequence floor for mill {Mill} set from config to {Seq} ({BatchNo}).",
+                    millNo,
+                    seq,
+                    NdtBundleSequence.Format(seq, millNo));
+            }
+        }
+    }
+
+    private void SyncAllSlotsToMillFloors()
+    {
+        foreach (var slot in _root.Mills.Values)
+            SyncSlotToMillFloor(slot);
+    }
+
+    private void SyncSlotToMillFloor(PersistedMillSlot slot)
+    {
+        var floor = GetMillMaxSequence(slot.MillNo);
+        if (floor <= 0)
             return;
 
-        var mills = string.Join(", ", staleMills.Select(m => $"Mill-{m}"));
-        var message =
-            $"NDT bundle sequence hydration failed for {mills}: SQL/CSV shows current-year bundles but runtime counters are too low. " +
-            "Fix NdtBundleRuntimeState.json permissions, verify SQL connectivity, or run rebuild-ndt-from-date before processing slits.";
+        if (slot.BatchOffset < floor)
+            slot.BatchOffset = floor;
+        if (slot.EngineBatchNo < floor)
+            slot.EngineBatchNo = floor;
+    }
 
-        _logger.LogCritical(message);
-        throw new InvalidOperationException(message);
+    private int GetMillMaxSequence(int millNo)
+    {
+        var key = millNo.ToString(CultureInfo.InvariantCulture);
+        return _root.MillMaxSequence.TryGetValue(key, out var max) ? max : 0;
+    }
+
+    private void RaiseMillMaxSequence(int millNo, int sequence)
+    {
+        if (millNo is < 1 or > 4 || sequence <= 0)
+            return;
+
+        var key = millNo.ToString(CultureInfo.InvariantCulture);
+        if (!_root.MillMaxSequence.TryGetValue(key, out var current) || sequence > current)
+            _root.MillMaxSequence[key] = sequence;
+    }
+
+    private string FormatMillFloorsSnapshot()
+    {
+        var parts = new List<string>();
+        for (var mill = 1; mill <= 4; mill++)
+        {
+            var seq = GetMillMaxSequence(mill);
+            if (seq <= 0)
+                continue;
+            parts.Add($"M{mill}={NdtBundleSequence.Format(seq, mill)}");
+        }
+
+        return parts.Count == 0 ? "(none)" : string.Join(", ", parts);
     }
 
     private string GetStateFilePath()
@@ -574,60 +477,49 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         return Path.Combine(folder, "NdtBundleRuntimeState.json");
     }
 
-    private PersistedPoMillSlot GetPoSlot(string poNumber, int millNo)
+    private PersistedMillSlot GetSlot(string poNumber, int millNo)
     {
         var po = InputSlitCsvParsing.NormalizePo(poNumber);
-        var key = MakePoKey(po, millNo);
+        var key = MakeKey(po, millNo);
         if (!_root.Mills.TryGetValue(key, out var slot))
         {
-            slot = new PersistedPoMillSlot { PoNumber = po, MillNo = millNo };
+            slot = new PersistedMillSlot { PoNumber = po, MillNo = millNo };
             _root.Mills[key] = slot;
         }
 
+        SyncSlotToMillFloor(slot);
         return slot;
     }
 
-    private PersistedMillSequence GetMillSequence(int millNo)
-    {
-        var key = MillKey(millNo);
-        if (!_root.MillSequences.TryGetValue(key, out var seq))
-        {
-            seq = new PersistedMillSequence { MillNo = millNo };
-            _root.MillSequences[key] = seq;
-        }
-
-        return seq;
-    }
-
-    private static string MakePoKey(string poNumber, int millNo) =>
+    private static string MakeKey(string poNumber, int millNo) =>
         $"{InputSlitCsvParsing.NormalizePo(poNumber)}|{millNo}";
 
-    private static string MillKey(int millNo) => millNo.ToString();
+    private static (string Po, int Mill) ParseKey(string key)
+    {
+        var idx = key.LastIndexOf('|');
+        if (idx <= 0)
+            return (key, 1);
+        var po = key[..idx];
+        var mill = int.TryParse(key[(idx + 1)..], out var m) ? m : 1;
+        return (po, mill);
+    }
 
     private static PersistedRoot CloneRoot(PersistedRoot source)
     {
         var clone = new PersistedRoot { Version = source.Version, UpdatedUtc = source.UpdatedUtc };
-        foreach (var (k, v) in source.MillSequences)
-        {
-            clone.MillSequences[k] = new PersistedMillSequence
-            {
-                MillNo = v.MillNo,
-                BatchOffset = v.BatchOffset,
-                EngineBatchNo = v.EngineBatchNo
-            };
-        }
-
+        foreach (var (k, v) in source.MillMaxSequence)
+            clone.MillMaxSequence[k] = v;
         foreach (var (k, v) in source.Mills)
         {
-            clone.Mills[k] = new PersistedPoMillSlot
+            clone.Mills[k] = new PersistedMillSlot
             {
                 PoNumber = v.PoNumber,
                 MillNo = v.MillNo,
-                RunningTotal = v.RunningTotal,
-                SizeCounts = new Dictionary<string, int>(v.SizeCounts, StringComparer.OrdinalIgnoreCase),
-                LastRecord = v.LastRecord,
                 BatchOffset = v.BatchOffset,
-                EngineBatchNo = v.EngineBatchNo
+                RunningTotal = v.RunningTotal,
+                EngineBatchNo = v.EngineBatchNo,
+                SizeCounts = new Dictionary<string, int>(v.SizeCounts, StringComparer.OrdinalIgnoreCase),
+                LastRecord = v.LastRecord
             };
         }
 
@@ -636,29 +528,21 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
 
     private sealed class PersistedRoot
     {
-        public int Version { get; set; } = CurrentSchemaVersion;
+        public int Version { get; set; } = 1;
         public DateTime UpdatedUtc { get; set; }
-        public Dictionary<string, PersistedMillSequence> MillSequences { get; set; } = new(StringComparer.OrdinalIgnoreCase);
-        public Dictionary<string, PersistedPoMillSlot> Mills { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        /// <summary>Highest completed NDT batch sequence per mill (keys <c>"1"</c>–<c>"4"</c>).</summary>
+        public Dictionary<string, int> MillMaxSequence { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, PersistedMillSlot> Mills { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     }
 
-    private sealed class PersistedMillSequence
-    {
-        public int MillNo { get; set; }
-        public int BatchOffset { get; set; }
-        public int EngineBatchNo { get; set; }
-    }
-
-    private sealed class PersistedPoMillSlot
+    private sealed class PersistedMillSlot
     {
         public string PoNumber { get; set; } = string.Empty;
         public int MillNo { get; set; }
+        public int BatchOffset { get; set; }
         public int RunningTotal { get; set; }
+        public int EngineBatchNo { get; set; }
         public Dictionary<string, int> SizeCounts { get; set; } = new(StringComparer.OrdinalIgnoreCase);
         public InputSlitRecord? LastRecord { get; set; }
-
-        // Legacy v1 fields — read during migration only; not written in v2 saves from PO operations.
-        public int BatchOffset { get; set; }
-        public int EngineBatchNo { get; set; }
     }
 }

@@ -24,7 +24,6 @@ public sealed class StatusController : ControllerBase
     private readonly ISqlTraceabilityWriteTracker _sqlWriteTracker;
     private readonly AppLogReader _appLogReader;
     private readonly PlcHandshakeStatusRegistry _handshakeStatus;
-    private readonly INdtBundleRuntimeStateStore _runtimeState;
     private readonly ILogger<StatusController> _logger;
 
     public StatusController(
@@ -37,7 +36,6 @@ public sealed class StatusController : ControllerBase
         ISqlTraceabilityHealth sqlHealth,
         ISqlTraceabilityWriteTracker sqlWriteTracker,
         AppLogReader appLogReader,
-        INdtBundleRuntimeStateStore runtimeState,
         ILogger<StatusController> logger)
     {
         _plcClient = plcClient;
@@ -49,7 +47,6 @@ public sealed class StatusController : ControllerBase
         _sqlHealth = sqlHealth;
         _sqlWriteTracker = sqlWriteTracker;
         _appLogReader = appLogReader;
-        _runtimeState = runtimeState;
         _logger = logger;
     }
 
@@ -339,33 +336,6 @@ public sealed class StatusController : ControllerBase
             File = tail.FileName,
             LineCount = tail.Lines.Count,
             Lines = tail.Lines
-        });
-    }
-
-    /// <summary>Per-mill NDT bundle sequence counters (next bundle = max offset/engine + 1).</summary>
-    [HttpGet("mill-sequences")]
-    public async Task<IActionResult> GetMillSequences(CancellationToken cancellationToken)
-    {
-        var status = await _runtimeState.GetStatusAsync(cancellationToken).ConfigureAwait(false);
-        var nextByMill = new Dictionary<string, string>();
-        foreach (var mill in Enumerable.Range(1, 4))
-        {
-            status.BatchOffsetByMill.TryGetValue(mill, out var offset);
-            status.EngineBatchNoByMill.TryGetValue(mill, out var engine);
-            var max = Math.Max(offset, engine);
-            nextByMill[$"Mill-{mill}"] = NdtBundleSequence.Format(max + 1, mill);
-        }
-
-        return Ok(new
-        {
-            status.Initialized,
-            status.StateFilePath,
-            status.StateFileLoaded,
-            status.StateFileWritable,
-            status.HydrationSources,
-            status.BatchOffsetByMill,
-            status.EngineBatchNoByMill,
-            NextBundleNumberByMill = nextByMill
         });
     }
 

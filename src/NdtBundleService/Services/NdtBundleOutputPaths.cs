@@ -25,10 +25,6 @@ internal static class NdtBundleOutputPaths
     public static string GetBundleZplFileName(string ndtBatchNoFormatted) =>
         $"NDT_Bundle_{ndtBatchNoFormatted}.zpl";
 
-    public static bool IsBundleSummaryFileName(string fileName) =>
-        fileName.StartsWith("NDT_Bundle_", StringComparison.OrdinalIgnoreCase)
-        && fileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase);
-
     public static async Task TrySaveBundleZplAsync(
         NdtBundleOptions options,
         string ndtBatchNoFormatted,

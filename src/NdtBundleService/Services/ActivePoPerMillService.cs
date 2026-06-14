@@ -10,11 +10,16 @@ namespace NdtBundleService.Services;
 public sealed class ActivePoPerMillService : IActivePoPerMillService
 {
     private readonly NdtBundleOptions _options;
+    private readonly IWipBundleRunningPoProvider _wipRunningPo;
     private readonly ILogger<ActivePoPerMillService> _logger;
 
-    public ActivePoPerMillService(IOptions<NdtBundleOptions> options, ILogger<ActivePoPerMillService> logger)
+    public ActivePoPerMillService(
+        IOptions<NdtBundleOptions> options,
+        IWipBundleRunningPoProvider wipRunningPo,
+        ILogger<ActivePoPerMillService> logger)
     {
         _options = options.Value;
+        _wipRunningPo = wipRunningPo;
         _logger = logger;
     }
 
@@ -35,13 +40,13 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
     {
         var fromLatestFiles = await GetLatestPoPerMillFromLatestFilesAsync(cancellationToken).ConfigureAwait(false);
         if (fromLatestFiles.Count == 4)
-            return fromLatestFiles;
+            return await MergeRunningPoFromWipAsync(fromLatestFiles, cancellationToken).ConfigureAwait(false);
 
         if (UseDatabaseForSummary)
         {
             var fromDb = await GetLatestPoPerMillFromDatabaseAsync(cancellationToken).ConfigureAwait(false);
             if (fromDb.Count > 0)
-                return fromDb;
+                return await MergeRunningPoFromWipAsync(fromDb, cancellationToken).ConfigureAwait(false);
         }
 
         var result = new Dictionary<int, string>();
@@ -78,6 +83,23 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
                     continue;
                 result[millNo] = InputSlitCsvParsing.NormalizePo(po);
             }
+        }
+
+        return await MergeRunningPoFromWipAsync(result, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<IReadOnlyDictionary<int, string>> MergeRunningPoFromWipAsync(
+        Dictionary<int, string> result,
+        CancellationToken cancellationToken)
+    {
+        for (var millNo = 1; millNo <= 4; millNo++)
+        {
+            if (_wipRunningPo.IsWaitingForNewWipAfterPoEnd(millNo))
+                continue;
+
+            var wipPo = await _wipRunningPo.TryGetRunningPoForMillAsync(millNo, cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(wipPo))
+                result[millNo] = InputSlitCsvParsing.NormalizePo(wipPo);
         }
 
         return result;

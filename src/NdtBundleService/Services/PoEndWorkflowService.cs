@@ -10,6 +10,7 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
     private readonly INdtBundleRuntimeStateStore _runtimeState;
     private readonly ICurrentPoPlanService? _currentPoPlanService;
     private readonly IMillSlitLiveNdtAccumulator _liveNdtAccumulator;
+    private readonly IWipBundleRunningPoProvider _wipRunningPo;
     private readonly ILogger<PoEndWorkflowService> _logger;
 
     public PoEndWorkflowService(
@@ -18,6 +19,7 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
         INdtBatchStateService batchState,
         INdtBundleRuntimeStateStore runtimeState,
         IMillSlitLiveNdtAccumulator liveNdtAccumulator,
+        IWipBundleRunningPoProvider wipRunningPo,
         ILogger<PoEndWorkflowService> logger,
         ICurrentPoPlanService? currentPoPlanService = null)
     {
@@ -26,6 +28,7 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
         _batchState = batchState;
         _runtimeState = runtimeState;
         _liveNdtAccumulator = liveNdtAccumulator;
+        _wipRunningPo = wipRunningPo;
         _logger = logger;
         _currentPoPlanService = currentPoPlanService;
     }
@@ -63,6 +66,7 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
         await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
 
         _liveNdtAccumulator.OnPoEndForMill(po, millNo);
+        _wipRunningPo.NotifyPoEndForMill(millNo, po);
 
         if (advancePoPlanFile && _currentPoPlanService != null)
             await _currentPoPlanService.AdvanceToNextPoAsync(cancellationToken).ConfigureAwait(false);

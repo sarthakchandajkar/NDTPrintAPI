@@ -7,7 +7,9 @@ namespace NdtBundleService.Services.PlcHandshake;
 
 /// <summary>
 /// Persistent S7 connection and PO-change handshake for one mill:
-/// trigger TRUE → handle PO change → ack TRUE → wait trigger FALSE → ack FALSE.
+/// trigger rising edge (FALSE→TRUE) → handle PO change → ack TRUE → wait trigger FALSE → ack FALSE.
+/// Uses rising-edge detection (same as plc-server) so a held or quickly re-pulsed M-bit does not
+/// repeat the PO-end workflow until trigger has been false for several poll cycles.
 /// </summary>
 public sealed class PlcHandshakeService
 {
@@ -25,6 +27,9 @@ public sealed class PlcHandshakeService
     private int _reconnectDelayMs;
 
     private bool _primed;
+    private bool _prevTriggerActive;
+    private bool _poChangePulseHandled;
+    private int _consecutiveTriggerFalsePolls;
     private bool _handshakeInProgress;
     private volatile bool _settingsTestInProgress;
     private bool _suppressNdtUntilPoChange;
@@ -99,7 +104,7 @@ public sealed class PlcHandshakeService
                 {
                     if (!trigger)
                     {
-                        _primed = true;
+                        ArmAfterTriggerClear(isStartup: true);
                         SetState(millNo, "Idle");
                         _logger.LogDebug(
                             "{MillName}: handshake primed (trigger {Trigger} is false).",
@@ -115,18 +120,33 @@ public sealed class PlcHandshakeService
                             _mill.TriggerAddress);
                     }
 
+                    _prevTriggerActive = trigger;
                     await PollDelayAsync(stoppingToken).ConfigureAwait(false);
                     continue;
                 }
 
-                if (!_handshakeInProgress && !_settingsTestInProgress && trigger)
+                var risingEdge = TryDetectPoChangeRisingEdge(trigger);
+                var rearmedBeforePoll = IsRearmedForNextPoChange();
+                UpdateTriggerEdgeTracking(trigger);
+
+                if (risingEdge &&
+                    !_handshakeInProgress &&
+                    !_settingsTestInProgress)
                 {
+                    _poChangePulseHandled = true;
                     await RunHandshakeAsync(millNo, stoppingToken).ConfigureAwait(false);
                 }
                 else if (!_handshakeInProgress && !_settingsTestInProgress)
                 {
-                    SetState(millNo, "Idle");
+                    if (trigger && _poChangePulseHandled)
+                        SetState(millNo, "Idle (pulse handled, waiting for trigger clear)");
+                    else if (trigger && !_prevTriggerActive && !rearmedBeforePoll)
+                        SetState(millNo, "Idle (re-arming after last handshake)");
+                    else
+                        SetState(millNo, "Idle");
                 }
+
+                _prevTriggerActive = trigger;
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -137,6 +157,7 @@ public sealed class PlcHandshakeService
                 _logger.LogWarning(ex, "{MillName}: handshake poll error; reconnecting.", _mill.Name);
                 MarkDisconnected(millNo, ex.Message);
                 DisconnectPlc();
+                ResetTriggerEdgeState(reprime: true);
                 await DelayReconnectAsync(stoppingToken).ConfigureAwait(false);
                 continue;
             }
@@ -171,7 +192,7 @@ public sealed class PlcHandshakeService
         SetState(millNo, "ProcessingPoChange");
 
         _logger.LogInformation(
-            "{MillName}: trigger {Trigger} TRUE — PO change handshake started.",
+            "{MillName}: PO change rising edge on {Trigger} — handshake started.",
             _mill.Name,
             _mill.TriggerAddress);
 
@@ -258,6 +279,47 @@ public sealed class PlcHandshakeService
             _mill.AckAddress);
 
         SetState(millNo, "Idle");
+    }
+
+    private void UpdateTriggerEdgeTracking(bool trigger)
+    {
+        if (!trigger)
+        {
+            _poChangePulseHandled = false;
+            _consecutiveTriggerFalsePolls++;
+        }
+        else
+        {
+            _consecutiveTriggerFalsePolls = 0;
+        }
+    }
+
+    private bool TryDetectPoChangeRisingEdge(bool trigger) =>
+        trigger &&
+        !_prevTriggerActive &&
+        !_poChangePulseHandled &&
+        IsRearmedForNextPoChange();
+
+    private bool IsRearmedForNextPoChange()
+    {
+        var required = Math.Max(1, _options.MinimumTriggerFalsePollsBeforeRearm);
+        return _consecutiveTriggerFalsePolls >= required;
+    }
+
+    private void ArmAfterTriggerClear(bool isStartup)
+    {
+        _primed = true;
+        _prevTriggerActive = false;
+        _poChangePulseHandled = false;
+        _consecutiveTriggerFalsePolls = isStartup ? 1 : Math.Max(1, _options.MinimumTriggerFalsePollsBeforeRearm);
+    }
+
+    private void ResetTriggerEdgeState(bool reprime)
+    {
+        _primed = !reprime;
+        _prevTriggerActive = false;
+        _poChangePulseHandled = false;
+        _consecutiveTriggerFalsePolls = 0;
     }
 
     private async Task<bool> EnsureConnectedAsync(CancellationToken cancellationToken)

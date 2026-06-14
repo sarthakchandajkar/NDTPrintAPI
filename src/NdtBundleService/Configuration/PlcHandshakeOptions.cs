@@ -40,5 +40,11 @@ public sealed class PlcHandshakeOptions
     /// <summary>Byte offset of Slit ID INT (DBW10).</summary>
     public int SlitIdByteOffset { get; set; } = 10;
 
+    /// <summary>
+    /// Consecutive poll cycles with trigger FALSE required after a completed handshake before the next
+    /// rising edge is accepted (filters immediate PLC re-pulses on the same PO change).
+    /// </summary>
+    public int MinimumTriggerFalsePollsBeforeRearm { get; set; } = 2;
+
     public List<MillConfig> Mills { get; set; } = new();
 }

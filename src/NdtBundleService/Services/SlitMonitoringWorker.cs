@@ -26,7 +26,6 @@ public sealed class SlitMonitoringWorker : BackgroundService
     private readonly ISqlTraceabilityWriteTracker _sqlWriteTracker;
     private readonly IWipBundleRunningPoProvider _wipRunningPo;
     private readonly IMillNdtCountReader _millNdtCountReader;
-    private readonly IPoPlanRegistry _poPlanRegistry;
     private readonly ILogger<SlitMonitoringWorker> _logger;
 
     // Per input path: last LastWriteTimeUtc we treated as fully handled (seed baseline or successful run).
@@ -44,7 +43,6 @@ public sealed class SlitMonitoringWorker : BackgroundService
         ISqlTraceabilityWriteTracker sqlWriteTracker,
         IWipBundleRunningPoProvider wipRunningPo,
         IMillNdtCountReader millNdtCountReader,
-        IPoPlanRegistry poPlanRegistry,
         ILogger<SlitMonitoringWorker> logger)
     {
         _optionsMonitor = optionsMonitor;
@@ -57,28 +55,11 @@ public sealed class SlitMonitoringWorker : BackgroundService
         _sqlWriteTracker = sqlWriteTracker;
         _wipRunningPo = wipRunningPo;
         _millNdtCountReader = millNdtCountReader;
-        _poPlanRegistry = poPlanRegistry;
         _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (!_optionsMonitor.CurrentValue.EnableSlitMonitoringWorker)
-        {
-            _logger.LogWarning(
-                "SlitMonitoringWorker is disabled (NdtBundle:EnableSlitMonitoringWorker=false). Input slits are not processed until re-enabled.");
-            try
-            {
-                await Task.Delay(Timeout.Infinite, stoppingToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                // shutdown
-            }
-
-            return;
-        }
-
         if (!await WaitForInputSlitFolderExistsAsync(stoppingToken).ConfigureAwait(false))
             return;
 
@@ -257,16 +238,6 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
             try
             {
-                PoPlanRegistrySnapshot? poRegistry = null;
-                int? activePlannedMonth = null;
-                int? productionYear = null;
-                if (o.EnablePlannedMonthSlitFilter)
-                {
-                    poRegistry = await _poPlanRegistry.GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
-                    activePlannedMonth = ProductionMonthEligibility.ResolveActivePlannedMonth(o);
-                    productionYear = ProductionMonthEligibility.ResolveProductionYear(o, activePlannedMonth.Value);
-                }
-
                 var (headerLine, rows, ndtColumnIndex) = await ReadSlitFileWithRawLinesAsync(fileFull, cancellationToken).ConfigureAwait(false);
 
                 var qualifyingForLive = rows
@@ -278,27 +249,15 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     .ToList();
 
                 int? plcNdt = null;
-                string? wipPo = null;
                 var liveSingleSlitRow = live.Enabled && qualifyingForLive.Count == 1;
-                if (live.Enabled && qualifyingForLive.Count > 1)
-                {
-                    _logger.LogWarning(
-                        "MillSlitLive: file {File} has {N} slit row(s) for mill {M}; PLC NDT applies only to a single slit row per file. Using CSV counts for this file.",
-                        fileFull,
-                        qualifyingForLive.Count,
-                        live.ApplyToMillNo);
-                }
-
                 if (liveSingleSlitRow)
                 {
                     plcNdt = await _millNdtCountReader.TryReadNdtPipesCountAsync(cancellationToken).ConfigureAwait(false);
-                    wipPo = await _wipRunningPo.TryGetRunningPoForMillAsync(live.ApplyToMillNo, cancellationToken).ConfigureAwait(false);
                     if (plcNdt.HasValue)
                     {
                         _logger.LogInformation(
-                            "MillSlitLive: using PLC NDT={Ndt} and WIP-folder PO={Po} for mill {Mill} (file {File}).",
+                            "MillSlitLive: using PLC NDT={Ndt} for mill {Mill} (file {File}).",
                             plcNdt.Value,
-                            wipPo ?? "(unchanged)",
                             live.ApplyToMillNo,
                             Path.GetFileName(fileFull));
                     }
@@ -309,14 +268,15 @@ public sealed class SlitMonitoringWorker : BackgroundService
                             live.ApplyToMillNo,
                             Path.GetFileName(fileFull));
                     }
+                }
 
-                    if (string.IsNullOrWhiteSpace(wipPo))
-                    {
-                        _logger.LogWarning(
-                            "MillSlitLive: no WIP bundle filename PO for mill {Mill}; using slit CSV PO (file {File}).",
-                            live.ApplyToMillNo,
-                            Path.GetFileName(fileFull));
-                    }
+                if (live.Enabled && qualifyingForLive.Count > 1)
+                {
+                    _logger.LogWarning(
+                        "MillSlitLive: file {File} has {N} slit row(s) for mill {M}; PLC NDT applies only to a single slit row per file. Using CSV counts for this file.",
+                        fileFull,
+                        qualifyingForLive.Count,
+                        live.ApplyToMillNo);
                 }
 
                 // Build output content: same format as input with one extra column "NDT Batch No".
@@ -337,40 +297,34 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     }
 
                     var record = row.Record;
+                    var runningPoFromWip = await _wipRunningPo
+                        .TryGetRunningPoForMillAsync(record.MillNo, cancellationToken)
+                        .ConfigureAwait(false);
+                    var waitingForWip = _wipRunningPo.IsWaitingForNewWipAfterPoEnd(record.MillNo);
 
-                    if (poRegistry is not null && activePlannedMonth.HasValue && productionYear.HasValue)
+                    if (waitingForWip && string.IsNullOrWhiteSpace(runningPoFromWip))
                     {
-                        poRegistry.TryGet(record.MillNo, record.PoNumber, out var poEntry);
-                        if (!ProductionMonthEligibility.ShouldIncludeSlitRow(
-                                record,
-                                poEntry,
-                                productionYear.Value,
-                                activePlannedMonth.Value,
-                                out var excludeReason))
-                        {
-                            _logger.LogWarning(
-                                "Skipping Input Slit row in {File} (row {Row}): {Reason}",
-                                fileFull,
-                                sourceRowNumber,
-                                excludeReason);
-                            outputLines.Add(row.RawLine.TrimEnd() + ",");
-                            sourceRowNumber++;
-                            continue;
-                        }
+                        _logger.LogInformation(
+                            "Mill {Mill}: waiting for new WIP bundle file in TM Bundle folder after PO end; skipping bundling for slit row in {File}.",
+                            record.MillNo,
+                            Path.GetFileName(fileFull));
+                        outputLines.Add(row.RawLine.TrimEnd() + ",");
+                        sourceRowNumber++;
+                        continue;
                     }
 
                     var useLiveThisRow = liveSingleSlitRow
                                          && record.MillNo == live.ApplyToMillNo
                                          && !string.IsNullOrWhiteSpace(record.PoNumber);
 
-                    var effectivePo = useLiveThisRow && !string.IsNullOrWhiteSpace(wipPo)
-                        ? InputSlitCsvParsing.NormalizePo(wipPo)
+                    var effectivePo = !string.IsNullOrWhiteSpace(runningPoFromWip)
+                        ? runningPoFromWip
                         : record.PoNumber;
                     var effectiveNdt = useLiveThisRow && plcNdt.HasValue
                         ? plcNdt.Value
                         : record.NdtPipes;
 
-                    if (useLiveThisRow && !string.IsNullOrWhiteSpace(wipPo))
+                    if (!string.IsNullOrWhiteSpace(runningPoFromWip))
                         poOverrideForFileName = effectivePo;
 
                     var effectiveRecord = new InputSlitRecord
@@ -634,7 +588,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         var raw = cols[index].Trim();
         if (string.IsNullOrEmpty(raw))
             return null;
-        return InputSlitCsvParsing.TryParseSlitDateTime(raw, out var dt) ? dt : null;
+        return DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var dt) ? dt : null;
     }
 
     private bool IsPlcHandshakeEnabled() =>

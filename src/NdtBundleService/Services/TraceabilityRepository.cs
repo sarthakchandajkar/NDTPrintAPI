@@ -95,21 +95,6 @@ public interface ITraceabilityRepository
         DateTime? bundleEnd,
         string? outputFilePath,
         CancellationToken cancellationToken);
-
-    /// <summary>Deletes traceability rows from the cutoff date onward (Input/Output slits, process, manual, upload).</summary>
-    Task<NdtTraceabilityPurgeResult> PurgeTraceabilityFromDateAsync(DateTime fromUtc, CancellationToken cancellationToken);
-
-    /// <summary>Deletes traceability rows for the given PO numbers (planned-month rebuild purge).</summary>
-    Task<NdtTraceabilityPurgeResult> PurgeTraceabilityForPoNumbersAsync(IReadOnlySet<string> poNumbers, CancellationToken cancellationToken);
-}
-
-public sealed class NdtTraceabilityPurgeResult
-{
-    public int InputSlitRowsDeleted { get; init; }
-    public int OutputSlitRowsDeleted { get; init; }
-    public int NdtProcessRowsDeleted { get; init; }
-    public int ManualStationRowsDeleted { get; init; }
-    public int UploadBundleRowsDeleted { get; init; }
 }
 
 public sealed class UploadBundleRow
@@ -878,92 +863,6 @@ END";
         cmd.Parameters.AddWithValue("@NdtShortLengthPipe", (object?)NullIfEmpty(record.NdtShortLengthPipe) ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@RejectedShortLengthPipe", (object?)NullIfEmpty(record.RejectedShortLengthPipe) ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<NdtTraceabilityPurgeResult> PurgeTraceabilityFromDateAsync(DateTime fromUtc, CancellationToken cancellationToken)
-    {
-        if (!Enabled)
-        {
-            return new NdtTraceabilityPurgeResult();
-        }
-
-        await using var conn = SqlTraceabilityConnection.Create(Opt);
-        await OpenConnectionAsync(conn, "traceability purge", cancellationToken).ConfigureAwait(false);
-
-        var upload = await ExecuteDeleteAsync(conn, "DELETE FROM dbo.Upload_Bundle_Row WHERE GeneratedAtUtc >= @FromUtc", fromUtc, cancellationToken).ConfigureAwait(false);
-        var manual = await ExecuteDeleteAsync(conn, "DELETE FROM dbo.Manual_Station_Run WHERE Bundle_End >= @FromUtc OR ImportedAtUtc >= @FromUtc", fromUtc, cancellationToken).ConfigureAwait(false);
-        var process = await ExecuteDeleteAsync(conn, "DELETE FROM dbo.NDT_Process_Consolidated WHERE Bundle_End >= @FromUtc OR CreatedAtUtc >= @FromUtc", fromUtc, cancellationToken).ConfigureAwait(false);
-        var output = await ExecuteDeleteAsync(conn, "DELETE FROM dbo.Output_Slit_Row WHERE Slit_Finish_Time >= @FromUtc OR WrittenAtUtc >= @FromUtc", fromUtc, cancellationToken).ConfigureAwait(false);
-        var input = await ExecuteDeleteAsync(conn, "DELETE FROM dbo.Input_Slit_Row WHERE ImportedAtUtc >= @FromUtc OR Slit_Finish_Time >= @FromUtc", fromUtc, cancellationToken).ConfigureAwait(false);
-
-        _logger.LogInformation(
-            "Purged traceability from {FromUtc:o}: Input={Input}, Output={Output}, Process={Process}, Manual={Manual}, Upload={Upload}.",
-            fromUtc,
-            input,
-            output,
-            process,
-            manual,
-            upload);
-
-        return new NdtTraceabilityPurgeResult
-        {
-            InputSlitRowsDeleted = input,
-            OutputSlitRowsDeleted = output,
-            NdtProcessRowsDeleted = process,
-            ManualStationRowsDeleted = manual,
-            UploadBundleRowsDeleted = upload
-        };
-    }
-
-    private static async Task<int> ExecuteDeleteAsync(SqlConnection conn, string sql, DateTime fromUtc, CancellationToken cancellationToken)
-    {
-        await using var cmd = new SqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("@FromUtc", fromUtc);
-        return await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<NdtTraceabilityPurgeResult> PurgeTraceabilityForPoNumbersAsync(IReadOnlySet<string> poNumbers, CancellationToken cancellationToken)
-    {
-        if (!Enabled || poNumbers.Count == 0)
-            return new NdtTraceabilityPurgeResult();
-
-        await using var conn = SqlTraceabilityConnection.Create(Opt);
-        await OpenConnectionAsync(conn, "traceability purge by PO", cancellationToken).ConfigureAwait(false);
-
-        var poList = poNumbers.Select(InputSlitCsvParsing.NormalizePo).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        var inClause = string.Join(", ", poList.Select((_, i) => $"@Po{i}"));
-
-        var upload = await ExecuteDeleteByPoListAsync(conn, $"DELETE FROM dbo.Upload_Bundle_Row WHERE PO_NO IN ({inClause})", poList, cancellationToken).ConfigureAwait(false);
-        var manual = await ExecuteDeleteByPoListAsync(conn, $"DELETE FROM dbo.Manual_Station_Run WHERE PO_Number IN ({inClause})", poList, cancellationToken).ConfigureAwait(false);
-        var process = await ExecuteDeleteByPoListAsync(conn, $"DELETE FROM dbo.NDT_Process_Consolidated WHERE PO_Number IN ({inClause})", poList, cancellationToken).ConfigureAwait(false);
-        var output = await ExecuteDeleteByPoListAsync(conn, $"DELETE FROM dbo.Output_Slit_Row WHERE PO_Number IN ({inClause})", poList, cancellationToken).ConfigureAwait(false);
-        var input = await ExecuteDeleteByPoListAsync(conn, $"DELETE FROM dbo.Input_Slit_Row WHERE PO_Number IN ({inClause})", poList, cancellationToken).ConfigureAwait(false);
-
-        _logger.LogInformation(
-            "Purged traceability for {PoCount} PO(s): Input={Input}, Output={Output}, Process={Process}, Manual={Manual}, Upload={Upload}.",
-            poList.Count,
-            input,
-            output,
-            process,
-            manual,
-            upload);
-
-        return new NdtTraceabilityPurgeResult
-        {
-            InputSlitRowsDeleted = input,
-            OutputSlitRowsDeleted = output,
-            NdtProcessRowsDeleted = process,
-            ManualStationRowsDeleted = manual,
-            UploadBundleRowsDeleted = upload
-        };
-    }
-
-    private static async Task<int> ExecuteDeleteByPoListAsync(SqlConnection conn, string sql, IReadOnlyList<string> poList, CancellationToken cancellationToken)
-    {
-        await using var cmd = new SqlCommand(sql, conn);
-        for (var i = 0; i < poList.Count; i++)
-            cmd.Parameters.AddWithValue($"@Po{i}", poList[i]);
-        return await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 }
 

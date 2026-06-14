@@ -47,9 +47,6 @@ public class NdtBundleOptions
     /// <summary>Polling interval in seconds for scanning input folders and PLC signals.</summary>
     public int PollIntervalSeconds { get; set; } = 5;
 
-    /// <summary>When false, <see cref="SlitMonitoringWorker"/> does not process input slits (use during rebuild while API stays up).</summary>
-    public bool EnableSlitMonitoringWorker { get; set; } = true;
-
     /// <summary>Shop ID for NDT_Batch_No format (2 digits, e.g. 01, 02, 03, 04).</summary>
     public string ShopId { get; set; } = "01";
 
@@ -80,6 +77,13 @@ public class NdtBundleOptions
     /// <summary>Optional full path for runtime state JSON. When empty, uses OutputBundleFolder\NdtBundleRuntimeState.json.</summary>
     public string? NdtBundleRuntimeStateFile { get; set; }
 
+    /// <summary>
+    /// Optional last-known NDT batch number per mill (keys <c>"1"</c>–<c>"4"</c>, values e.g. <c>1226100029</c>).
+    /// On startup the service never assigns a lower sequence for that mill than the maximum of these seeds,
+    /// bundles already in SQL/CSV, and persisted runtime state. Used for first deploy and as a safety floor after restart.
+    /// </summary>
+    public Dictionary<string, string> InitialMillBatchNumbers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>When true, writes <c>NDT_Bundle_{batchNo}.csv</c> to <see cref="BundleSummaryOutputFolder"/>. When false, bundle summary CSV is skipped (ZPL may still be written on print).</summary>
     public bool EnableBundleSummaryCsvFiles { get; set; } = true;
 
@@ -98,6 +102,12 @@ public class NdtBundleOptions
 
     /// <summary>Folder where slitting accepted CSVs are read for Slit Width on upload bundle files. Production: <c>Z:\To SAP\TM\Slitting\Slit Accepted</c> (not Input Slit Accepted).</summary>
     public string SlitAcceptedFolder { get; set; } = @"Z:\To SAP\TM\Slitting\Slit Accepted";
+
+    /// <summary>
+    /// When true, after PO end each mill waits for a new <c>WIP_MM_PO_…</c> file in the TM Bundle folder before slit bundling
+    /// resumes for that mill. The WIP filename and CSV provide the next running PO and pipe details.
+    /// </summary>
+    public bool WaitForWipBundleAfterPoEnd { get; set; } = true;
 
     /// <summary>TM FG bundle folder (<c>FG_{mill}_{po}_….csv</c>) for Pipe Grade → Slit Grade. When empty, uses <see cref="MillSlitLiveOptions.WipBundleFolder"/>.</summary>
     public string FgBundleFolder { get; set; } = @"Z:\To SAP\TM\Bundle";
@@ -143,27 +153,6 @@ public class NdtBundleOptions
     /// Leave empty to include all files.
     /// </summary>
     public string? MinSourceFileLastWriteUtc { get; set; }
-
-    /// <summary>Default cutoff for POST /api/Test/rebuild-ndt-from-date when FromUtc is omitted (e.g. <c>2026-06-01T00:00:00Z</c>).</summary>
-    public string? RebuildFromUtc { get; set; }
-
-    /// <summary>Default SAP planned production month for rebuild when PlannedMonth is omitted (e.g. <c>6</c> = June).</summary>
-    public int? RebuildPlannedMonth { get; set; }
-
-    /// <summary>Calendar year for planned-month slit bounds (e.g. <c>2026</c>). When null, derived from current UTC date.</summary>
-    public int? ActiveProductionYear { get; set; }
-
-    /// <summary>Active SAP planned production month for live slit filtering (e.g. <c>6</c>). When null, uses current UTC month.</summary>
-    public int? ActiveProductionPlannedMonth { get; set; }
-
-    /// <summary>When true, live slit processing skips rows whose PO Planned Month does not match <see cref="ActiveProductionPlannedMonth"/>.</summary>
-    public bool EnablePlannedMonthSlitFilter { get; set; } = true;
-
-    /// <summary>
-    /// When true, startup fails if SQL/CSV shows current-year bundles but all mill sequences remain at 0 after hydration
-    /// (prevents assigning duplicate bundle numbers after restart).
-    /// </summary>
-    public bool RequireSequenceHydration { get; set; }
 
     /// <summary>Optional per-mill PLC PO-end signals (Modbus TCP, etc.). Disabled when <see cref="PlcHandshake"/> is enabled.</summary>
     public PlcPoEndOptions PlcPoEnd { get; set; } = new();

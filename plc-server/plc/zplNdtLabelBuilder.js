@@ -59,9 +59,9 @@ function buildNdtTagZpl({
   zpl.push(
     `^FO80,${y}^FB640,1,0,C,0^FD${gradePart}  Size: ${
       escapedSize === "" ? "-" : escapedSize
-    }  Len: ${escapedLength === "" ? "-" : escapedLength}  Wt: ${
-      escapedWeight === "" ? "-" : escapedWeight
-    }^FS`
+    }  Thk: ${escapedThickness === "" ? "-" : escapedThickness}  Len: ${
+      escapedLength === "" ? "-" : escapedLength
+    }  Wt: ${escapedWeight === "" ? "-" : escapedWeight}^FS`
   );
   y += lineHeight;
 

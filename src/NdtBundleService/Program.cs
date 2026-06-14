@@ -31,7 +31,6 @@ builder.Services.AddSingleton<AppLogReader>();
 
 // Core services
 builder.Services.AddSingleton<IPoPlanProvider, PoPlanCsvProvider>();
-builder.Services.AddSingleton<IPoPlanRegistry, PoPlanRegistryService>();
 builder.Services.AddSingleton<IFormationChartProvider, FormationChartCsvProvider>();
 builder.Services.AddSingleton<IPipeSizeProvider, PipeSizeCsvProvider>();
 builder.Services.AddSingleton<IBundleLabelInfoProvider, BundleLabelCsvProvider>();
@@ -94,12 +93,10 @@ builder.Services.AddSingleton<IManualNdtTagService, ManualNdtTagService>();
 builder.Services.AddSingleton<IUploadNdtBundleFileService, UploadNdtBundleFileService>();
 builder.Services.AddSingleton<ITraceabilityRepository, TraceabilityRepository>();
 builder.Services.AddSingleton<IReconcileSyncService, ReconcileSyncService>();
-builder.Services.AddSingleton<INdtBundleRebuildService, NdtBundleRebuildService>();
 builder.Services.AddSingleton<ISqlTraceabilityWriteTracker, SqlTraceabilityWriteTracker>();
 builder.Services.AddSingleton<ISqlTraceabilityHealth, SqlTraceabilityHealth>();
 
 builder.Services.AddHostedService<SqlTraceabilityStartupCheck>();
-builder.Services.AddHostedService<NdtBundleSequenceStartupCheck>();
 
 builder.Services.AddCors(options =>
 {
