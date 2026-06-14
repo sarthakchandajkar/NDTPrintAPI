@@ -27,6 +27,7 @@ public sealed class PlcHandshakeService
     private int _reconnectDelayMs;
 
     private bool _primed;
+    private bool _loggedStartupTriggerWait;
     private bool _prevTriggerActive;
     private bool _poChangePulseHandled;
     private int _consecutiveTriggerFalsePolls;
@@ -114,10 +115,21 @@ public sealed class PlcHandshakeService
                     else
                     {
                         SetState(millNo, "WaitingTriggerClear (startup)");
-                        _logger.LogInformation(
-                            "{MillName}: trigger {Trigger} already set at startup; waiting for PLC to clear before arming.",
-                            _mill.Name,
-                            _mill.TriggerAddress);
+                        if (!_loggedStartupTriggerWait)
+                        {
+                            _loggedStartupTriggerWait = true;
+                            _logger.LogInformation(
+                                "{MillName}: trigger {Trigger} already set at startup; waiting for PLC to clear before arming.",
+                                _mill.Name,
+                                _mill.TriggerAddress);
+                        }
+                        else
+                        {
+                            _logger.LogDebug(
+                                "{MillName}: trigger {Trigger} still set; waiting for PLC to clear before arming.",
+                                _mill.Name,
+                                _mill.TriggerAddress);
+                        }
                     }
 
                     _prevTriggerActive = trigger;
@@ -309,6 +321,7 @@ public sealed class PlcHandshakeService
     private void ArmAfterTriggerClear(bool isStartup)
     {
         _primed = true;
+        _loggedStartupTriggerWait = false;
         _prevTriggerActive = false;
         _poChangePulseHandled = false;
         _consecutiveTriggerFalsePolls = isStartup ? 1 : Math.Max(1, _options.MinimumTriggerFalsePollsBeforeRearm);
@@ -317,6 +330,8 @@ public sealed class PlcHandshakeService
     private void ResetTriggerEdgeState(bool reprime)
     {
         _primed = !reprime;
+        if (reprime)
+            _loggedStartupTriggerWait = false;
         _prevTriggerActive = false;
         _poChangePulseHandled = false;
         _consecutiveTriggerFalsePolls = 0;
