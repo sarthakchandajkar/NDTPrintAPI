@@ -60,7 +60,7 @@ public sealed class ReconcileController : ControllerBase
     {
         try
         {
-            var list = await _bundleRepository.GetBundlesAsync(cancellationToken).ConfigureAwait(false);
+            var list = await _bundleRepository.GetBundlesAsync(CancellationToken.None).ConfigureAwait(false);
             var filtered = await ExcludeOpenPartialLatestBatchesAsync(list, CancellationToken.None).ConfigureAwait(false);
             return Ok(filtered.Select(b => new
             {

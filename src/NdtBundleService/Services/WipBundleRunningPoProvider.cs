@@ -42,11 +42,10 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
 
     public Task<string?> TryGetRunningPoForMillAsync(int millNo, CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
         if (millNo is < 1 or > 4)
             return Task.FromResult<string?>(null);
 
-        MaybeRescan(DateTime.UtcNow, cancellationToken);
+        MaybeRescan(DateTime.UtcNow);
 
         lock (_lock)
         {
@@ -219,7 +218,7 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
         }
     }
 
-    private void MaybeRescan(DateTime nowUtc, CancellationToken cancellationToken)
+    private void MaybeRescan(DateTime nowUtc)
     {
         lock (_lock)
         {
@@ -230,12 +229,7 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
 
         try
         {
-            cancellationToken.ThrowIfCancellationRequested();
             RescanAllUnsafe(nowUtc);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
         }
         catch (Exception ex)
         {

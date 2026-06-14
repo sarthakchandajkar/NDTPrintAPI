@@ -97,7 +97,7 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
             if (_wipRunningPo.IsWaitingForNewWipAfterPoEnd(millNo))
                 continue;
 
-            var wipPo = await _wipRunningPo.TryGetRunningPoForMillAsync(millNo, cancellationToken).ConfigureAwait(false);
+            var wipPo = await _wipRunningPo.TryGetRunningPoForMillAsync(millNo, CancellationToken.None).ConfigureAwait(false);
             if (!string.IsNullOrWhiteSpace(wipPo))
                 result[millNo] = InputSlitCsvParsing.NormalizePo(wipPo);
         }

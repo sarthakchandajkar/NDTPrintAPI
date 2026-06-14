@@ -247,12 +247,15 @@ namespace NdtBundleService.Controllers;
     [HttpGet("wip-by-mills")]
     public async Task<IActionResult> GetWipByMills(CancellationToken cancellationToken)
     {
+        // Dashboard polling must not abort on client disconnect/timeouts while reading SQL or UNC shares.
+        var loadToken = CancellationToken.None;
+
         try
         {
             IReadOnlyDictionary<int, string> slitPoByMill;
             try
             {
-                slitPoByMill = await _activePoPerMill.GetLatestPoByMillAsync(cancellationToken).ConfigureAwait(false);
+                slitPoByMill = await _activePoPerMill.GetLatestPoByMillAsync(loadToken).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -287,7 +290,7 @@ namespace NdtBundleService.Controllers;
                 slitPoByMill.TryGetValue(m, out var slitPo);
 
                 var bundleFilePo = string.IsNullOrWhiteSpace(slitPo)
-                    ? await _wipBundleRunningPo.TryGetRunningPoForMillAsync(m, cancellationToken).ConfigureAwait(false)
+                    ? await _wipBundleRunningPo.TryGetRunningPoForMillAsync(m, loadToken).ConfigureAwait(false)
                     : null;
                 var resolvedPo = !string.IsNullOrWhiteSpace(slitPo)
                     ? slitPo
@@ -319,7 +322,14 @@ namespace NdtBundleService.Controllers;
             {
                 if (string.IsNullOrWhiteSpace(row.PoNumber) || !string.IsNullOrWhiteSpace(row.PipeSize))
                     continue;
-                await WipBundleWipCsvEnricher.TryEnrichRowAsync(row, liveOpts, _logger, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await WipBundleWipCsvEnricher.TryEnrichRowAsync(row, liveOpts, _logger, loadToken).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "WIP bundle CSV enrich skipped for mill {Mill} PO {Po}.", row.MillNo, row.PoNumber);
+                }
             }
 
             IReadOnlyDictionary<string, string> pipeSizeByPo =
@@ -338,7 +348,7 @@ namespace NdtBundleService.Controllers;
             IReadOnlyDictionary<string, FormationChartEntry> formation;
             try
             {
-                formation = await _formationChartProvider.GetFormationChartAsync(cancellationToken).ConfigureAwait(false);
+                formation = await _formationChartProvider.GetFormationChartAsync(loadToken).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -360,7 +370,16 @@ namespace NdtBundleService.Controllers;
 
             int? liveNdtCount = null;
             if (liveOpts.ApplyToMillNo is >= 1 and <= 4 && MillSlitLiveS7EndpointConfigured(liveOpts))
-                liveNdtCount = await _millNdtCountReader.TryReadNdtPipesCountAsync(cancellationToken).ConfigureAwait(false);
+            {
+                try
+                {
+                    liveNdtCount = await _millNdtCountReader.TryReadNdtPipesCountAsync(loadToken).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Live mill NDT count read skipped for wip-by-mills.");
+                }
+            }
 
             var slitLocations = string.Join(" | ", _activePoPerMill.GetInputSlitReadFolderPaths().Where(static p => !string.IsNullOrWhiteSpace(p)));
             var bundleLoc = string.Join(
@@ -378,9 +397,9 @@ namespace NdtBundleService.Controllers;
                 LiveMillNdt = new { millNo = liveOpts.ApplyToMillNo, ndtCount = liveNdtCount },
             });
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            _logger.LogWarning("GetWipByMills canceled by client/request timeout.");
+            _logger.LogDebug("GetWipByMills canceled by client after building response payload.");
             return StatusCode(499, new { Message = "Request canceled." });
         }
         catch (Exception ex)

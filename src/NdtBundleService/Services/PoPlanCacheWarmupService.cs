@@ -32,8 +32,10 @@ public sealed class PoPlanCacheWarmupService : IHostedService
     {
         try
         {
-            await _pipeSizeProvider.GetPipeSizeByPoAsync(CancellationToken.None).ConfigureAwait(false);
-            await _wipEnrichmentProvider.GetEnrichmentAsync(CancellationToken.None).ConfigureAwait(false);
+            _logger.LogInformation("PO plan cache warmup started (pipe sizes + WIP enrichment in parallel).");
+            await Task.WhenAll(
+                _pipeSizeProvider.GetPipeSizeByPoAsync(CancellationToken.None),
+                _wipEnrichmentProvider.GetEnrichmentAsync(CancellationToken.None)).ConfigureAwait(false);
             _logger.LogInformation("PO plan caches warmed on startup.");
         }
         catch (Exception ex)
