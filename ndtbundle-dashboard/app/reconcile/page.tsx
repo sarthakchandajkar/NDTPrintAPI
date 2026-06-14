@@ -580,7 +580,7 @@ export default function ReconcilePage() {
           value={dateRange}
           onChange={setDateRange}
           summary={`${filteredBundles.length} of ${bundles.length} bundle(s)`}
-          hint="Uses Slit Finish Time, then Slit Start Time. Bundles without a date are hidden when a date range is set."
+          hint="Uses Slit Finish Time, then Slit Start Time, then tag print time (PrintedAt). Bundles without any date are hidden when a date range is set."
         />
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <section className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
@@ -630,7 +630,7 @@ export default function ReconcilePage() {
                         PO: {b.poNumber ?? "—"} | Mill: {b.millNo ?? "—"} | Current: {b.totalNdtPcs ?? 0}
                       </div>
                       <div className="text-xs text-gray-400 pt-0.5">
-                        {formatDisplayDate(b.slitFinishTime || b.slitStartTime)}
+                        {formatDisplayDate(b.slitFinishTime || b.slitStartTime || b.printedAt)}
                       </div>
                     </button>
                   );

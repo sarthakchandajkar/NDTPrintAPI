@@ -26,6 +26,14 @@ export function defaultDateRange(): DateRange {
   return { startDate: toDateInputValue(start), endDate: toDateInputValue(end) };
 }
 
+/** Ensures start <= end when both bounds are set. */
+export function normalizeDateRange(range: DateRange): DateRange {
+  const start = range.startDate.trim();
+  const end = range.endDate.trim();
+  if (!start || !end || start <= end) return { startDate: start, endDate: end };
+  return { startDate: end, endDate: start };
+}
+
 function startOfDayFromInput(value: string): Date | null {
   const v = value.trim();
   if (!v) return null;
@@ -42,28 +50,67 @@ function endOfDayFromInput(value: string): Date | null {
   return new Date(y, m - 1, d, 23, 59, 59, 999);
 }
 
-/** Parse ISO, yyyy-MM-dd, and common locale date/time strings. */
+/** SAP export date tokens use yyMMdd (e.g. 260614 → 2026-06-14). */
+function parseYyMmDdToken(token: string): Date | null {
+  if (!/^\d{6}$/.test(token)) return null;
+  const yy = parseInt(token.slice(0, 2), 10);
+  const month = parseInt(token.slice(2, 4), 10);
+  const day = parseInt(token.slice(4, 6), 10);
+  const year = yy >= 70 ? 1900 + yy : 2000 + yy;
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const dt = new Date(year, month - 1, day, 0, 0, 0, 0);
+  return Number.isNaN(dt.getTime()) ? null : dt;
+}
+
+/** SAP input slit export names: {slit}_{seq}_{yyMMdd}_{po}.csv */
+export function parseInputSlitFileNameDate(fileName: string | null | undefined): Date | null {
+  const base = (fileName ?? "").trim().replace(/\.csv$/i, "");
+  if (!base) return null;
+  const parts = base.split("_");
+  if (parts.length >= 3) return parseYyMmDdToken(parts[2] ?? "");
+  return null;
+}
+
+function parseEuropeanDateTime(
+  day: number,
+  month: number,
+  year: number,
+  hour = 0,
+  min = 0,
+  sec = 0
+): Date | null {
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const dt = new Date(year, month - 1, day, hour, min, sec);
+  return Number.isNaN(dt.getTime()) ? null : dt;
+}
+
+function parseIsoLikeDate(raw: string): Date | null {
+  // yyyy-MM-dd with optional time and timezone — safe for Date.parse.
+  if (!/^\d{4}-\d{2}-\d{2}(?:[T\s]|$)/.test(raw) && !/^\d{4}-\d{2}-\d{2}T.*[Zz+]/.test(raw)) {
+    return null;
+  }
+  const ms = Date.parse(raw);
+  return Number.isNaN(ms) ? null : new Date(ms);
+}
+
+/** Parse ISO, European dd/MM/yyyy, dd.MM.yyyy, and ddMMyy tokens. */
 export function parseFlexibleDate(raw: string | null | undefined): Date | null {
   const s = (raw ?? "").trim();
   if (!s) return null;
 
-  const iso = Date.parse(s);
-  if (!Number.isNaN(iso)) return new Date(iso);
-
-  const m = s.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
-  if (m) {
-    const day = parseInt(m[1], 10);
-    const month = parseInt(m[2], 10);
-    let year = parseInt(m[3], 10);
+  const european = s.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (european) {
+    const day = parseInt(european[1], 10);
+    const month = parseInt(european[2], 10);
+    let year = parseInt(european[3], 10);
     if (year < 100) year += 2000;
-    const hour = m[4] ? parseInt(m[4], 10) : 0;
-    const min = m[5] ? parseInt(m[5], 10) : 0;
-    const sec = m[6] ? parseInt(m[6], 10) : 0;
-    const dt = new Date(year, month - 1, day, hour, min, sec);
-    return Number.isNaN(dt.getTime()) ? null : dt;
+    const hour = european[4] ? parseInt(european[4], 10) : 0;
+    const min = european[5] ? parseInt(european[5], 10) : 0;
+    const sec = european[6] ? parseInt(european[6], 10) : 0;
+    return parseEuropeanDateTime(day, month, year, hour, min, sec);
   }
 
-  return null;
+  return parseIsoLikeDate(s);
 }
 
 export function isInDateRange(
@@ -71,15 +118,17 @@ export function isInDateRange(
   range: DateRange,
   options?: { includeWhenUnparseable?: boolean }
 ): boolean {
-  if (!isDateRangeActive(range)) return true;
+  const normalized = normalizeDateRange(range);
+  if (!isDateRangeActive(normalized)) return true;
 
   const d = raw instanceof Date ? raw : parseFlexibleDate(typeof raw === "string" ? raw : null);
   if (!d) return options?.includeWhenUnparseable ?? false;
 
-  const start = startOfDayFromInput(range.startDate);
-  const end = endOfDayFromInput(range.endDate);
-  if (start && d < start) return false;
-  if (end && d > end) return false;
+  const calendarKey = toDateInputValue(d);
+  const startKey = normalized.startDate.trim();
+  const endKey = normalized.endDate.trim();
+  if (startKey && calendarKey < startKey) return false;
+  if (endKey && calendarKey > endKey) return false;
   return true;
 }
 

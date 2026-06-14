@@ -92,7 +92,7 @@ export default function PrintedTagsPage() {
             ? `${filteredBundles.length} of ${bundles.length} bundle(s)`
             : `${bundles.length} bundle(s)`
         }
-        hint="Uses Slit Finish Time, then Slit Start Time. Bundles without a date are hidden when a date range is set."
+        hint="Uses Slit Finish Time, then Slit Start Time, then tag print time (PrintedAt). Bundles without any date are hidden when a date range is set."
       />
 
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
@@ -133,7 +133,7 @@ export default function PrintedTagsPage() {
                     <td className="px-5 py-2 text-sm text-gray-700">{b.millNo}</td>
                     <td className="px-5 py-2 text-sm text-gray-700">{b.slitNo}</td>
                     <td className="px-5 py-2 text-sm text-gray-700 whitespace-nowrap">
-                      {formatDisplayDate(b.slitFinishTime || b.slitStartTime)}
+                      {formatDisplayDate(b.slitFinishTime || b.slitStartTime || b.printedAt)}
                     </td>
                     <td className="px-5 py-2 text-sm text-gray-700">{b.totalNdtPcs}</td>
                   </tr>

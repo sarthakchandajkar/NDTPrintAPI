@@ -70,7 +70,8 @@ public sealed class ReconcileController : ControllerBase
                 b.TotalNdtPcs,
                 b.SlitNo,
                 SlitStartTime = b.SlitStartTime,
-                SlitFinishTime = b.SlitFinishTime
+                SlitFinishTime = b.SlitFinishTime,
+                PrintedAt = b.PrintedAt
             }).ToList());
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

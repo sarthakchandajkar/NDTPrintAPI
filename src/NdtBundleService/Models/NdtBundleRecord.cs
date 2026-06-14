@@ -12,6 +12,7 @@ public sealed class NdtBundleRecord
     public string SlitNo { get; init; } = string.Empty;
     public DateTime? SlitStartTime { get; init; }
     public DateTime? SlitFinishTime { get; init; }
+    public DateTime? PrintedAt { get; init; }
     public int RejectedPipes { get; init; }
     public string NdtShortLengthPipe { get; init; } = string.Empty;
     public string RejectedShortLengthPipe { get; init; } = string.Empty;

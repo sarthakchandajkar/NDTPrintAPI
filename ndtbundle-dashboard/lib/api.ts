@@ -104,6 +104,8 @@ export interface ReconcileBundle {
   slitNo?: string;
   slitStartTime?: string | null;
   slitFinishTime?: string | null;
+  /** When slit times are missing, used for dashboard date filtering. */
+  printedAt?: string | null;
 }
 
 export interface ReconcileSlitItem {

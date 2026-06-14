@@ -50,12 +50,14 @@ export function countBundlesByMill(bundles: ReconcileBundle[]): Record<MillFilte
   return counts;
 }
 
-/** Prefer slit finish, then slit start, for bundle date filtering. */
+/** Prefer slit finish, then slit start, then tag print time, for bundle date filtering. */
 export function resolveBundleEntryDate(bundle: ReconcileBundle): string | null {
   const finish = bundle.slitFinishTime?.trim();
   if (finish) return finish;
   const start = bundle.slitStartTime?.trim();
   if (start) return start;
+  const printed = bundle.printedAt?.trim();
+  if (printed) return printed;
   return null;
 }
 

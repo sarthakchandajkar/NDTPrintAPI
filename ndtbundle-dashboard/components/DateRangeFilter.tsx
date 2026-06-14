@@ -4,6 +4,7 @@ import {
   defaultDateRange,
   EMPTY_DATE_RANGE,
   isDateRangeActive,
+  normalizeDateRange,
   type DateRange,
 } from "@/lib/dateRangeFilter";
 
@@ -19,6 +20,7 @@ type Props = {
 
 export function DateRangeFilter({ value, onChange, summary, className = "", hint }: Props) {
   const active = isDateRangeActive(value);
+  const setRange = (next: DateRange) => onChange(normalizeDateRange(next));
 
   return (
     <div
@@ -31,7 +33,7 @@ export function DateRangeFilter({ value, onChange, summary, className = "", hint
         <input
           type="date"
           value={value.startDate}
-          onChange={(e) => onChange({ ...value, startDate: e.target.value })}
+          onChange={(e) => setRange({ ...value, startDate: e.target.value })}
           className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
         />
       </div>
@@ -43,21 +45,21 @@ export function DateRangeFilter({ value, onChange, summary, className = "", hint
           type="date"
           value={value.endDate}
           min={value.startDate || undefined}
-          onChange={(e) => onChange({ ...value, endDate: e.target.value })}
+          onChange={(e) => setRange({ ...value, endDate: e.target.value })}
           className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
         />
       </div>
       <div className="flex flex-wrap gap-2">
         <button
           type="button"
-          onClick={() => onChange(defaultDateRange())}
+          onClick={() => setRange(defaultDateRange())}
           className="px-3 py-2 text-sm font-medium border border-gray-300 rounded-md text-gray-700 bg-white hover:bg-gray-50"
         >
           Last 30 days
         </button>
         <button
           type="button"
-          onClick={() => onChange(EMPTY_DATE_RANGE)}
+          onClick={() => setRange(EMPTY_DATE_RANGE)}
           className="px-3 py-2 text-sm font-medium border border-gray-300 rounded-md text-gray-700 bg-white hover:bg-gray-50"
         >
           Clear

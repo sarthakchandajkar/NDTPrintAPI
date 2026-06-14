@@ -173,6 +173,7 @@ WITH Ranked AS (
         Context_Slit_No,
         Slit_Start_Time,
         Slit_Finish_Time,
+        PrintedAt,
         Rejected_P,
         NDT_Short_Length_Pipe,
         Rejected_Short_Length_Pipe,
@@ -188,6 +189,7 @@ SELECT
     Context_Slit_No AS SlitNo,
     Slit_Start_Time AS SlitStartTime,
     Slit_Finish_Time AS SlitFinishTime,
+    PrintedAt,
     Rejected_P AS RejectedPipes,
     NDT_Short_Length_Pipe AS NdtShortLengthPipe,
     Rejected_Short_Length_Pipe AS RejectedShortLengthPipe
@@ -216,7 +218,7 @@ ORDER BY PrintedAt DESC";
             {
                 await using var conn = SqlTraceabilityConnection.Create(Opt);
                 await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
-                const string sql = "SELECT TOP 1 Bundle_No AS BundleNo, PO_Number AS PoNumber, Mill_No AS MillNo, Total_NDT_Pcs AS TotalNdtPcs, Context_Slit_No AS SlitNo, Slit_Start_Time AS SlitStartTime, Slit_Finish_Time AS SlitFinishTime, Rejected_P AS RejectedPipes, NDT_Short_Length_Pipe AS NdtShortLengthPipe, Rejected_Short_Length_Pipe AS RejectedShortLengthPipe FROM dbo.NDT_Bundle WHERE Bundle_No = @BatchNo ORDER BY PrintedAt DESC";
+                const string sql = "SELECT TOP 1 Bundle_No AS BundleNo, PO_Number AS PoNumber, Mill_No AS MillNo, Total_NDT_Pcs AS TotalNdtPcs, Context_Slit_No AS SlitNo, Slit_Start_Time AS SlitStartTime, Slit_Finish_Time AS SlitFinishTime, PrintedAt, Rejected_P AS RejectedPipes, NDT_Short_Length_Pipe AS NdtShortLengthPipe, Rejected_Short_Length_Pipe AS RejectedShortLengthPipe FROM dbo.NDT_Bundle WHERE Bundle_No = @BatchNo ORDER BY PrintedAt DESC";
                 await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
                 cmd.Parameters.AddWithValue("@BatchNo", batchNo.Trim());
                 await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
@@ -757,9 +759,10 @@ ORDER BY SlitNo";
             SlitNo = reader.IsDBNull(4) ? "" : reader.GetString(4),
             SlitStartTime = reader.IsDBNull(5) ? null : reader.GetDateTime(5),
             SlitFinishTime = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
-            RejectedPipes = reader.GetInt32(7),
-            NdtShortLengthPipe = reader.IsDBNull(8) ? "" : reader.GetString(8),
-            RejectedShortLengthPipe = reader.IsDBNull(9) ? "" : reader.GetString(9)
+            PrintedAt = reader.IsDBNull(7) ? null : reader.GetDateTime(7),
+            RejectedPipes = reader.GetInt32(8),
+            NdtShortLengthPipe = reader.IsDBNull(9) ? "" : reader.GetString(9),
+            RejectedShortLengthPipe = reader.IsDBNull(10) ? "" : reader.GetString(10)
         };
     }
 
