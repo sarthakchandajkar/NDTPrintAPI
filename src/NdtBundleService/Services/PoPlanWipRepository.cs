@@ -9,9 +9,8 @@ namespace NdtBundleService.Services;
 
 public sealed class PoPlanWipRepository : IPoPlanWipRepository
 {
-    private const string LatestByPoSql = @"
-SELECT PO_Plan_WIP_ID, PO_Number, Mill_No, Planned_Month, Pipe_Grade, Pipe_Size, Pipe_Length,
-       Pieces_Per_Bundle, NDTPcsPerBundle, Total_Pieces, Source_File, ImportedAtUtc
+    private static string LatestByPoSql => $@"
+SELECT {PoPlanWipRowMapper.SelectColumns}
 FROM (
     SELECT *,
            ROW_NUMBER() OVER (
@@ -22,9 +21,8 @@ FROM (
 ) ranked
 WHERE rn = 1;";
 
-    private const string LatestByMillSql = @"
-SELECT PO_Plan_WIP_ID, PO_Number, Mill_No, Planned_Month, Pipe_Grade, Pipe_Size, Pipe_Length,
-       Pieces_Per_Bundle, NDTPcsPerBundle, Total_Pieces, Source_File, ImportedAtUtc
+    private static string LatestByMillSql => $@"
+SELECT {PoPlanWipRowMapper.SelectColumns}
 FROM (
     SELECT *,
            ROW_NUMBER() OVER (
@@ -36,9 +34,8 @@ FROM (
 ) ranked
 WHERE rn = 1;";
 
-    private const string LatestBySinglePoSql = @"
-SELECT TOP 1 PO_Plan_WIP_ID, PO_Number, Mill_No, Planned_Month, Pipe_Grade, Pipe_Size, Pipe_Length,
-       Pieces_Per_Bundle, NDTPcsPerBundle, Total_Pieces, Source_File, ImportedAtUtc
+    private static string LatestBySinglePoSql => $@"
+SELECT TOP 1 {PoPlanWipRowMapper.SelectColumns}
 FROM dbo.PO_Plan_WIP
 WHERE PO_Number = @PoNumber
 ORDER BY ImportedAtUtc DESC, PO_Plan_WIP_ID DESC;";
@@ -54,11 +51,13 @@ WHERE Source_File = @SourceFile;";
 
     private const string InsertImportRowSql = @"
 INSERT INTO dbo.PO_Plan_WIP
-    (PO_Number, Mill_No, Planned_Month, Pipe_Grade, Pipe_Size, Pipe_Length,
-     Pieces_Per_Bundle, NDTPcsPerBundle, Total_Pieces, Source_File)
+    (PO_Number, Mill_No, Planned_Month, Pipe_Grade, Pipe_Size, Pipe_Thickness, Pipe_Length,
+     Pipe_Weight_Per_Meter, Pipe_Type, Output_Itemcode, Item_Description, Product_Type, PO_Specification,
+     Input_WIP_Itemcode, Pieces_Per_Bundle, NDTPcsPerBundle, Total_Pieces, Source_File)
 VALUES
-    (@PoNumber, @MillNo, @PlannedMonth, @PipeGrade, @PipeSize, @PipeLength,
-     @PiecesPerBundle, @NdtPcsPerBundle, @TotalPieces, @SourceFile);";
+    (@PoNumber, @MillNo, @PlannedMonth, @PipeGrade, @PipeSize, @PipeThickness, @PipeLength,
+     @PipeWeightPerMeter, @PipeType, @OutputItemcode, @ItemDescription, @ProductType, @PoSpecification,
+     @InputWipItemcode, @PiecesPerBundle, @NdtPcsPerBundle, @TotalPieces, @SourceFile);";
 
     private readonly NdtBundleOptions _options;
     private readonly ILogger<PoPlanWipRepository> _logger;
@@ -227,9 +226,17 @@ VALUES
                 cmd.Parameters.AddWithValue("@PlannedMonth", NullIfEmpty(row.PlannedMonth));
                 cmd.Parameters.AddWithValue("@PipeGrade", NullIfEmpty(row.PipeGrade));
                 cmd.Parameters.AddWithValue("@PipeSize", NullIfEmpty(row.PipeSize));
+                cmd.Parameters.AddWithValue("@PipeThickness", NullIfEmpty(row.PipeThickness));
                 cmd.Parameters.AddWithValue("@PipeLength", NullIfEmpty(row.PipeLength));
+                cmd.Parameters.AddWithValue("@PipeWeightPerMeter", NullIfEmpty(row.PipeWeightPerMeter));
+                cmd.Parameters.AddWithValue("@PipeType", NullIfEmpty(row.PipeType));
+                cmd.Parameters.AddWithValue("@OutputItemcode", NullIfEmpty(row.OutputItemcode));
+                cmd.Parameters.AddWithValue("@ItemDescription", NullIfEmpty(row.ItemDescription));
+                cmd.Parameters.AddWithValue("@ProductType", NullIfEmpty(row.ProductType));
+                cmd.Parameters.AddWithValue("@PoSpecification", NullIfEmpty(row.PoSpecification));
+                cmd.Parameters.AddWithValue("@InputWipItemcode", NullIfEmpty(row.InputWipItemcode));
                 cmd.Parameters.AddWithValue("@PiecesPerBundle", TryParseNullableInt(row.PiecesPerBundle) ?? (object)DBNull.Value);
-                cmd.Parameters.AddWithValue("@NdtPcsPerBundle", DBNull.Value);
+                cmd.Parameters.AddWithValue("@NdtPcsPerBundle", TryParseNullableInt(row.NdtPcsPerBundle) ?? (object)DBNull.Value);
                 cmd.Parameters.AddWithValue("@TotalPieces", NullIfEmpty(row.TotalPieces));
                 cmd.Parameters.AddWithValue("@SourceFile", sourceFileKey.Trim());
                 inserted += await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
@@ -327,23 +334,5 @@ VALUES
             : null;
     }
 
-    private static PoPlanWipRow MapRow(SqlDataReader reader)
-    {
-        var piecesPerBundle = reader.IsDBNull(7)
-            ? string.Empty
-            : reader.GetInt32(7).ToString(CultureInfo.InvariantCulture);
-
-        return new PoPlanWipRow
-        {
-            PoNumber = reader.IsDBNull(1) ? string.Empty : InputSlitCsvParsing.NormalizePo(reader.GetString(1)),
-            MillNo = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
-            PlannedMonth = reader.IsDBNull(3) ? string.Empty : reader.GetString(3).Trim(),
-            PipeGrade = reader.IsDBNull(4) ? string.Empty : reader.GetString(4).Trim(),
-            PipeSize = reader.IsDBNull(5) ? string.Empty : reader.GetString(5).Trim(),
-            PipeLength = reader.IsDBNull(6) ? string.Empty : reader.GetString(6).Trim(),
-            PipeType = string.Empty,
-            PiecesPerBundle = piecesPerBundle,
-            TotalPieces = reader.IsDBNull(9) ? string.Empty : reader.GetString(9).Trim()
-        };
-    }
+    private static PoPlanWipRow MapRow(SqlDataReader reader) => PoPlanWipRowMapper.Read(reader);
 }

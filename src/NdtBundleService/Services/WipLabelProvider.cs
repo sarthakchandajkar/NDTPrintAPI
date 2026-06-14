@@ -36,15 +36,7 @@ public sealed class WipLabelProvider : IWipLabelProvider
         {
             var row = await _poPlanWipRepository.TryGetLatestByPoAsync(poNumber, cancellationToken).ConfigureAwait(false);
             if (row is not null)
-            {
-                seed = new WipLabelInfo
-                {
-                    PipeGrade = row.PipeGrade,
-                    PipeSize = row.PipeSize,
-                    PipeLength = row.PipeLength,
-                    PipeType = row.PipeType
-                };
-            }
+                seed = PoPlanWipRowMapper.ToWipLabel(row);
         }
 
         string? currentPoPlanPath = null;

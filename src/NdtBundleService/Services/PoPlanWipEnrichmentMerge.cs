@@ -23,9 +23,6 @@ internal static class PoPlanWipEnrichmentMerge
         if (IsRowMissingPlanDetails(primary))
             return fallback;
 
-        if (IsRowMissingPlanDetails(fallback))
-            return primary;
-
         return new PoPlanWipRow
         {
             MillNo = primary.MillNo > 0 ? primary.MillNo : fallback.MillNo,
@@ -33,9 +30,17 @@ internal static class PoPlanWipEnrichmentMerge
             PlannedMonth = Coalesce(primary.PlannedMonth, fallback.PlannedMonth),
             PipeGrade = Coalesce(primary.PipeGrade, fallback.PipeGrade),
             PipeSize = Coalesce(primary.PipeSize, fallback.PipeSize),
+            PipeThickness = Coalesce(primary.PipeThickness, fallback.PipeThickness),
             PipeType = Coalesce(primary.PipeType, fallback.PipeType),
             PipeLength = Coalesce(primary.PipeLength, fallback.PipeLength),
+            PipeWeightPerMeter = Coalesce(primary.PipeWeightPerMeter, fallback.PipeWeightPerMeter),
+            OutputItemcode = Coalesce(primary.OutputItemcode, fallback.OutputItemcode),
+            ItemDescription = Coalesce(primary.ItemDescription, fallback.ItemDescription),
+            ProductType = Coalesce(primary.ProductType, fallback.ProductType),
+            PoSpecification = Coalesce(primary.PoSpecification, fallback.PoSpecification),
+            InputWipItemcode = Coalesce(primary.InputWipItemcode, fallback.InputWipItemcode),
             PiecesPerBundle = Coalesce(primary.PiecesPerBundle, fallback.PiecesPerBundle),
+            NdtPcsPerBundle = Coalesce(primary.NdtPcsPerBundle, fallback.NdtPcsPerBundle),
             TotalPieces = Coalesce(primary.TotalPieces, fallback.TotalPieces)
         };
     }

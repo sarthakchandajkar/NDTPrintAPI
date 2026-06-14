@@ -33,7 +33,7 @@ public static class WipCsvLabelLookup
                 seedFromSql.PipeType);
 
         var sawAny = seedFromSql is not null;
-        if (merged.HasPrimaryFields())
+        if (merged.HasCompleteLabelFields())
             return merged.ToModel();
 
         if (!skipPoPlanFolderScan)
@@ -44,7 +44,7 @@ public static class WipCsvLabelLookup
                 if (await TryMergeFromCsvFileAsync(path, poNumber, millNo, merged, cancellationToken).ConfigureAwait(false))
                 {
                     sawAny = true;
-                    if (merged.HasPrimaryFields())
+                    if (merged.HasCompleteLabelFields())
                         return merged.ToModel();
                 }
             }
@@ -56,7 +56,7 @@ public static class WipCsvLabelLookup
             if (await TryMergeFromCsvFileAsync(path, poNumber, millNo, merged, cancellationToken).ConfigureAwait(false))
             {
                 sawAny = true;
-                if (merged.HasPrimaryFields())
+                if (merged.HasCompleteLabelFields())
                     return merged.ToModel();
             }
         }
@@ -243,6 +243,12 @@ public static class WipCsvLabelLookup
             || !string.IsNullOrWhiteSpace(PipeLength)
             || !string.IsNullOrWhiteSpace(PipeWeightPerMeter)
             || !string.IsNullOrWhiteSpace(PipeGrade);
+
+        /// <summary>Enough for NDT tag line 2 (still allows WIP bundle fallback for weight when PO Accepted has thickness only).</summary>
+        public bool HasCompleteLabelFields() =>
+            HasPrimaryFields()
+            && !string.IsNullOrWhiteSpace(PipeThickness)
+            && !string.IsNullOrWhiteSpace(PipeWeightPerMeter);
 
         public WipLabelInfo ToModel() => new()
         {

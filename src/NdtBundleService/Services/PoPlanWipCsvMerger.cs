@@ -55,7 +55,7 @@ internal static class PoPlanWipCsvMerger
             return false;
         }
 
-        int Idx(string columnName) => HeaderIndex(headers, columnName);
+        int Idx(params string[] names) => HeaderIndex(headers, names);
 
         while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
         {
@@ -81,9 +81,17 @@ internal static class PoPlanWipCsvMerger
                 PlannedMonth = Cell(Idx("Planned Month")),
                 PipeGrade = Cell(Idx("Pipe Grade")),
                 PipeSize = Cell(Idx("Pipe Size")),
-                PipeType = Cell(Idx("Pipe Type")),
+                PipeThickness = Cell(Idx("Pipe Thickness", "Thickness")),
                 PipeLength = Cell(Idx("Pipe Length")),
+                PipeWeightPerMeter = Cell(Idx("Pipe Weight Per Meter", "Pipe Weight")),
+                PipeType = Cell(Idx("Pipe Type")),
+                OutputItemcode = Cell(Idx("Output Itemcode", "Output Item Code")),
+                ItemDescription = Cell(Idx("Item Description")),
+                ProductType = Cell(Idx("Product Type")),
+                PoSpecification = Cell(Idx("PO Specification")),
+                InputWipItemcode = Cell(Idx("Input WIP Itemcode", "Input WIP Item Code")),
                 PiecesPerBundle = Cell(Idx("Pieces Per Bundle")),
+                NdtPcsPerBundle = Cell(Idx("NDTPcsPerBundle", "NDT Pcs Per Bundle")),
                 TotalPieces = Cell(Idx("Total Pieces")),
             };
             result.ByMill[millNo] = row;
