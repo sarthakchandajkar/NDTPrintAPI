@@ -142,16 +142,36 @@ public sealed class SettingsController : ControllerBase
         if (!TryAuthorize(out var denied))
             return denied!;
 
+        // Dashboard polls every 2s; do not abort on client disconnect while reading PLC / runtime state.
+        var loadToken = CancellationToken.None;
+
+        try
+        {
+            return await GetPlcDiagnosticsCoreAsync(loadToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "GetPlcDiagnostics failed.");
+            return StatusCode(500, new { Message = "Failed to load PLC diagnostics.", Error = ex.Message });
+        }
+    }
+
+    private async Task<IActionResult> GetPlcDiagnosticsCoreAsync(CancellationToken cancellationToken)
+    {
         var handshakeCfg = _options.PlcHandshake ?? new PlcHandshakeOptions();
         if (handshakeCfg.Enabled)
         {
             var snapshot = _handshakeStatus.GetSnapshot();
             var poEndByMill = _handshakeStatus.GetPoEndByMill();
             var mills = new List<object>();
+            var millsCfg = handshakeCfg.Mills ?? new List<MillConfig>();
 
-            foreach (var cfg in handshakeCfg.Mills.OrderBy(m => m.ResolveMillNo()))
+            foreach (var cfg in millsCfg.OrderBy(m => m.ResolveMillNo()))
             {
                 var millNo = cfg.ResolveMillNo();
+                if (millNo is < 1 or > 4)
+                    continue;
+
                 var live = snapshot.FirstOrDefault(s => s.MillNo == millNo);
                 var host = (cfg.IpAddress ?? string.Empty).Trim();
                 var reachable = !string.IsNullOrEmpty(host) &&
@@ -160,16 +180,23 @@ public sealed class SettingsController : ControllerBase
                 object? mesHooter = null;
                 if (cfg.Hooter?.Enabled == true && millNo is >= 1 and <= 4)
                 {
-                    var resolved = await _hooterValues.ResolveAsync(millNo, cancellationToken).ConfigureAwait(false);
-                    mesHooter = new
+                    try
                     {
-                        poNumber = resolved.PoNumber,
-                        pipeSize = resolved.PipeSize,
-                        threshold = resolved.Threshold,
-                        accumulated = resolved.Accumulated,
-                        bundleNear = resolved.Threshold > 0 &&
-                                     resolved.Accumulated > resolved.Threshold
-                    };
+                        var resolved = await _hooterValues.ResolveAsync(millNo, cancellationToken).ConfigureAwait(false);
+                        mesHooter = new
+                        {
+                            poNumber = resolved.PoNumber,
+                            pipeSize = resolved.PipeSize,
+                            threshold = resolved.Threshold,
+                            accumulated = resolved.Accumulated,
+                            bundleNear = resolved.Threshold > 0 &&
+                                         resolved.Accumulated > resolved.Threshold
+                        };
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "MES hooter values resolve failed for mill {Mill} during PLC diagnostics.", millNo);
+                    }
                 }
 
                 mills.Add(new

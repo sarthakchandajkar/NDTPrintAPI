@@ -45,7 +45,14 @@ public sealed class MillHooterPlcValuesService : IMillHooterPlcValuesService
         if (millNo is < 1 or > 4)
             return MillHooterResolvedValues.Empty;
 
-        await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            return MillHooterResolvedValues.Empty;
+        }
 
         var poByMill = await _activePoPerMill.GetLatestPoByMillAsync(cancellationToken).ConfigureAwait(false);
         if (!poByMill.TryGetValue(millNo, out var po) || string.IsNullOrWhiteSpace(po))

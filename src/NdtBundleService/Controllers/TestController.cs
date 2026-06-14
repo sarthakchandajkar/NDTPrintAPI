@@ -274,13 +274,20 @@ namespace NdtBundleService.Controllers;
             }
             else
             {
-                var cachedEnrichment = _poPlanWipEnrichment.TryGetCachedEnrichment();
-                wipEnrichment = cachedEnrichment ?? EmptyWipEnrichment();
+                try
+                {
+                    wipEnrichment = _poPlanWipEnrichment.TryGetCachedEnrichment()
+                                    ?? await _poPlanWipEnrichment.GetEnrichmentAsync(loadToken).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "GetEnrichmentAsync failed; continuing with empty PO plan enrichment for wip-by-mills.");
+                    wipEnrichment = EmptyWipEnrichment();
+                }
+
                 sourcePath = string.IsNullOrWhiteSpace(wipEnrichment.SourceDescription)
-                    ? $"{_options.PoPlanFolder ?? _options.PoPlanCsvPath ?? "PO plan"} (enrichment loading in background)"
+                    ? $"{_options.PoPlanFolder ?? _options.PoPlanCsvPath ?? "PO plan"} (enrichment unavailable)"
                     : wipEnrichment.SourceDescription;
-                if (cachedEnrichment is null)
-                    _ = _poPlanWipEnrichment.GetEnrichmentAsync(CancellationToken.None);
             }
 
             var mills = new List<WipByMillRowDto>(4);
@@ -332,16 +339,24 @@ namespace NdtBundleService.Controllers;
                 }
             }
 
-            IReadOnlyDictionary<string, string> pipeSizeByPo =
-                _pipeSizeProvider.TryGetCachedPipeSizes()
-                ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            if (pipeSizeByPo.Count == 0)
-                _ = _pipeSizeProvider.GetPipeSizeByPoAsync(CancellationToken.None);
+            IReadOnlyDictionary<string, string> pipeSizeByPo;
+            try
+            {
+                pipeSizeByPo = _pipeSizeProvider.TryGetCachedPipeSizes()
+                               ?? await _pipeSizeProvider.GetPipeSizeByPoAsync(loadToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "GetPipeSizeByPoAsync failed; pipe size columns may be empty on wip-by-mills.");
+                pipeSizeByPo = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            }
+
             foreach (var row in mills)
             {
                 if (string.IsNullOrWhiteSpace(row.PoNumber) || !string.IsNullOrWhiteSpace(row.PipeSize))
                     continue;
-                if (pipeSizeByPo.TryGetValue(row.PoNumber, out var ps) && !string.IsNullOrWhiteSpace(ps))
+                var normalizedPo = InputSlitCsvParsing.NormalizePo(row.PoNumber);
+                if (pipeSizeByPo.TryGetValue(normalizedPo, out var ps) && !string.IsNullOrWhiteSpace(ps))
                     row.PipeSize = ps.Trim();
             }
 

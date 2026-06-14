@@ -117,10 +117,24 @@ public sealed class PoPlanWipEnrichmentProvider : IPoPlanWipEnrichmentProvider
         if (signature.StartsWith("sql:", StringComparison.Ordinal))
         {
             var sqlSnapshot = await _poPlanWipRepository.GetLatestEnrichmentAsync(cancellationToken).ConfigureAwait(false);
+            if (sqlSnapshot.ByPo.Count > 0)
+            {
+                return new PoPlanWipEnrichmentSnapshot(
+                    sqlSnapshot.ByMill,
+                    sqlSnapshot.ByPo,
+                    sqlSnapshot.SourceDescription);
+            }
+
+            _logger.LogWarning(
+                "No PO plan enrichment rows in dbo.PO_Plan_WIP; falling back to PO Accepted CSV folders.");
+            var csvFallback = await BuildFolderEnrichmentSnapshotAsync(cancellationToken).ConfigureAwait(false);
+            if (csvFallback.ByPo.Count > 0)
+                return csvFallback;
+
             return new PoPlanWipEnrichmentSnapshot(
                 sqlSnapshot.ByMill,
                 sqlSnapshot.ByPo,
-                sqlSnapshot.SourceDescription);
+                $"{sqlSnapshot.SourceDescription} (empty; PO Accepted folder fallback also empty or unreachable)");
         }
 
         var merge = new PoPlanWipCsvMerger.MergeResult();
@@ -128,33 +142,7 @@ public sealed class PoPlanWipEnrichmentProvider : IPoPlanWipEnrichmentProvider
 
         if (signature.StartsWith("folder:", StringComparison.Ordinal))
         {
-            var files = PoPlanWipCsvMerger.ResolveEligiblePoPlanFiles(_options);
-            if (files.Count == 0)
-            {
-                return new PoPlanWipEnrichmentSnapshot(
-                    merge.ByMill,
-                    merge.ByPo,
-                    $"{_options.PoPlanFolder} (no eligible WIP CSV files)");
-            }
-
-            foreach (var file in files)
-            {
-                try
-                {
-                    await PoPlanWipCsvMerger.MergeFileAsync(file, merge, _logger, cancellationToken).ConfigureAwait(false);
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    _logger.LogWarning(ex, "Skipping PO plan WIP file after read/parse error: {File}", file);
-                }
-            }
-
-            sourceDescription =
-                $"{_options.PoPlanFolder} ({files.Count} WIP CSV file(s); PO per mill from slits, else TM Bundle / Bundle Accepted WIP filenames)";
-            _logger.LogInformation(
-                "Cached PO plan WIP enrichment for {PoCount} PO(s) from {FileCount} file(s).",
-                merge.ByPo.Count,
-                files.Count);
+            return await BuildFolderEnrichmentSnapshotAsync(cancellationToken).ConfigureAwait(false);
         }
         else if (signature.StartsWith("file||", StringComparison.Ordinal))
         {
@@ -176,6 +164,40 @@ public sealed class PoPlanWipEnrichmentProvider : IPoPlanWipEnrichmentProvider
         {
             sourceDescription = "PO plan folder not configured or not reachable";
         }
+
+        return new PoPlanWipEnrichmentSnapshot(merge.ByMill, merge.ByPo, sourceDescription);
+    }
+
+    private async Task<PoPlanWipEnrichmentSnapshot> BuildFolderEnrichmentSnapshotAsync(CancellationToken cancellationToken)
+    {
+        var merge = new PoPlanWipCsvMerger.MergeResult();
+        var files = PoPlanWipCsvMerger.ResolveEligiblePoPlanFiles(_options);
+        if (files.Count == 0)
+        {
+            return new PoPlanWipEnrichmentSnapshot(
+                merge.ByMill,
+                merge.ByPo,
+                $"{_options.PoPlanFolder} (no eligible WIP CSV files)");
+        }
+
+        foreach (var file in files)
+        {
+            try
+            {
+                await PoPlanWipCsvMerger.MergeFileAsync(file, merge, _logger, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Skipping PO plan WIP file after read/parse error: {File}", file);
+            }
+        }
+
+        var sourceDescription =
+            $"{_options.PoPlanFolder} ({files.Count} WIP CSV file(s); PO per mill from slits, else TM Bundle / Bundle Accepted WIP filenames)";
+        _logger.LogInformation(
+            "Cached PO plan WIP enrichment for {PoCount} PO(s) from {FileCount} file(s).",
+            merge.ByPo.Count,
+            files.Count);
 
         return new PoPlanWipEnrichmentSnapshot(merge.ByMill, merge.ByPo, sourceDescription);
     }
