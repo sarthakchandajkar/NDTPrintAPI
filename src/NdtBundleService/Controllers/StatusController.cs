@@ -158,7 +158,8 @@ public sealed class StatusController : ControllerBase
                         }
                 }),
                 Message = "Persistent per-mill S7 PO-change handshake plus DB251 OK/NOK/NDT counts on the same connection. " +
-                    "When RecoverLatchedTriggerAtStartup is true, a trigger latched before connect runs PO end + MES ack once. " +
+                    "When RecoverLatchedTriggerAtStartup is true, a latched trigger at connect is cleared via MES ack; " +
+                    "RunPoEndWorkflowOnStartupRecovery controls whether bundle close also runs (default false). " +
                     "Use GET /api/Status/plc-live for dashboard polling."
             });
         }

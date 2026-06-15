@@ -104,6 +104,44 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
         }
     }
 
+    public bool ResumeRunningWipForMill(int millNo)
+    {
+        if (millNo is < 1 or > 4)
+            return false;
+
+        lock (_lock)
+        {
+            var st = _mills[millNo - 1];
+            if (!st.WaitingForNewWip)
+                return false;
+
+            var endedPo = st.EndedPo;
+            st.WaitingForNewWip = false;
+            st.EndedPo = null;
+            st.PoEndUtc = default;
+
+            var best = ScanAllWipCandidates()
+                .Where(c => c.MillNo == millNo)
+                .OrderByDescending(c => c.StampUtc)
+                .ThenByDescending(c => c.SortKey, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault();
+
+            if (best.MillNo != 0)
+            {
+                st.RunningPo = InputSlitCsvParsing.NormalizePo(best.PoNumber);
+                st.RunningWipStampUtc = best.StampUtc;
+            }
+
+            _logger.LogWarning(
+                "Mill {Mill}: resumed WIP tracking after false PO end (ended PO was {EndedPo}); running PO is now {RunningPo} from latest WIP file.",
+                millNo,
+                endedPo ?? "(unknown)",
+                st.RunningPo ?? "(none from WIP folder)");
+
+            return true;
+        }
+    }
+
     public void Dispose()
     {
         try { _watchBundle?.Dispose(); } catch { /* ignore */ }

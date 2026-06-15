@@ -256,6 +256,7 @@ public sealed class SettingsController : ControllerBase
                     : _plcHealth.LastUpdateUtc,
                 readLineRunning = handshakeCfg.ReadLineRunning,
                 recoverLatchedTriggerAtStartup = handshakeCfg.RecoverLatchedTriggerAtStartup,
+                runPoEndWorkflowOnStartupRecovery = handshakeCfg.RunPoEndWorkflowOnStartupRecovery,
                 lineRunningSignal = new
                 {
                     address = FormatLineRunningAddress(handshakeCfg),

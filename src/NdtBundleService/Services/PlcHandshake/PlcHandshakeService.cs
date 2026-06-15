@@ -230,7 +230,9 @@ public sealed class PlcHandshakeService
         _poChangePulseHandled = true;
 
         _logger.LogInformation(
-            "{MillName}: trigger {Trigger} latched at startup; running recovery handshake (PO end workflow + MES ack).",
+            _options.RunPoEndWorkflowOnStartupRecovery
+                ? "{MillName}: trigger {Trigger} latched at startup; running recovery handshake (PO end workflow + MES ack)."
+                : "{MillName}: trigger {Trigger} latched at startup; clearing PLC latch with MES ack only (PO end workflow skipped).",
             _mill.Name,
             _mill.TriggerAddress);
 
@@ -284,10 +286,20 @@ public sealed class PlcHandshakeService
 
         if (startupRecovery)
         {
-            _logger.LogInformation(
-                "{MillName}: startup recovery handshake on latched {Trigger}.",
-                _mill.Name,
-                _mill.TriggerAddress);
+            if (_options.RunPoEndWorkflowOnStartupRecovery)
+            {
+                _logger.LogInformation(
+                    "{MillName}: startup recovery handshake on latched {Trigger} (including PO end workflow).",
+                    _mill.Name,
+                    _mill.TriggerAddress);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "{MillName}: startup recovery on latched {Trigger} — MES ack only; PO end workflow not run.",
+                    _mill.Name,
+                    _mill.TriggerAddress);
+            }
         }
         else
         {
@@ -297,42 +309,54 @@ public sealed class PlcHandshakeService
                 _mill.TriggerAddress);
         }
 
+        var runPoEndWorkflow = !startupRecovery || _options.RunPoEndWorkflowOnStartupRecovery;
+
         var poIdVal = 0;
         var ndtFinal = 0;
-        try
+        if (runPoEndWorkflow)
         {
-            poIdVal = ReadDbInt(_options.PoIdByteOffset);
-            ndtFinal = ReadDbInt(_options.NdtCountByteOffset);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "{MillName}: could not read PO/NDT from DB{Db} at PO change start.", _mill.Name, _options.CountsDbNumber);
-        }
-
-        _suppressNdtUntilPoChange = true;
-        _poIdWhenSuppressed = poIdVal;
-        UpdateStatus(millNo, s =>
-        {
-            s.LastPoEnd = new PlcHandshakeLastPoEnd
+            try
             {
-                PoId = poIdVal,
-                NdtCountFinal = ndtFinal,
-                TimestampUtc = DateTimeOffset.UtcNow
-            };
-            s.NdtCount = 0;
-        });
+                poIdVal = ReadDbInt(_options.PoIdByteOffset);
+                ndtFinal = ReadDbInt(_options.NdtCountByteOffset);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "{MillName}: could not read PO/NDT from DB{Db} at PO change start.", _mill.Name, _options.CountsDbNumber);
+            }
 
-        try
-        {
-            await _poChangeHandler.HandlePoChangeAsync(_mill, stoppingToken).ConfigureAwait(false);
-            UpdateStatus(millNo, s => s.LastPoChangeUtc = DateTimeOffset.UtcNow);
-            await SyncHooterMemoryAfterPoEndAsync(millNo, stoppingToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "{MillName}: PO change handler failed; continuing handshake ack sequence.", _mill.Name);
+            _suppressNdtUntilPoChange = true;
+            _poIdWhenSuppressed = poIdVal;
+            UpdateStatus(millNo, s =>
+            {
+                s.LastPoEnd = new PlcHandshakeLastPoEnd
+                {
+                    PoId = poIdVal,
+                    NdtCountFinal = ndtFinal,
+                    TimestampUtc = DateTimeOffset.UtcNow
+                };
+                s.NdtCount = 0;
+            });
+
+            try
+            {
+                await _poChangeHandler.HandlePoChangeAsync(_mill, stoppingToken).ConfigureAwait(false);
+                UpdateStatus(millNo, s => s.LastPoChangeUtc = DateTimeOffset.UtcNow);
+                await SyncHooterMemoryAfterPoEndAsync(millNo, stoppingToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "{MillName}: PO change handler failed; continuing handshake ack sequence.", _mill.Name);
+            }
         }
 
+        await RunMesAckSequenceAsync(millNo, stoppingToken).ConfigureAwait(false);
+
+        SetState(millNo, "Idle");
+    }
+
+    private async Task RunMesAckSequenceAsync(int millNo, CancellationToken stoppingToken)
+    {
         SetState(millNo, "AckSent");
         WriteMerkerBit(_mill.AckByte, _mill.AckBit, true);
         UpdateStatus(millNo, s => s.AckActive = true);
@@ -379,8 +403,6 @@ public sealed class PlcHandshakeService
             "{MillName}: wrote ack {Ack}=FALSE — handshake complete.",
             _mill.Name,
             _mill.AckAddress);
-
-        SetState(millNo, "Idle");
     }
 
     private void UpdateTriggerEdgeTracking(bool trigger)

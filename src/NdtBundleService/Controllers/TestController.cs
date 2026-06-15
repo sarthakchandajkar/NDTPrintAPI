@@ -164,6 +164,49 @@ namespace NdtBundleService.Controllers;
     }
 
     /// <summary>
+    /// Clears "waiting for new WIP bundle after PO end" for one mill and re-seeds running PO from the latest WIP file.
+    /// Use when PO end was triggered in error (e.g. stale PLC latch at service startup while the same PO is still running).
+    /// </summary>
+    [HttpPost("resume-wip/{millNo:int}")]
+    public async Task<IActionResult> ResumeWipAfterFalsePoEnd(int millNo, CancellationToken cancellationToken)
+    {
+        if (millNo is < 1 or > 4)
+            return BadRequest(new { Message = "MillNo must be between 1 and 4." });
+
+        var wasWaiting = _wipBundleRunningPo.IsWaitingForNewWipAfterPoEnd(millNo);
+        var resumed = _wipBundleRunningPo.ResumeRunningWipForMill(millNo);
+        var runningPo = await _wipBundleRunningPo.TryGetRunningPoForMillAsync(millNo, cancellationToken).ConfigureAwait(false);
+
+        if (!resumed)
+        {
+            return Ok(new
+            {
+                Message = wasWaiting
+                    ? "Mill was not in WIP-wait state (already resumed or never waiting)."
+                    : "Mill was not waiting for new WIP after PO end; no change.",
+                MillNo = millNo,
+                WasWaitingForNewWip = wasWaiting,
+                Resumed = false,
+                RunningPo = runningPo
+            });
+        }
+
+        _logger.LogInformation(
+            "Resume WIP requested for Mill {Mill}; running PO is now {Po}.",
+            millNo,
+            runningPo ?? "(none)");
+
+        return Ok(new
+        {
+            Message = "WIP wait cleared; slit processing can continue for the current PO from the latest WIP bundle file.",
+            MillNo = millNo,
+            WasWaitingForNewWip = true,
+            Resumed = true,
+            RunningPo = runningPo
+        });
+    }
+
+    /// <summary>
     /// Returns the WIP (PO/size) information from the current PO plan. When PoPlanFolder is set, uses the current file from that folder; otherwise uses PoPlanCsvPath.
     /// </summary>
     [HttpGet("wip-info")]

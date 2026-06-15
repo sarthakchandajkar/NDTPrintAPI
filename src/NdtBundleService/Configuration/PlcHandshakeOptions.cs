@@ -57,10 +57,16 @@ public sealed class PlcHandshakeOptions
     public int MinimumTriggerFalsePollsBeforeRearm { get; set; } = 2;
 
     /// <summary>
-    /// When true, a PO-end trigger already latched TRUE at service connect runs the full handshake once
-    /// (PO end workflow + MES ack) instead of waiting indefinitely for the PLC to clear without MES ack.
+    /// When true, a PO-end trigger already latched TRUE at service connect is cleared via the MES ack sequence
+    /// instead of waiting indefinitely for the PLC to clear without MES ack.
     /// </summary>
     public bool RecoverLatchedTriggerAtStartup { get; set; } = true;
+
+    /// <summary>
+    /// When <see cref="RecoverLatchedTriggerAtStartup"/> runs, also execute the PO end workflow (close bundles, wait for new WIP).
+    /// Leave false when a latched trigger may be stale while the same PO is still running on the mill.
+    /// </summary>
+    public bool RunPoEndWorkflowOnStartupRecovery { get; set; }
 
     public List<MillConfig> Mills { get; set; } = new();
 }

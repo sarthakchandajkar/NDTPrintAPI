@@ -221,6 +221,13 @@ public interface IWipBundleRunningPoProvider
 
     /// <summary>True when PO end completed but no qualifying new WIP bundle file has arrived yet for this mill.</summary>
     bool IsWaitingForNewWipAfterPoEnd(int millNo);
+
+    /// <summary>
+    /// Clears post–PO-end WIP wait for a mill and re-seeds running PO from the latest WIP bundle file.
+    /// Use when PO end was triggered in error (e.g. stale PLC latch at service startup).
+    /// </summary>
+    /// <returns>True when the mill was waiting and has been resumed.</returns>
+    bool ResumeRunningWipForMill(int millNo);
 }
 
 /// <summary>Live NDT pipe counter from the mill Siemens PLC (data block INT).</summary>
