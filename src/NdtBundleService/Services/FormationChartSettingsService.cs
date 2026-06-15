@@ -43,7 +43,7 @@ public sealed class FormationChartSettingsService : IFormationChartSettingsServi
         if (entries.Count == 0)
             throw new InvalidOperationException("At least one formation chart row is required.");
 
-        var path = ResolveFormationChartPath();
+        var path = FormationChartPathResolver.Resolve(_optionsMonitor.CurrentValue);
         if (string.IsNullOrWhiteSpace(path))
             throw new InvalidOperationException("FormationChartCsvPath is not configured.");
 
@@ -63,19 +63,19 @@ public sealed class FormationChartSettingsService : IFormationChartSettingsServi
             sb.Append(size).Append(',').Append(e.RequiredNdtPcs.ToString(CultureInfo.InvariantCulture)).AppendLine();
         }
 
-        await File.WriteAllTextAsync(path, sb.ToString(), cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await File.WriteAllTextAsync(path, sb.ToString(), cancellationToken).ConfigureAwait(false);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            throw new InvalidOperationException(
+                $"Cannot write formation chart to '{path}'. The NdtBundleService Windows account needs Modify permission on that file or folder, " +
+                "or set NdtBundle:FormationChartCsvPath to a writable path (e.g. the same PAS share folder as NdtBundleRuntimeStateFile).",
+                ex);
+        }
+
         _formationChartProvider.InvalidateCache();
         _logger.LogInformation("Updated formation chart at {Path} ({Count} rows).", path, entries.Count);
-    }
-
-    private string? ResolveFormationChartPath()
-    {
-        var configured = (_optionsMonitor.CurrentValue.FormationChartCsvPath ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(configured))
-            return null;
-
-        return Path.IsPathRooted(configured)
-            ? configured
-            : Path.Combine(AppContext.BaseDirectory, configured);
     }
 }

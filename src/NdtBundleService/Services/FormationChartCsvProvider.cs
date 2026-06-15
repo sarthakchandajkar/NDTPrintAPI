@@ -153,16 +153,7 @@ public sealed class FormationChartCsvProvider : IFormationChartProvider
         return result;
     }
 
-    private string? ResolveFormationChartPath()
-    {
-        var configured = (_options.FormationChartCsvPath ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(configured))
-            return null;
-
-        return Path.IsPathRooted(configured)
-            ? configured
-            : Path.Combine(AppContext.BaseDirectory, configured);
-    }
+    private string? ResolveFormationChartPath() => FormationChartPathResolver.Resolve(_options);
 
     private static Dictionary<string, FormationChartEntry> CopyBuiltInFormationChart()
     {

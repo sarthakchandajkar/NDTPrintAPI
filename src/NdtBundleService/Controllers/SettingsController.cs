@@ -97,10 +97,12 @@ public sealed class SettingsController : ControllerBase
             return denied!;
 
         var entries = await _formationChart.GetEntriesAsync(cancellationToken).ConfigureAwait(false);
+        var resolvedPath = FormationChartPathResolver.Resolve(_options);
         return Ok(new
         {
             Entries = entries.Select(e => new { pipeSize = e.PipeSize, requiredNdtPcs = e.RequiredNdtPcs }),
-            SourcePath = _options.FormationChartCsvPath
+            SourcePath = _options.FormationChartCsvPath,
+            ResolvedPath = resolvedPath
         });
     }
 
