@@ -244,7 +244,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
             try
             {
-                var (headerLine, rows, ndtColumnIndex) = await ReadSlitFileWithRawLinesAsync(fileFull, cancellationToken).ConfigureAwait(false);
+                var (headerLine, rows, ndtColumnIndex, poColumnIndex) = await ReadSlitFileWithRawLinesAsync(fileFull, cancellationToken).ConfigureAwait(false);
 
                 var qualifyingForLive = rows
                     .Select(r => r.Record)
@@ -298,7 +298,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     ?? await _pipeSizeProvider.GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
 
                 var sourceRowNumber = 2; // CSV header is row 1
-                string? poOverrideForFileName = null;
+                var recordsForOutputNaming = new List<InputSlitRecord>();
                 foreach (var row in rows)
                 {
                     if (row.Record is null)
@@ -330,15 +330,22 @@ public sealed class SlitMonitoringWorker : BackgroundService
                                          && record.MillNo == live.ApplyToMillNo
                                          && !string.IsNullOrWhiteSpace(record.PoNumber);
 
-                    var effectivePo = !string.IsNullOrWhiteSpace(runningPoFromWip)
-                        ? runningPoFromWip
-                        : record.PoNumber;
+                    var effectivePo = SlitEffectivePoResolver.Resolve(record.PoNumber, runningPoFromWip);
+                    if (!string.IsNullOrWhiteSpace(runningPoFromWip)
+                        && !string.IsNullOrWhiteSpace(record.PoNumber)
+                        && !InputSlitCsvParsing.PoEquals(record.PoNumber, runningPoFromWip))
+                    {
+                        _logger.LogInformation(
+                            "Mill {Mill}: Input Slit PO {SlitPo} used for NDT output (WIP bundle PO {WipPo} ignored for slit file {File}).",
+                            record.MillNo,
+                            record.PoNumber,
+                            runningPoFromWip,
+                            Path.GetFileName(fileFull));
+                    }
+
                     var effectiveNdt = useLiveThisRow && plcNdt.HasValue
                         ? plcNdt.Value
                         : record.NdtPipes;
-
-                    if (!string.IsNullOrWhiteSpace(runningPoFromWip))
-                        poOverrideForFileName = effectivePo;
 
                     var effectiveRecord = new InputSlitRecord
                     {
@@ -420,9 +427,17 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     if (useLiveThisRow && plcNdt.HasValue && ndtColumnIndex >= 0)
                         rawOut = InputSlitCsvParsing.ReplaceFieldAtIndex(row.RawLine, ndtColumnIndex, effectiveNdt.ToString(CultureInfo.InvariantCulture));
 
+                    if (poColumnIndex >= 0
+                        && !string.IsNullOrWhiteSpace(effectivePo)
+                        && !InputSlitCsvParsing.PoEquals(record.PoNumber, effectivePo))
+                    {
+                        rawOut = InputSlitCsvParsing.ReplaceFieldAtIndex(rawOut, poColumnIndex, effectivePo);
+                    }
+
                     outputLines.Add(rawOut.TrimEnd() + "," + ndtBatchNoFormatted);
                     inputRowsForSql.Add((effectiveRecord, sourceRowNumber));
                     outputRowsForSql.Add((bundleRecord, ndtBatchNoFormatted, sourceRowNumber));
+                    recordsForOutputNaming.Add(effectiveRecord);
                     sourceRowNumber++;
                 }
 
@@ -432,7 +447,9 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 if (!string.IsNullOrWhiteSpace(outputFolder))
                 {
                     Directory.CreateDirectory(outputFolder);
-                    var outputFileName = BuildOutputSlitCsvFileName(fileFull, rows, poOverrideForFileName);
+                    var outputFileName = SlitOutputCsvFileNaming.BuildFileName(
+                        fileFull,
+                        recordsForOutputNaming);
                     outputPath = Path.Combine(outputFolder, outputFileName);
                     await File.WriteAllLinesAsync(outputPath, outputLines, cancellationToken).ConfigureAwait(false);
                     _logger.LogInformation("Wrote bundle CSV: {Path}", outputPath);
@@ -474,24 +491,6 @@ public sealed class SlitMonitoringWorker : BackgroundService
             "JazeeraMES_Prod SQL writes failed after processing slit file {File}. Labels/CSV succeeded but database rows were not saved. Latest errors: {Errors}",
             sourceFile,
             string.Join(" | ", failures.Select(f => $"{f.Operation}: {f.Error}")));
-    }
-
-    /// <summary>SlitNumber_Date_PONumber.csv using the first data row with a PO (date from slit times or file mtime).</summary>
-    private static string BuildOutputSlitCsvFileName(
-        string inputFilePath,
-        List<(string RawLine, InputSlitRecord? Record)> rows,
-        string? poNumberOverride)
-    {
-        var first = rows.Select(r => r.Record).FirstOrDefault(r => r is not null && !string.IsNullOrWhiteSpace(r.PoNumber));
-        var po = !string.IsNullOrWhiteSpace(poNumberOverride)
-            ? poNumberOverride
-            : first?.PoNumber ?? "NA";
-        var slit = string.IsNullOrWhiteSpace(first?.SlitNo) ? "NoSlit" : first!.SlitNo.Trim();
-        var date = (first?.SlitStartTime ?? first?.SlitFinishTime)?.Date
-            ?? File.GetLastWriteTime(inputFilePath).Date;
-        var safeSlit = CsvOutputFileNaming.SanitizeToken(slit, "NoSlit");
-        var safePo = CsvOutputFileNaming.SanitizeToken(po, "NA");
-        return $"{safeSlit}_{date:yyyyMMdd}_{safePo}.csv";
     }
 
     private static InputSlitRecord CloneRecordWithNdt(InputSlitRecord r, int ndtPipes) =>
@@ -537,10 +536,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         return "12" + yy + millDigit + seq;
     }
 
-    /// <summary>
-    /// Reads slit CSV and returns the header line and a list of (raw data line, parsed record) for each valid row.
-    /// </summary>
-    private static async Task<(string HeaderLine, List<(string RawLine, InputSlitRecord? Record)> Rows, int NdtColumnIndex)> ReadSlitFileWithRawLinesAsync(
+    private static async Task<(string HeaderLine, List<(string RawLine, InputSlitRecord? Record)> Rows, int NdtColumnIndex, int PoColumnIndex)> ReadSlitFileWithRawLinesAsync(
         string path,
         CancellationToken cancellationToken)
     {
@@ -551,7 +547,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
         var headerRaw = await reader.ReadLineAsync();
         if (headerRaw is null)
-            return (string.Empty, rows, -1);
+            return (string.Empty, rows, -1, -1);
 
         var headerLine = InputSlitCsvParsing.StripBom(headerRaw);
         var headers = InputSlitCsvParsing.SplitCsvFields(headerLine);
@@ -600,7 +596,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
             rows.Add((line, string.IsNullOrWhiteSpace(record.PoNumber) ? null : record));
         }
 
-        return (headerLine, rows, ndtIndex);
+        return (headerLine, rows, ndtIndex, poIndex);
     }
 
     private static int GetMillNo(string[] cols, int index)

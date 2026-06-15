@@ -57,9 +57,16 @@ public sealed class PipeSizeCsvProvider : IPipeSizeProvider
     {
         if (PoPlanWipSql.IsEnabled(_options))
         {
-            var sqlSignature = await _poPlanWipRepository.TryGetDataSignatureAsync(cancellationToken).ConfigureAwait(false);
-            if (!string.IsNullOrWhiteSpace(sqlSignature))
-                return await GetPipeSizeFromSqlAsync(sqlSignature, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                var sqlSignature = await _poPlanWipRepository.TryGetDataSignatureAsync(cancellationToken).ConfigureAwait(false);
+                if (!string.IsNullOrWhiteSpace(sqlSignature))
+                    return await GetPipeSizeFromSqlAsync(sqlSignature, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "PO_Plan_WIP pipe-size read failed; falling back to PO plan CSV folders.");
+            }
         }
 
         return await GetPipeSizeFromCsvAsync(cancellationToken).ConfigureAwait(false);

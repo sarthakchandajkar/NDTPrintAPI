@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging;
+
 namespace NdtBundleService.Services.PlcHandshake;
 
 /// <summary>MW58 threshold and MW56 accumulated values derived from running PO + formation chart + bundle engine state.</summary>
@@ -27,17 +29,20 @@ public sealed class MillHooterPlcValuesService : IMillHooterPlcValuesService
     private readonly IPipeSizeProvider _pipeSizeProvider;
     private readonly IFormationChartProvider _formationChartProvider;
     private readonly INdtBundleRuntimeStateStore _runtimeState;
+    private readonly ILogger<MillHooterPlcValuesService> _logger;
 
     public MillHooterPlcValuesService(
         IActivePoPerMillService activePoPerMill,
         IPipeSizeProvider pipeSizeProvider,
         IFormationChartProvider formationChartProvider,
-        INdtBundleRuntimeStateStore runtimeState)
+        INdtBundleRuntimeStateStore runtimeState,
+        ILogger<MillHooterPlcValuesService> logger)
     {
         _activePoPerMill = activePoPerMill;
         _pipeSizeProvider = pipeSizeProvider;
         _formationChartProvider = formationChartProvider;
         _runtimeState = runtimeState;
+        _logger = logger;
     }
 
     public async Task<MillHooterResolvedValues> ResolveAsync(int millNo, CancellationToken cancellationToken)
@@ -60,8 +65,20 @@ public sealed class MillHooterPlcValuesService : IMillHooterPlcValuesService
 
         var poNorm = InputSlitCsvParsing.NormalizePo(po.Trim());
 
-        var pipeSizeByPo = await _pipeSizeProvider.GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
-        pipeSizeByPo.TryGetValue(poNorm, out var pipeSize);
+        string? pipeSize = null;
+        try
+        {
+            var pipeSizeByPo = await _pipeSizeProvider.GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
+            pipeSizeByPo.TryGetValue(poNorm, out pipeSize);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Mill {Mill}: pipe size lookup failed for PO {PO}; hooter will use formation-chart default threshold.",
+                millNo,
+                poNorm);
+        }
 
         var formation = await _formationChartProvider.GetFormationChartAsync(cancellationToken).ConfigureAwait(false);
         var threshold = FormationChartLookup.ResolveThreshold(formation, pipeSize);

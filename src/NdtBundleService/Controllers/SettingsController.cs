@@ -255,6 +255,7 @@ public sealed class SettingsController : ControllerBase
                     ? snapshot.Max(m => m.LastUpdateUtc)
                     : _plcHealth.LastUpdateUtc,
                 readLineRunning = handshakeCfg.ReadLineRunning,
+                recoverLatchedTriggerAtStartup = handshakeCfg.RecoverLatchedTriggerAtStartup,
                 lineRunningSignal = new
                 {
                     address = FormatLineRunningAddress(handshakeCfg),

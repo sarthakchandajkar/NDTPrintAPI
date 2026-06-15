@@ -111,19 +111,27 @@ VALUES
         if (!await IsAvailableAsync(cancellationToken).ConfigureAwait(false))
             return null;
 
-        await using var conn = SqlTraceabilityConnection.Create(_options);
-        await SqlTraceabilityConnection.OpenAsync(conn, _logger, "PO_Plan_WIP signature", cancellationToken)
-            .ConfigureAwait(false);
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(_options);
+            await SqlTraceabilityConnection.OpenAsync(conn, _logger, "PO_Plan_WIP signature", cancellationToken)
+                .ConfigureAwait(false);
 
-        await using var cmd = new SqlCommand(SignatureSql, conn);
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            return "sql:empty";
+            await using var cmd = new SqlCommand(SignatureSql, conn);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                return "sql:empty";
 
-        var count = reader.IsDBNull(0) ? 0L : reader.GetInt64(0);
-        var maxImported = reader.IsDBNull(1) ? DateTime.MinValue : reader.GetDateTime(1);
-        var maxId = reader.IsDBNull(2) ? 0L : reader.GetInt64(2);
-        return FormattableString.Invariant($"sql:{count}|{maxImported.Ticks}|{maxId}");
+            var count = reader.IsDBNull(0) ? 0L : reader.GetInt64(0);
+            var maxImported = reader.IsDBNull(1) ? DateTime.MinValue : reader.GetDateTime(1);
+            var maxId = reader.IsDBNull(2) ? 0L : reader.GetInt64(2);
+            return FormattableString.Invariant($"sql:{count}|{maxImported.Ticks}|{maxId}");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "PO_Plan_WIP signature query failed; SQL pipe-size reads will fall back to CSV folders.");
+            return null;
+        }
     }
 
     public async Task<IReadOnlyDictionary<string, string>> GetLatestPipeSizeByPoAsync(CancellationToken cancellationToken)

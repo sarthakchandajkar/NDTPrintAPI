@@ -30,6 +30,7 @@ public sealed class PlcHandshakeService
 
     private bool _primed;
     private bool _loggedStartupTriggerWait;
+    private bool _startupRecoveryAttempted;
     private bool _prevTriggerActive;
     private bool _poChangePulseHandled;
     private int _consecutiveTriggerFalsePolls;
@@ -118,12 +119,18 @@ public sealed class PlcHandshakeService
                 {
                     if (!trigger)
                     {
+                        ResetStuckAckIfNeeded(millNo, ack);
                         ArmAfterTriggerClear(isStartup: true);
                         SetState(millNo, "Idle");
                         _logger.LogDebug(
                             "{MillName}: handshake primed (trigger {Trigger} is false).",
                             _mill.Name,
                             _mill.TriggerAddress);
+                    }
+                    else if (_options.RecoverLatchedTriggerAtStartup && !_startupRecoveryAttempted)
+                    {
+                        await RunStartupRecoveryAsync(millNo, stoppingToken).ConfigureAwait(false);
+                        trigger = ReadMerkerBit(_mill.TriggerByte, _mill.TriggerBit);
                     }
                     else
                     {
@@ -199,12 +206,12 @@ public sealed class PlcHandshakeService
         _logger.LogInformation("PlcHandshakeService stopped for {MillName}.", _mill.Name);
     }
 
-    private async Task RunHandshakeAsync(int millNo, CancellationToken stoppingToken)
+    private async Task RunHandshakeAsync(int millNo, CancellationToken stoppingToken, bool startupRecovery = false)
     {
         _handshakeInProgress = true;
         try
         {
-            await RunHandshakeCoreAsync(millNo, stoppingToken).ConfigureAwait(false);
+            await RunHandshakeCoreAsync(millNo, stoppingToken, startupRecovery).ConfigureAwait(false);
         }
         finally
         {
@@ -212,14 +219,83 @@ public sealed class PlcHandshakeService
         }
     }
 
-    private async Task RunHandshakeCoreAsync(int millNo, CancellationToken stoppingToken)
+    /// <summary>
+    /// PO-end trigger was latched before the handshake armed (e.g. service restart). Run workflow + ack once.
+    /// </summary>
+    private async Task RunStartupRecoveryAsync(int millNo, CancellationToken stoppingToken)
     {
-        SetState(millNo, "ProcessingPoChange");
+        _startupRecoveryAttempted = true;
+        _loggedStartupTriggerWait = false;
+        _prevTriggerActive = true;
+        _poChangePulseHandled = true;
 
         _logger.LogInformation(
-            "{MillName}: PO change rising edge on {Trigger} — handshake started.",
+            "{MillName}: trigger {Trigger} latched at startup; running recovery handshake (PO end workflow + MES ack).",
             _mill.Name,
             _mill.TriggerAddress);
+
+        SetState(millNo, "StartupRecovery");
+        await RunHandshakeAsync(millNo, stoppingToken, startupRecovery: true).ConfigureAwait(false);
+
+        var triggerAfter = ReadMerkerBit(_mill.TriggerByte, _mill.TriggerBit);
+        var ackAfter = ReadMerkerBit(_mill.AckByte, _mill.AckBit);
+        UpdateStatus(millNo, s =>
+        {
+            s.TriggerActive = triggerAfter;
+            s.AckActive = ackAfter;
+        });
+
+        if (!triggerAfter)
+        {
+            ArmAfterTriggerClear(isStartup: false);
+            SetState(millNo, "Idle");
+            _logger.LogInformation(
+                "{MillName}: startup recovery complete; handshake armed for next PO change.",
+                _mill.Name);
+        }
+        else
+        {
+            SetState(millNo, "WaitingTriggerClear (startup recovery)");
+            _logger.LogWarning(
+                "{MillName}: startup recovery finished but trigger {Trigger} is still TRUE; waiting for PLC to clear before arming.",
+                _mill.Name,
+                _mill.TriggerAddress);
+        }
+    }
+
+    private void ResetStuckAckIfNeeded(int millNo, bool ack)
+    {
+        if (!ack)
+            return;
+
+        _logger.LogInformation(
+            "{MillName}: ack {Ack} was TRUE at startup while trigger {Trigger} is clear; resetting ack to FALSE.",
+            _mill.Name,
+            _mill.AckAddress,
+            _mill.TriggerAddress);
+
+        WriteMerkerBit(_mill.AckByte, _mill.AckBit, false);
+        UpdateStatus(millNo, s => s.AckActive = false);
+    }
+
+    private async Task RunHandshakeCoreAsync(int millNo, CancellationToken stoppingToken, bool startupRecovery = false)
+    {
+        SetState(millNo, startupRecovery ? "StartupRecovery" : "ProcessingPoChange");
+
+        if (startupRecovery)
+        {
+            _logger.LogInformation(
+                "{MillName}: startup recovery handshake on latched {Trigger}.",
+                _mill.Name,
+                _mill.TriggerAddress);
+        }
+        else
+        {
+            _logger.LogInformation(
+                "{MillName}: PO change rising edge on {Trigger} — handshake started.",
+                _mill.Name,
+                _mill.TriggerAddress);
+        }
 
         var poIdVal = 0;
         var ndtFinal = 0;
@@ -345,7 +421,11 @@ public sealed class PlcHandshakeService
     {
         _primed = !reprime;
         if (reprime)
+        {
             _loggedStartupTriggerWait = false;
+            _startupRecoveryAttempted = false;
+        }
+
         _prevTriggerActive = false;
         _poChangePulseHandled = false;
         _consecutiveTriggerFalsePolls = 0;

@@ -157,7 +157,9 @@ public sealed class StatusController : ControllerBase
                             TimestampUtc = m.LastPoEnd.TimestampUtc
                         }
                 }),
-                Message = "Persistent per-mill S7 PO-change handshake plus DB251 OK/NOK/NDT counts on the same connection. Use GET /api/Status/plc-live for dashboard polling."
+                Message = "Persistent per-mill S7 PO-change handshake plus DB251 OK/NOK/NDT counts on the same connection. " +
+                    "When RecoverLatchedTriggerAtStartup is true, a trigger latched before connect runs PO end + MES ack once. " +
+                    "Use GET /api/Status/plc-live for dashboard polling."
             });
         }
 
