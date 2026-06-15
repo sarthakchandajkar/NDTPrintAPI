@@ -298,7 +298,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     ?? await _pipeSizeProvider.GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
 
                 var sourceRowNumber = 2; // CSV header is row 1
-                var recordsForOutputNaming = new List<InputSlitRecord>();
+                var anyRowBundled = false;
                 foreach (var row in rows)
                 {
                     if (row.Record is null)
@@ -437,31 +437,39 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     outputLines.Add(rawOut.TrimEnd() + "," + ndtBatchNoFormatted);
                     inputRowsForSql.Add((effectiveRecord, sourceRowNumber));
                     outputRowsForSql.Add((bundleRecord, ndtBatchNoFormatted, sourceRowNumber));
-                    recordsForOutputNaming.Add(effectiveRecord);
+                    anyRowBundled = true;
                     sourceRowNumber++;
                 }
 
-                // Write one output file: SlitNumber_Date_PONumber.csv (under OutputBundleFolder). Overwrites if present.
+                // Write one output file under OutputBundleFolder using the same name as the input inbox file.
                 var outputFolder = (o.OutputBundleFolder ?? string.Empty).Trim();
                 string? outputPath = null;
-                if (!string.IsNullOrWhiteSpace(outputFolder))
+                if (!anyRowBundled)
+                {
+                    _logger.LogInformation(
+                        "Skipping NDT Input Slit output for {File}; no slit rows were bundled. File will be retried on next poll.",
+                        Path.GetFileName(fileFull));
+                }
+                else if (!string.IsNullOrWhiteSpace(outputFolder))
                 {
                     Directory.CreateDirectory(outputFolder);
-                    var outputFileName = SlitOutputCsvFileNaming.BuildFileName(
-                        fileFull,
-                        recordsForOutputNaming);
+                    var outputFileName = Path.GetFileName(fileFull);
                     outputPath = Path.Combine(outputFolder, outputFileName);
                     await File.WriteAllLinesAsync(outputPath, outputLines, cancellationToken).ConfigureAwait(false);
                     _logger.LogInformation("Wrote bundle CSV: {Path}", outputPath);
                 }
 
                 // Best-effort SQL traceability; CSV flow should not fail if SQL is down.
-                await _traceability.RecordInputSlitRowsAsync(fileFull, inputRowsForSql, cancellationToken).ConfigureAwait(false);
-                await _traceability.RecordOutputSlitRowsAsync(outputPath ?? fileFull, outputRowsForSql, cancellationToken).ConfigureAwait(false);
+                if (anyRowBundled)
+                {
+                    await _traceability.RecordInputSlitRowsAsync(fileFull, inputRowsForSql, cancellationToken).ConfigureAwait(false);
+                    await _traceability.RecordOutputSlitRowsAsync(outputPath ?? fileFull, outputRowsForSql, cancellationToken).ConfigureAwait(false);
+                }
 
                 LogSqlWriteFailuresIfAny(fileFull);
 
-                _inputSlitLastHandledWriteUtc[fileFull] = File.GetLastWriteTimeUtc(fileFull);
+                if (anyRowBundled)
+                    _inputSlitLastHandledWriteUtc[fileFull] = File.GetLastWriteTimeUtc(fileFull);
             }
             catch (Exception ex)
             {
