@@ -44,6 +44,11 @@ public sealed class PlcHandshakeService
     private string? _hooterTrackedPo;
     private int _hooterLastWrittenThreshold = -1;
     private int _hooterLastWrittenAccumulated = -1;
+    private bool _hooterAboveThreshold;
+    private bool _hooterLoggedPasBlocked;
+    private DateTimeOffset _hooterLastPeriodicLogUtc;
+
+    private static readonly TimeSpan HooterStatusLogInterval = TimeSpan.FromSeconds(60);
 
     public PlcHandshakeService(
         MillConfig mill,
@@ -86,6 +91,22 @@ public sealed class PlcHandshakeService
             _mill.TriggerAddress,
             _mill.AckAddress,
             ResolvePollIntervalMs());
+
+        if (_mill.Hooter?.Enabled == true)
+        {
+            var h = _mill.Hooter;
+            _logger.LogInformation(
+                "{MillName}: NDT bundle hooter enabled — MW{AccumWord}/MW{ThresholdWord} compare, Q{Byte}.{Bit} pulse {DurationMs}ms, PAS enable DB{Db}.DBX{Byte}.{Bit}.",
+                _mill.Name,
+                h.AccumulatedWordOffset,
+                h.ThresholdWordOffset,
+                h.OutputByte,
+                h.OutputBit,
+                h.DurationMs,
+                h.PasEnableDbNumber,
+                h.PasEnableByteOffset,
+                h.PasEnableBit);
+        }
 
         _reconnectDelayMs = Math.Max(250, _options.InitialReconnectDelayMs);
 
@@ -626,6 +647,13 @@ public sealed class PlcHandshakeService
                 accumulated = resolved.Accumulated;
                 threshold = resolved.Threshold;
                 hooterActive = ProcessHooterPulse(hooterCfg, accumulated.Value, threshold.Value);
+
+                var pasEnable = ReadDbBit(
+                    hooterCfg.PasEnableDbNumber,
+                    hooterCfg.PasEnableByteOffset,
+                    hooterCfg.PasEnableBit);
+                var qOn = hooterActive || ReadOutputBit(hooterCfg.OutputByte, hooterCfg.OutputBit);
+                LogHooterPeriodicStatusIfDue(hooterCfg, accumulated.Value, threshold.Value, pasEnable, qOn, resolved);
             }
         }
         catch (Exception ex)
@@ -734,24 +762,27 @@ public sealed class PlcHandshakeService
         {
             WriteMemoryInt(cfg.ThresholdWordOffset, values.Threshold);
             _hooterLastWrittenThreshold = values.Threshold;
-            _logger.LogDebug(
-                "{MillName}: updated MW{Word}={Threshold} for PO {PO}.",
+            _logger.LogInformation(
+                "{MillName}: hooter MW{Word}={Threshold} (formation chart, PO {PO}, size {Size}).",
                 _mill.Name,
                 cfg.ThresholdWordOffset,
                 values.Threshold,
-                values.PoNumber);
+                values.PoNumber,
+                values.PipeSize ?? "—");
         }
 
         if (values.Accumulated != _hooterLastWrittenAccumulated)
         {
             WriteMemoryInt(cfg.AccumulatedWordOffset, values.Accumulated);
             _hooterLastWrittenAccumulated = values.Accumulated;
-            _logger.LogDebug(
-                "{MillName}: updated MW{Word}={Accumulated} for PO {PO}.",
+            _logger.LogInformation(
+                "{MillName}: hooter MW{Word}={Accumulated} toward next bundle (PO {PO}, MW{ThresholdWord}={Threshold}).",
                 _mill.Name,
                 cfg.AccumulatedWordOffset,
                 values.Accumulated,
-                values.PoNumber);
+                values.PoNumber,
+                cfg.ThresholdWordOffset,
+                values.Threshold);
         }
     }
 
@@ -774,6 +805,30 @@ public sealed class PlcHandshakeService
     private bool ProcessHooterPulse(MillHooterOptions cfg, int accumulated, int threshold)
     {
         var now = DateTimeOffset.UtcNow;
+        var aboveThreshold = accumulated > threshold;
+        if (aboveThreshold && !_hooterAboveThreshold)
+        {
+            _logger.LogInformation(
+                "{MillName}: hooter MW{AccumWord}={Accumulated} exceeded MW{ThresholdWord}={Threshold}.",
+                _mill.Name,
+                cfg.AccumulatedWordOffset,
+                accumulated,
+                cfg.ThresholdWordOffset,
+                threshold);
+        }
+        else if (!aboveThreshold && _hooterAboveThreshold)
+        {
+            _logger.LogInformation(
+                "{MillName}: hooter MW{AccumWord}={Accumulated} at or below MW{ThresholdWord}={Threshold}.",
+                _mill.Name,
+                cfg.AccumulatedWordOffset,
+                accumulated,
+                cfg.ThresholdWordOffset,
+                threshold);
+        }
+
+        _hooterAboveThreshold = aboveThreshold;
+
         if (_hooterPulseActive)
         {
             if (now >= _hooterResetUtc)
@@ -781,24 +836,50 @@ public sealed class PlcHandshakeService
                 WriteOutputBit(cfg.OutputByte, cfg.OutputBit, false);
                 _hooterPulseActive = false;
                 _logger.LogInformation(
-                    "{MillName}: NDT bundle hooter Q{Byte}.{Bit} reset after {DurationMs}ms (MW56={Accumulated}, MW58={Threshold}).",
+                    "{MillName}: NDT bundle hooter Q{Byte}.{Bit} OFF after {DurationMs}ms pulse (MW{AccumWord}={Accumulated}, MW{ThresholdWord}={Threshold}).",
                     _mill.Name,
                     cfg.OutputByte,
                     cfg.OutputBit,
                     cfg.DurationMs,
+                    cfg.AccumulatedWordOffset,
                     accumulated,
+                    cfg.ThresholdWordOffset,
                     threshold);
             }
 
             return _hooterPulseActive;
         }
 
-        if (accumulated <= threshold)
+        if (!aboveThreshold)
+        {
+            _hooterLoggedPasBlocked = false;
             return false;
+        }
 
         var pasEnable = ReadDbBit(cfg.PasEnableDbNumber, cfg.PasEnableByteOffset, cfg.PasEnableBit);
         if (!pasEnable)
+        {
+            if (!_hooterLoggedPasBlocked)
+            {
+                _hooterLoggedPasBlocked = true;
+                _logger.LogInformation(
+                    "{MillName}: hooter armed (MW{AccumWord}={Accumulated} &gt; MW{ThresholdWord}={Threshold}) but PAS enable DB{Db}.DBX{Byte}.{Bit} is OFF — Q{OutByte}.{OutBit} not pulsed.",
+                    _mill.Name,
+                    cfg.AccumulatedWordOffset,
+                    accumulated,
+                    cfg.ThresholdWordOffset,
+                    threshold,
+                    cfg.PasEnableDbNumber,
+                    cfg.PasEnableByteOffset,
+                    cfg.PasEnableBit,
+                    cfg.OutputByte,
+                    cfg.OutputBit);
+            }
+
             return false;
+        }
+
+        _hooterLoggedPasBlocked = false;
 
         if (ReadOutputBit(cfg.OutputByte, cfg.OutputBit))
             return false;
@@ -807,13 +888,49 @@ public sealed class PlcHandshakeService
         _hooterPulseActive = true;
         _hooterResetUtc = now.AddMilliseconds(Math.Max(1000, cfg.DurationMs));
         _logger.LogInformation(
-            "{MillName}: NDT bundle hooter Q{Byte}.{Bit} ON — MW56={Accumulated} &gt; MW58={Threshold} (PAS enable on).",
+            "{MillName}: NDT bundle hooter Q{Byte}.{Bit} ON — MW{AccumWord}={Accumulated} &gt; MW{ThresholdWord}={Threshold} (PAS enable on).",
             _mill.Name,
             cfg.OutputByte,
             cfg.OutputBit,
+            cfg.AccumulatedWordOffset,
             accumulated,
+            cfg.ThresholdWordOffset,
             threshold);
         return true;
+    }
+
+    private void LogHooterPeriodicStatusIfDue(
+        MillHooterOptions cfg,
+        int accumulated,
+        int threshold,
+        bool pasEnable,
+        bool qOn,
+        MillHooterResolvedValues resolved)
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (_hooterLastPeriodicLogUtc != default &&
+            now - _hooterLastPeriodicLogUtc < HooterStatusLogInterval)
+            return;
+
+        _hooterLastPeriodicLogUtc = now;
+
+        var armed = accumulated > threshold;
+        var readyToPulse = armed && pasEnable && !_hooterPulseActive && !qOn;
+        _logger.LogInformation(
+            "{MillName}: hooter status — PO {PO} size {Size} MW{AccumWord}={Accumulated} MW{ThresholdWord}={Threshold} PAS={PasEnable} Q{Byte}.{Bit}={QOn} armed={Armed} ready={Ready}.",
+            _mill.Name,
+            resolved.PoNumber ?? "(none)",
+            resolved.PipeSize ?? "—",
+            cfg.AccumulatedWordOffset,
+            accumulated,
+            cfg.ThresholdWordOffset,
+            threshold,
+            pasEnable ? "ON" : "OFF",
+            cfg.OutputByte,
+            cfg.OutputBit,
+            qOn ? "ON" : "OFF",
+            armed,
+            readyToPulse);
     }
 
     private bool ReadDbBit(int dbNumber, int byteOffset, int bit)
