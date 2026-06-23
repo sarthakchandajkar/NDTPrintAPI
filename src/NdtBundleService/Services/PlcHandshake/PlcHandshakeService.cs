@@ -35,7 +35,8 @@ public sealed class PlcHandshakeService
     private bool _poChangePulseHandled;
     private int _consecutiveTriggerFalsePolls;
     private bool _handshakeInProgress;
-    private volatile bool _settingsTestInProgress;
+    private volatile bool _plcConnectionEnabled;
+    private bool _settingsTestInProgress;
     private bool _suppressNdtUntilPoChange;
     private int _poIdWhenSuppressed;
 
@@ -70,6 +71,7 @@ public sealed class PlcHandshakeService
         _hooterValues = hooterValues;
         _wipRunningPo = wipRunningPo;
         _logger = logger;
+        _plcConnectionEnabled = mill.PlcHandshakeEnabled;
 
         var millNo = mill.ResolveMillNo();
         _statusRegistry.RegisterMill(millNo, new PlcHandshakeMillStatus
@@ -77,8 +79,78 @@ public sealed class PlcHandshakeService
             MillName = mill.Name,
             MillNo = millNo,
             IpAddress = mill.IpAddress.Trim(),
-            HandshakeState = "Starting"
+            PlcConnectionEnabled = _plcConnectionEnabled,
+            HandshakeState = _plcConnectionEnabled ? "Starting" : "Disconnected (manual)"
         });
+    }
+
+    public bool IsPlcConnectionEnabled => _plcConnectionEnabled;
+
+    /// <summary>Enable or disable S7 connect/reconnect for this mill (manual maintenance).</summary>
+    public MillPlcConnectionResult SetPlcConnectionEnabled(bool enabled)
+    {
+        var millNo = _mill.ResolveMillNo();
+        var wasEnabled = _plcConnectionEnabled;
+        _plcConnectionEnabled = enabled;
+
+        if (!enabled)
+        {
+            DisconnectPlc();
+            ResetTriggerEdgeState(reprime: true);
+            _reconnectDelayMs = Math.Max(250, _options.InitialReconnectDelayMs);
+            UpdateStatus(millNo, s =>
+            {
+                s.PlcConnectionEnabled = false;
+                s.Connected = false;
+                s.TriggerActive = false;
+                s.AckActive = false;
+                s.HandshakeState = "Disconnected (manual)";
+                s.LastError = null;
+            });
+            _logger.LogInformation(
+                "{MillName}: PLC handshake connection manually disconnected (S7 slot released).",
+                _mill.Name);
+
+            return new MillPlcConnectionResult
+            {
+                Success = true,
+                MillNo = millNo,
+                MillName = _mill.Name,
+                PlcConnectionEnabled = false,
+                Connected = false,
+                Message = wasEnabled
+                    ? "Mill PLC disconnected. Slit processing and other mills are unaffected."
+                    : "Mill PLC was already disconnected."
+            };
+        }
+
+        UpdateStatus(millNo, s =>
+        {
+            s.PlcConnectionEnabled = true;
+            s.HandshakeState = "Reconnecting";
+            s.LastError = null;
+        });
+        _logger.LogInformation(
+            "{MillName}: PLC handshake connection manually enabled; reconnecting.",
+            _mill.Name);
+
+        return new MillPlcConnectionResult
+        {
+            Success = true,
+            MillNo = millNo,
+            MillName = _mill.Name,
+            PlcConnectionEnabled = true,
+            Connected = IsPlcConnected(),
+            Message = wasEnabled
+                ? "Mill PLC connection was already enabled."
+                : "Mill PLC connection enabled; reconnecting on next poll cycle."
+        };
+    }
+
+    private bool IsPlcConnected()
+    {
+        lock (_plcLock)
+            return _plc is not null && _plc.IsConnected;
     }
 
     public async Task RunAsync(CancellationToken stoppingToken)
@@ -114,6 +186,19 @@ public sealed class PlcHandshakeService
         {
             try
             {
+                if (!_plcConnectionEnabled)
+                {
+                    DisconnectPlc();
+                    UpdateStatus(millNo, s =>
+                    {
+                        s.PlcConnectionEnabled = false;
+                        s.Connected = false;
+                        s.HandshakeState = "Disconnected (manual)";
+                    });
+                    await PollDelayAsync(stoppingToken).ConfigureAwait(false);
+                    continue;
+                }
+
                 if (!await EnsureConnectedAsync(stoppingToken).ConfigureAwait(false))
                 {
                     await DelayReconnectAsync(stoppingToken).ConfigureAwait(false);
@@ -125,6 +210,7 @@ public sealed class PlcHandshakeService
 
                 UpdateStatus(millNo, s =>
                 {
+                    s.PlcConnectionEnabled = true;
                     s.Connected = true;
                     s.TriggerActive = trigger;
                     s.AckActive = ack;
@@ -1046,6 +1132,20 @@ public sealed class PlcHandshakeService
                 MillNo = millNo,
                 MillName = _mill.Name,
                 Message = "Mill is busy with a PO-change handshake. Try again in a few seconds.",
+                Steps = steps
+            };
+        }
+
+        if (!_plcConnectionEnabled)
+        {
+            return new PlcPoChangeTestResult
+            {
+                Success = false,
+                MillNo = millNo,
+                MillName = _mill.Name,
+                Message =
+                    "Mill PLC connection is manually disconnected. " +
+                    "Use POST /api/Settings/plc/mill/{millNo}/connect before running a PO-change test.",
                 Steps = steps
             };
         }

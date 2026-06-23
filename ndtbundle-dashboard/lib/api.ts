@@ -221,6 +221,8 @@ export interface SettingsPlcMill {
   poEndAddress?: string;
   mesAckAddress?: string;
   handshakeConnected?: boolean;
+  /** When false, S7 handshake is manually disconnected (releases PLC connection slot). */
+  plcConnectionEnabled?: boolean;
   triggerActive?: boolean;
   ackActive?: boolean;
   handshakeState?: string;
@@ -283,6 +285,15 @@ export interface SettingsPoChangeTestResult {
   poNumber?: string | null;
   steps?: string[];
   logHint?: string;
+}
+
+export interface SettingsMillPlcConnectionResult {
+  success?: boolean;
+  message?: string;
+  millNo?: number;
+  millName?: string;
+  plcConnectionEnabled?: boolean;
+  connected?: boolean;
 }
 
 export interface SettingsPrinterMill {
@@ -477,6 +488,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ millNo }),
     }),
+  settingsDisconnectMillPlc: (token: string, millNo: number) =>
+    fetchSettingsApi<SettingsMillPlcConnectionResult>(
+      `/api/Settings/plc/mill/${millNo}/disconnect`,
+      token,
+      { method: "POST" }
+    ),
+  settingsConnectMillPlc: (token: string, millNo: number) =>
+    fetchSettingsApi<SettingsMillPlcConnectionResult>(
+      `/api/Settings/plc/mill/${millNo}/connect`,
+      token,
+      { method: "POST" }
+    ),
   settingsPrinters: (token: string) =>
     fetchSettingsApi<{ mills?: SettingsPrinterMill[] }>("/api/Settings/printers", token),
   settingsSavePrinters: (

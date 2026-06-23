@@ -12,6 +12,12 @@ public sealed class MillConfig
     /// <summary>Mill number 1–4. When 0, parsed from <see cref="Name"/> (<c>Mill-N</c>).</summary>
     public int MillNo { get; set; }
 
+    /// <summary>
+    /// When false, the mill handshake loop runs but does not open an S7 connection until enabled
+    /// (via config change + restart, or <c>POST /api/Settings/plc/mill/{millNo}/connect</c>).
+    /// </summary>
+    public bool PlcHandshakeEnabled { get; set; } = true;
+
     /// <summary>PLC IP address (ISO-on-TCP port 102).</summary>
     public string IpAddress { get; set; } = string.Empty;
 

@@ -242,8 +242,11 @@ public sealed class StatusController : ControllerBase
                 m.MillName,
                 m.MillNo,
                 m.IpAddress,
+                m.PlcConnectionEnabled,
                 m.Connected,
-                Status = m.Connected ? "connected" : "disconnected",
+                Status = !m.PlcConnectionEnabled
+                    ? "disconnected (manual)"
+                    : m.Connected ? "connected" : "disconnected",
                 m.OkCount,
                 m.NokCount,
                 m.NdtCount,

@@ -20,6 +20,36 @@ public sealed class PlcHandshakeCoordinator
             return _byMill.ContainsKey(millNo);
     }
 
+    public bool? GetMillPlcConnectionEnabled(int millNo)
+    {
+        lock (_sync)
+        {
+            if (!_byMill.TryGetValue(millNo, out var service))
+                return null;
+            return service.IsPlcConnectionEnabled;
+        }
+    }
+
+    public MillPlcConnectionResult SetMillPlcConnectionEnabled(int millNo, bool enabled)
+    {
+        lock (_sync)
+        {
+            if (!_byMill.TryGetValue(millNo, out var service))
+            {
+                return new MillPlcConnectionResult
+                {
+                    Success = false,
+                    MillNo = millNo,
+                    Message =
+                        "Handshake loop for this mill is not running. Ensure PlcHandshake.Enabled is true, " +
+                        "the mill has an IpAddress configured, and restart NdtBundleService."
+                };
+            }
+
+            return service.SetPlcConnectionEnabled(enabled);
+        }
+    }
+
     public async Task<PlcPoChangeTestResult> RunSettingsTestAsync(int millNo, CancellationToken cancellationToken)
     {
         PlcHandshakeService? service;

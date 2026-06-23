@@ -89,6 +89,14 @@ public sealed class PlcHandshakeWorker : BackgroundService
             if (millNo is >= 1 and <= 4)
                 _coordinator.Register(service, millNo);
 
+            if (!mill.PlcHandshakeEnabled)
+            {
+                _logger.LogInformation(
+                    "PlcHandshake for {MillName} (Mill {MillNo}) starts with PlcHandshakeEnabled=false; S7 connect suppressed until API connect.",
+                    mill.Name,
+                    millNo);
+            }
+
             _services.Add(service);
             _tasks.Add(service.RunAsync(stoppingToken));
         }

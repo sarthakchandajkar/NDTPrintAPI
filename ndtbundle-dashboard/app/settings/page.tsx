@@ -183,6 +183,7 @@ export default function SettingsPage() {
   const [printers, setPrinters] = useState<SettingsPrinterMill[]>([]);
   const [poChangeTestingMill, setPoChangeTestingMill] = useState<number | null>(null);
   const [poChangeTestResult, setPoChangeTestResult] = useState<SettingsPoChangeTestResult | null>(null);
+  const [plcConnectionBusyMill, setPlcConnectionBusyMill] = useState<number | null>(null);
   const [plcPollTick, setPlcPollTick] = useState(0);
 
   const refreshStatus = useCallback(async () => {
@@ -297,6 +298,32 @@ export default function SettingsPage() {
       setError(e instanceof Error ? e.message : "PO change test failed");
     } finally {
       setPoChangeTestingMill(null);
+    }
+  };
+
+  const setMillPlcConnection = async (millNo: number, connect: boolean) => {
+    const t = getSettingsToken();
+    if (!t) return;
+    setPlcConnectionBusyMill(millNo);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = connect
+        ? await api.settingsConnectMillPlc(t, millNo)
+        : await api.settingsDisconnectMillPlc(t, millNo);
+      if (result.success) {
+        setMessage(
+          result.message ??
+            (connect ? `Mill-${millNo} PLC connection enabled.` : `Mill-${millNo} PLC disconnected.`)
+        );
+      } else {
+        setError(result.message ?? `Mill-${millNo} PLC ${connect ? "connect" : "disconnect"} failed.`);
+      }
+      await loadTabData();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : `PLC ${connect ? "connect" : "disconnect"} failed`);
+    } finally {
+      setPlcConnectionBusyMill(null);
     }
   };
 
@@ -508,8 +535,11 @@ export default function SettingsPage() {
               Checked: {formatUtc(plc?.lastPlcCheckUtc)} · auto-refresh every 2s
             </p>
             <p className="text-gray-600 text-xs pt-1">
-              Use <strong>Test PO change</strong> per mill to verify PO-end workflow and MW56/MW58 rewrite. Results appear
-              below and in server logs (<code className="text-xs bg-gray-100 px-1 rounded">[Settings test]</code>).
+              Use <strong>Disconnect PLC</strong> to release the S7 connection for one mill (e.g. Simatic Manager Go
+              Online on Mill-4) while Mills 1–3 and slit/tag processing keep running. Use <strong>Connect PLC</strong> to
+              resume handshake. <strong>Test PO change</strong> verifies PO-end workflow and MW56/MW58 rewrite — results
+              appear below and in server logs (
+              <code className="text-xs bg-gray-100 px-1 rounded">[Settings test]</code>).
             </p>
           </div>
 
@@ -526,7 +556,10 @@ export default function SettingsPage() {
                 </p>
               </div>
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 p-5">
-                {(plc.mills ?? []).map((m) => (
+                {(plc.mills ?? []).map((m) => {
+                  const plcLinkEnabled = m.plcConnectionEnabled !== false;
+                  const s7Connected = !!m.handshakeConnected;
+                  return (
                   <div
                     key={m.millNo}
                     className="rounded-lg border border-gray-100 bg-gray-50/50 px-4 py-3 flex flex-col gap-2"
@@ -534,13 +567,15 @@ export default function SettingsPage() {
                     <span className="text-sm font-semibold text-gray-900">{m.name ?? `Mill-${m.millNo}`}</span>
                     <LineRunningLamp
                       running={m.lineRunning}
-                      connected={m.handshakeConnected ?? false}
+                      connected={plcLinkEnabled && s7Connected}
                     />
                     <span className="text-[10px] text-gray-400 truncate" title={m.host}>
                       {m.host || "—"}
+                      {!plcLinkEnabled ? " · PLC link off" : ""}
                     </span>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </section>
           )}
@@ -587,6 +622,7 @@ export default function SettingsPage() {
                   <th className="px-4 py-2 text-left">Mill</th>
                   <th className="px-4 py-2 text-left">Host</th>
                   <th className="px-4 py-2 text-left">S7</th>
+                  <th className="px-4 py-2 text-left">PLC link</th>
                   <th className="px-4 py-2 text-left">Line</th>
                   <th className="px-4 py-2 text-left">MW58</th>
                   <th className="px-4 py-2 text-left">MW56</th>
@@ -598,7 +634,14 @@ export default function SettingsPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
-                {(plc?.mills ?? []).map((m) => (
+                {(plc?.mills ?? []).map((m) => {
+                  const plcLinkEnabled = m.plcConnectionEnabled !== false;
+                  const s7Connected = !!m.handshakeConnected;
+                  const plcLinkBusy = plcConnectionBusyMill === m.millNo;
+                  const millBusy =
+                    plcLinkBusy || poChangeTestingMill === m.millNo || poChangeTestingMill !== null;
+
+                  return (
                   <tr key={m.millNo}>
                     <td className="px-4 py-2 font-medium whitespace-nowrap">
                       {m.name ?? `Mill-${m.millNo}`}
@@ -610,25 +653,63 @@ export default function SettingsPage() {
                     <td className="px-4 py-2">
                       <span
                         className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                          m.handshakeConnected ?? (m.reachable && plc?.plcHandshakeEnabled)
-                            ? "bg-green-100 text-green-800"
-                            : m.reachable
-                              ? "bg-amber-100 text-amber-800"
-                              : "bg-red-100 text-red-800"
+                          !plcLinkEnabled
+                            ? "bg-gray-100 text-gray-700"
+                            : s7Connected
+                              ? "bg-green-100 text-green-800"
+                              : m.reachable
+                                ? "bg-amber-100 text-amber-800"
+                                : "bg-red-100 text-red-800"
                         }`}
                       >
-                        {m.handshakeConnected
-                          ? "Connected"
-                          : m.reachable
-                            ? "TCP OK"
-                            : "Unreachable"}
+                        {!plcLinkEnabled
+                          ? "Manual off"
+                          : s7Connected
+                            ? "Connected"
+                            : m.reachable
+                              ? "TCP OK"
+                              : "Unreachable"}
                       </span>
+                    </td>
+                    <td className="px-4 py-2">
+                      <div className="flex flex-col gap-1.5">
+                        {plcLinkEnabled ? (
+                          <button
+                            type="button"
+                            disabled={
+                              plcLinkBusy ||
+                              poChangeTestingMill !== null ||
+                              !(m.testAvailable ?? plc?.plcHandshakeEnabled)
+                            }
+                            onClick={() => m.millNo && void setMillPlcConnection(m.millNo, false)}
+                            className="px-3 py-1.5 text-xs font-medium rounded-md border border-amber-300 text-amber-900 bg-amber-50 hover:bg-amber-100 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                          >
+                            {plcLinkBusy ? "Working…" : "Disconnect PLC"}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={
+                              plcLinkBusy ||
+                              poChangeTestingMill !== null ||
+                              !(m.testAvailable ?? plc?.plcHandshakeEnabled)
+                            }
+                            onClick={() => m.millNo && void setMillPlcConnection(m.millNo, true)}
+                            className="px-3 py-1.5 text-xs font-medium rounded-md border border-green-300 text-green-900 bg-green-50 hover:bg-green-100 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                          >
+                            {plcLinkBusy ? "Working…" : "Connect PLC"}
+                          </button>
+                        )}
+                        <span className="text-[10px] text-gray-500">
+                          {plcLinkEnabled ? "S7 session active" : "Slot released"}
+                        </span>
+                      </div>
                     </td>
                     <td className="px-4 py-2">
                       {plc?.readLineRunning !== false ? (
                         <LineRunningLamp
                           running={m.lineRunning}
-                          connected={m.handshakeConnected ?? false}
+                          connected={plcLinkEnabled && s7Connected}
                           compact
                         />
                       ) : (
@@ -659,7 +740,8 @@ export default function SettingsPage() {
                       <button
                         type="button"
                         disabled={
-                          poChangeTestingMill !== null ||
+                          millBusy ||
+                          !plcLinkEnabled ||
                           !(m.testAvailable ?? plc?.plcHandshakeEnabled)
                         }
                         onClick={() => m.millNo && testPoChange(m.millNo)}
@@ -669,7 +751,8 @@ export default function SettingsPage() {
                       </button>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
             </div>

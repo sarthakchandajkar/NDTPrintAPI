@@ -21,6 +21,9 @@ public sealed class PlcHandshakeMillStatus
 
     public bool Connected { get; set; }
 
+    /// <summary>When false, the handshake loop is running but S7 connect/reconnect is suppressed (manual or config).</summary>
+    public bool PlcConnectionEnabled { get; set; } = true;
+
     public bool TriggerActive { get; set; }
 
     public bool AckActive { get; set; }
@@ -104,9 +107,10 @@ public sealed class PlcHandshakeStatusRegistry
     {
         lock (_sync)
         {
-            if (_byMill.Count == 0)
-                return false;
-            return _byMill.Values.All(m => m.Connected);
+            var active = _byMill.Values.Where(m => m.PlcConnectionEnabled).ToList();
+            if (active.Count == 0)
+                return _byMill.Count > 0;
+            return active.All(m => m.Connected);
         }
     }
 
@@ -132,6 +136,7 @@ public sealed class PlcHandshakeStatusRegistry
             MillNo = m.MillNo,
             IpAddress = m.IpAddress,
             Connected = m.Connected,
+            PlcConnectionEnabled = m.PlcConnectionEnabled,
             TriggerActive = m.TriggerActive,
             AckActive = m.AckActive,
             HandshakeState = m.HandshakeState,

@@ -212,6 +212,7 @@ public sealed class SettingsController : ControllerBase
                     poEndAddress = cfg.TriggerAddress,
                     mesAckAddress = cfg.AckAddress,
                     handshakeConnected = live?.Connected ?? false,
+                    plcConnectionEnabled = live?.PlcConnectionEnabled ?? cfg.PlcHandshakeEnabled,
                     triggerActive = live?.TriggerActive ?? false,
                     ackActive = live?.AckActive ?? false,
                     handshakeState = live?.HandshakeState ?? "Unknown",
@@ -320,6 +321,69 @@ public sealed class SettingsController : ControllerBase
             result.PoNumber,
             steps = result.Steps,
             logHint = "Filter logs for [Settings test] or PO end workflow for this mill."
+        });
+    }
+
+    /// <summary>
+    /// Disconnect one mill's S7 handshake (releases the PLC connection slot). Slit CSV processing and other mills are unaffected.
+    /// </summary>
+    [HttpPost("plc/mill/{millNo:int}/disconnect")]
+    public IActionResult DisconnectMillPlc(int millNo)
+    {
+        if (!TryAuthorize(out var denied))
+            return denied!;
+
+        return SetMillPlcConnection(millNo, enabled: false);
+    }
+
+    /// <summary>Reconnect one mill's S7 handshake after a manual disconnect.</summary>
+    [HttpPost("plc/mill/{millNo:int}/connect")]
+    public IActionResult ConnectMillPlc(int millNo)
+    {
+        if (!TryAuthorize(out var denied))
+            return denied!;
+
+        return SetMillPlcConnection(millNo, enabled: true);
+    }
+
+    private IActionResult SetMillPlcConnection(int millNo, bool enabled)
+    {
+        if (millNo is < 1 or > 4)
+            return BadRequest(new { Message = "millNo must be 1–4." });
+
+        var handshakeCfg = _options.PlcHandshake ?? new PlcHandshakeOptions();
+        if (!handshakeCfg.Enabled)
+        {
+            return BadRequest(new
+            {
+                Message = "PlcHandshake is disabled. Enable NdtBundle:PlcHandshake:Enabled and restart NdtBundleService."
+            });
+        }
+
+        var millCfg = handshakeCfg.Mills?.FirstOrDefault(m => m.ResolveMillNo() == millNo);
+        if (millCfg is null || string.IsNullOrWhiteSpace(millCfg.IpAddress))
+        {
+            return BadRequest(new
+            {
+                Message = $"Mill {millNo} is not configured in NdtBundle:PlcHandshake:Mills (missing IpAddress)."
+            });
+        }
+
+        var action = enabled ? "connect" : "disconnect";
+        _logger.LogInformation("Settings PLC {Action} requested for Mill {Mill}.", action, millNo);
+
+        var result = _handshakeCoordinator.SetMillPlcConnectionEnabled(millNo, enabled);
+        if (!result.Success)
+            return BadRequest(new { result.Success, result.Message, result.MillNo });
+
+        return Ok(new
+        {
+            result.Success,
+            result.MillNo,
+            result.MillName,
+            result.PlcConnectionEnabled,
+            result.Connected,
+            result.Message
         });
     }
 
