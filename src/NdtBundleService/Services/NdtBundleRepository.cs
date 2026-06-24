@@ -814,7 +814,20 @@ ORDER BY SlitNo";
             return slitSum;
 
         if (UseDatabase)
-            await UpdateBundleTotalInDatabaseAsync(batchNoTrimmed, slitSum, cancellationToken).ConfigureAwait(false);
+        {
+            try
+            {
+                await UpdateBundleTotalInDatabaseAsync(batchNoTrimmed, slitSum, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Could not update NDT_Bundle total for {BatchNo} to slit sum {SlitSum}; slit reconcile data is still saved.",
+                    batchNoTrimmed,
+                    slitSum);
+            }
+        }
 
         await UpdateBundleSummaryCsvAsync(batchNoTrimmed, slitSum, cancellationToken).ConfigureAwait(false);
 

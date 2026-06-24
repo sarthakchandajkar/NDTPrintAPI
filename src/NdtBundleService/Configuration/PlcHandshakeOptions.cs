@@ -10,6 +10,14 @@ public sealed class PlcHandshakeOptions
     /// <summary>When true, <see cref="Services.PlcHandshake.PlcHandshakeWorker"/> owns PO-end I/O.</summary>
     public bool Enabled { get; set; }
 
+    /// <summary>
+    /// When true, connect to each mill PLC only to read OK/NOK/NDT counts and the line-running bit.
+    /// PO-change trigger/ack handshake, startup recovery, and MES ack writes are disabled.
+    /// Per-mill <see cref="MillConfig.Hooter"/> pulses and MW threshold/accumulated sync still run when configured.
+    /// Use with <see cref="NdtBundleOptions.FileBasedPoEnd"/> for PO end from WIP files.
+    /// </summary>
+    public bool TelemetryOnly { get; set; }
+
     /// <summary>Default poll interval for all mills (ms).</summary>
     public int PollIntervalMs { get; set; } = 500;
 

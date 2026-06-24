@@ -2,8 +2,8 @@ namespace NdtBundleService.Configuration;
 
 /// <summary>
 /// PO end / PO change detection from TM Bundle WIP filenames instead of the PLC M-bit trigger.
-/// When <see cref="Enabled"/> is true, <see cref="PlcHandshakeService"/> ignores PLC PO-change triggers
-/// but keeps S7 reads for line running and OK/NOK/NDT counts.
+/// When <see cref="Enabled"/> is true, PO end is driven from WIP filenames instead of the PLC M-bit.
+/// Pair with <see cref="PlcHandshakeOptions.TelemetryOnly"/> so the S7 client only reads counts and line running.
 /// </summary>
 public sealed class FileBasedPoEndOptions
 {

@@ -162,13 +162,25 @@ public sealed class PlcHandshakeService
     public async Task RunAsync(CancellationToken stoppingToken)
     {
         var millNo = _mill.ResolveMillNo();
-        _logger.LogInformation(
-            "PlcHandshakeService starting for {MillName} at {Host} trigger {Trigger} ack {Ack} poll {Poll}ms.",
-            _mill.Name,
-            _mill.IpAddress,
-            _mill.TriggerAddress,
-            _mill.AckAddress,
-            ResolvePollIntervalMs());
+        if (_options.TelemetryOnly)
+        {
+            _logger.LogInformation(
+                "PlcHandshakeService starting for {MillName} at {Host} (telemetry-only: OK/NOK/NDT + line running{Hooter}, poll {Poll}ms).",
+                _mill.Name,
+                _mill.IpAddress,
+                _mill.Hooter?.Enabled == true ? " + hooter" : string.Empty,
+                ResolvePollIntervalMs());
+        }
+        else
+        {
+            _logger.LogInformation(
+                "PlcHandshakeService starting for {MillName} at {Host} trigger {Trigger} ack {Ack} poll {Poll}ms.",
+                _mill.Name,
+                _mill.IpAddress,
+                _mill.TriggerAddress,
+                _mill.AckAddress,
+                ResolvePollIntervalMs());
+        }
 
         if (_mill.Hooter?.Enabled == true)
         {
@@ -208,6 +220,25 @@ public sealed class PlcHandshakeService
                 if (!await EnsureConnectedAsync(stoppingToken).ConfigureAwait(false))
                 {
                     await DelayReconnectAsync(stoppingToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                if (_options.TelemetryOnly)
+                {
+                    UpdateStatus(millNo, s =>
+                    {
+                        s.PlcConnectionEnabled = true;
+                        s.Connected = true;
+                        s.LastError = null;
+                    });
+
+                    TryUpdateDb251Counts(millNo);
+                    await TryUpdateMillSignalsAsync(millNo, stoppingToken).ConfigureAwait(false);
+
+                    _connectionHealth.RecordModbusPoll(true, _statusRegistry.AllConnected());
+                    SetState(millNo, "Telemetry");
+                    _primed = true;
+                    await PollDelayAsync(stoppingToken).ConfigureAwait(false);
                     continue;
                 }
 
@@ -703,7 +734,7 @@ public sealed class PlcHandshakeService
             var slitId = ReadDbInt(_options.SlitIdByteOffset);
 
             var ndtDisplay = ndtRaw;
-            if (_suppressNdtUntilPoChange)
+            if (!_options.TelemetryOnly && _suppressNdtUntilPoChange)
             {
                 if (poId != _poIdWhenSuppressed)
                     _suppressNdtUntilPoChange = false;
@@ -1156,6 +1187,20 @@ public sealed class PlcHandshakeService
     {
         var millNo = _mill.ResolveMillNo();
         var steps = new List<string>();
+
+        if (_options.TelemetryOnly)
+        {
+            return new PlcPoChangeTestResult
+            {
+                Success = false,
+                MillNo = millNo,
+                MillName = _mill.Name,
+                Message =
+                    "PO-change handshake is disabled (PlcHandshake.TelemetryOnly). " +
+                    "Use POST /api/Test/po-end for workflow-only simulation.",
+                Steps = steps
+            };
+        }
 
         if (_handshakeInProgress || _settingsTestInProgress)
         {

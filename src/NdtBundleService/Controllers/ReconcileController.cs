@@ -165,6 +165,79 @@ public sealed class ReconcileController : ControllerBase
         return int.TryParse(tail, out var seq) ? seq : 0;
     }
 
+    private async Task<IActionResult> BuildReconcileSlitSuccessResponseAsync(
+        string batchNo,
+        string slitNo,
+        int newNdtPipes,
+        int filesUpdated,
+        int sqlRowsUpdated,
+        int fallbackBundleTotal,
+        CancellationToken cancellationToken)
+    {
+        IReadOnlyList<(string SlitNo, int NdtPipes)> slits = Array.Empty<(string, int)>();
+        var bundleTotal = fallbackBundleTotal;
+        var syncedTotal = 0;
+        string? warning = null;
+
+        try
+        {
+            slits = await _bundleRepository.GetSlitsForBatchAsync(batchNo, cancellationToken).ConfigureAwait(false);
+            syncedTotal = await _bundleRepository
+                .TrySyncBundleTotalFromSlitsAsync(batchNo, forceFromSlits: true, cancellationToken)
+                .ConfigureAwait(false);
+            var bundle = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
+            bundleTotal = bundle?.TotalNdtPcs ?? (syncedTotal > 0 ? syncedTotal : fallbackBundleTotal);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception postEx)
+        {
+            warning = "Slit saved successfully; reloading bundle totals failed. Refresh the page to see updated values.";
+            _logger.LogWarning(
+                postEx,
+                "Slit reconcile persisted for bundle {BatchNo} slit {SlitNo} but post-update reload/sync failed.",
+                batchNo,
+                slitNo);
+            if (slits.Count > 0)
+                bundleTotal = slits.Sum(s => s.NdtPipes);
+        }
+
+        _logger.LogInformation(
+            "Reconciled slit {SlitNo} for bundle {BatchNo}: NewNdtPipes={NewPipes}, FilesUpdated={FilesUpdated}, SqlRowsUpdated={SqlRowsUpdated}, BundleTotalNdtPcs={BundleTotal}.",
+            slitNo,
+            batchNo,
+            newNdtPipes,
+            filesUpdated,
+            sqlRowsUpdated,
+            bundleTotal);
+
+        var message = filesUpdated > 0
+            ? "Slit reconciled. Per-slit output CSV updated."
+            : "Slit reconciled in SQL (no matching per-slit output CSV row was updated on disk).";
+        if (sqlRowsUpdated > 0)
+            message += $" {sqlRowsUpdated} Output_Slit_Row row(s) updated.";
+        if (syncedTotal > 0)
+            message += $" Bundle total synced to {syncedTotal} NDT pipe(s) from slit sum.";
+        if (!string.IsNullOrWhiteSpace(warning))
+            message += " " + warning;
+
+        return Ok(new
+        {
+            Message = message,
+            Warning = warning,
+            NdtBatchNo = batchNo,
+            SlitNo = ReconcileCsvParsing.NormalizeSlitKey(slitNo),
+            NewNdtPipes = newNdtPipes,
+            FilesUpdated = filesUpdated,
+            SqlRowsUpdated = sqlRowsUpdated,
+            NewBundleTotalNdtPcs = bundleTotal,
+            BundleSummaryUpdated = syncedTotal > 0,
+            Slits = slits.Select(s => new { SlitNo = s.SlitNo, NdtPipes = s.NdtPipes }).ToList()
+        });
+    }
+
     /// <summary>
     /// Reconcile a bundle: set the NDT pipe count to the operator-specified value.
     /// Updates database (if configured) and all output CSV files containing this NDT Batch No.
@@ -271,55 +344,19 @@ public sealed class ReconcileController : ControllerBase
                 });
             }
 
-            IReadOnlyList<(string SlitNo, int NdtPipes)> slits = Array.Empty<(string, int)>();
-            try
-            {
-                slits = await _bundleRepository.GetSlitsForBatchAsync(batchNo, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception reloadEx)
-            {
-                _logger.LogWarning(
-                    reloadEx,
-                    "Slit reconcile succeeded for bundle {BatchNo} slit {SlitNo} but reloading slit list failed.",
-                    batchNo,
-                    slitNo);
-            }
-
-            var syncedTotal = await _bundleRepository
-                .TrySyncBundleTotalFromSlitsAsync(batchNo, forceFromSlits: true, cancellationToken)
-                .ConfigureAwait(false);
-            bundle = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
-            var bundleTotal = bundle?.TotalNdtPcs ?? syncedTotal;
-
-            _logger.LogInformation(
-                "Reconciled slit {SlitNo} for bundle {BatchNo}: NewNdtPipes={NewPipes}, FilesUpdated={FilesUpdated}, SqlRowsUpdated={SqlRowsUpdated}, BundleTotalNdtPcs={BundleTotal}.",
-                slitNo,
+            return await BuildReconcileSlitSuccessResponseAsync(
                 batchNo,
+                slitNo,
                 request.NewNdtPipes,
                 filesUpdated,
                 sqlRowsUpdated,
-                bundleTotal);
-
-            var message = filesUpdated > 0
-                ? "Slit reconciled. Per-slit output CSV updated."
-                : "Slit reconciled in SQL (no matching per-slit output CSV row was updated on disk).";
-            if (sqlRowsUpdated > 0)
-                message += $" {sqlRowsUpdated} Output_Slit_Row row(s) updated.";
-            if (syncedTotal > 0)
-                message += $" Bundle total synced to {syncedTotal} NDT pipe(s) from slit sum.";
-
-            return Ok(new
-            {
-                Message = message,
-                NdtBatchNo = batchNo,
-                SlitNo = ReconcileCsvParsing.NormalizeSlitKey(slitNo),
-                NewNdtPipes = request.NewNdtPipes,
-                FilesUpdated = filesUpdated,
-                SqlRowsUpdated = sqlRowsUpdated,
-                NewBundleTotalNdtPcs = bundleTotal,
-                BundleSummaryUpdated = syncedTotal > 0,
-                Slits = slits.Select(s => new { SlitNo = s.SlitNo, NdtPipes = s.NdtPipes }).ToList()
-            });
+                bundle.TotalNdtPcs,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning("Reconcile slit canceled for bundle {BatchNo} slit {SlitNo}.", batchNo, slitNo);
+            return StatusCode(499, new { Message = "Request canceled." });
         }
         catch (Exception ex)
         {
@@ -414,6 +451,19 @@ public sealed class ReconcileController : ControllerBase
             bundle.TotalNdtPcs);
         var pipeType = wip?.PipeType ?? "";
 
+        if (string.IsNullOrWhiteSpace(bundleWeight))
+        {
+            _logger.LogWarning(
+                "Reprint tag for bundle {BatchNo} PO {PO}: bundle weight is empty (weight/m={Weight}, length={Length}, pcs={Pcs}).",
+                batchNo,
+                bundle.PoNumber,
+                wip?.PipeWeightPerMeter ?? "(missing)",
+                pipeLength,
+                bundle.TotalNdtPcs);
+        }
+
+        var labelDate = bundle.PrintedAt ?? bundle.SlitFinishTime ?? bundle.SlitStartTime ?? DateTime.Now;
+
         var zplBytes = ZplNdtLabelBuilder.BuildNdtTagZpl(
             bundle.BundleNo,
             bundle.MillNo,
@@ -424,7 +474,7 @@ public sealed class ReconcileController : ControllerBase
             pipeLength,
             bundleWeight,
             pipeType,
-            DateTime.Now,
+            labelDate,
             bundle.TotalNdtPcs,
             isReprint: true);
 

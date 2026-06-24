@@ -323,7 +323,7 @@ export default function ReconcilePage() {
     setSuccess(null);
     try {
       const res = await api.reconcileSlit(selectedBatchNo.trim(), slitForApi, newSlitNdtPipes);
-      setSuccess(res.message ?? "Slit reconciled. CSV updated.");
+      setSuccess(res.message ?? res.warning ?? "Slit reconciled. CSV updated.");
       setSlits(Array.isArray(res?.slits) ? res.slits : slits);
       await refresh();
       // reload slit list to ensure UI matches backend recomputation

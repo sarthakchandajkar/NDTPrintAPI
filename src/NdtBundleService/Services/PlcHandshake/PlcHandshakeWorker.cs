@@ -67,12 +67,22 @@ public sealed class PlcHandshakeWorker : BackgroundService
             return;
         }
 
-        _logger.LogInformation(
-            "PlcHandshakeWorker starting {Count} mill handshake loop(s) (default poll {Poll}ms).",
-            mills.Count,
-            handshake.PollIntervalMs);
+        if (handshake.TelemetryOnly)
+        {
+            _logger.LogInformation(
+                "PlcHandshakeWorker starting {Count} mill telemetry loop(s) (default poll {Poll}ms) — OK/NOK/NDT counts, line running, and hooter when configured; no PO-change handshake.",
+                mills.Count,
+                handshake.PollIntervalMs);
+        }
+        else
+        {
+            _logger.LogInformation(
+                "PlcHandshakeWorker starting {Count} mill handshake loop(s) (default poll {Poll}ms).",
+                mills.Count,
+                handshake.PollIntervalMs);
+        }
 
-        if (_options.Value.FileBasedPoEnd?.Enabled == true)
+        if (_options.Value.FileBasedPoEnd?.Enabled == true && !handshake.TelemetryOnly)
         {
             _logger.LogInformation(
                 "FileBasedPoEnd is enabled — PLC PO-change triggers are ignored; PO end uses TM Bundle WIP filenames.");

@@ -425,6 +425,7 @@ export const api = {
   reconcileSlit: (ndtBatchNo: string, slitNo: string, newNdtPipes: number) =>
     fetchApi<{
       message?: string;
+      warning?: string;
       ndtBatchNo?: string;
       slitNo?: string;
       newNdtPipes?: number;

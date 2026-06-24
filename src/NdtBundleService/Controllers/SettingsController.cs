@@ -302,6 +302,16 @@ public sealed class SettingsController : ControllerBase
             });
         }
 
+        if (handshakeCfg.TelemetryOnly)
+        {
+            return BadRequest(new
+            {
+                Message =
+                    "PO-change handshake is disabled (PlcHandshake.TelemetryOnly). " +
+                    "Use POST /api/Test/po-end for workflow-only simulation."
+            });
+        }
+
         if (request?.MillNo is < 1 or > 4)
             return BadRequest(new { Message = "millNo must be 1–4." });
 

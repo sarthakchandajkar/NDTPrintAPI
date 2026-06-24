@@ -6,9 +6,10 @@ namespace NdtBundleService.Services;
 /// Builds ZPL for the full NDT bundle tag (Honeywell PD45S).
 /// Layout matches the physical NDT tag:
 /// - Top: Code 128 barcode with NDT Batch Number (human-readable line printed by the barcode command)
-/// - Middle content (3 lines):
+/// - Middle content (4–5 lines):
 ///   Mill, PO Number, NDT Batch Number on one line
-///   Grade, Pipe Size, Pipe Thickness, Pipe Length, bundle total weight (kg) on one line
+///   Grade, Pipe Size, Pipe Thickness on one line
+///   Pipe Length and bundle total weight (kg) on one line
 ///   Date, Number of NDT pipes, Pipe type/WIP/FG and optional "Reprint" on one line
 /// - Bottom: two stacked Code 128 barcodes with the same NDT Batch Number.
 /// </summary>
@@ -50,25 +51,28 @@ public static class ZplNdtLabelBuilder
         var escapedStation = Escape(stationText);
 
         var y = 40;
-        var lineHeight = 34;
+        var lineHeight = 32;
+        var detailFont = "^CF0,28";
 
         // Top: Code 128 (^BC). ^BY = module width; ^BCN,h,f,g,e = normal orientation, bar height, interpretation line below/above, UCC mode.
         zpl.AppendFormat("^FO80,{0}^BY3^BCN,100,Y,N,N^FD{1}^FS", y, escapedBatch);
         y += 130;
 
         // Middle content – line 1: Mill, PO, Bund (NDT Batch No), centered
+        zpl.Append(detailFont);
         zpl.AppendFormat("^FO80,{0}^FB640,1,0,C,0^FDMill- {1}  PO: {2}  Bund: {3}^FS", y, millNo, escapedPo, escapedBatch);
         y += lineHeight;
 
-        // Middle content – line 2: Grade, Pipe Size, Pipe Thickness, Pipe Length, Weight
+        // Product details on two lines so weight is not clipped/overlapped on long pipe sizes.
         var gradePart = string.IsNullOrEmpty(escapedGrade) ? "Gr- -" : $"Gr- {escapedGrade}";
-        zpl.AppendFormat("^FO80,{0}^FB640,1,0,C,0^FD{1}  Size: {2}  Thk: {3}  Len: {4}  Wt: {5}^FS",
-            y,
-            gradePart,
-            string.IsNullOrEmpty(escapedSize) ? "-" : escapedSize,
-            string.IsNullOrEmpty(escapedThickness) ? "-" : escapedThickness,
-            string.IsNullOrEmpty(escapedLength) ? "-" : escapedLength,
-            string.IsNullOrEmpty(escapedWeight) ? "-" : escapedWeight);
+        var sizePart = string.IsNullOrEmpty(escapedSize) ? "-" : escapedSize;
+        var thkPart = string.IsNullOrEmpty(escapedThickness) ? "-" : escapedThickness;
+        var lenPart = string.IsNullOrEmpty(escapedLength) ? "-" : escapedLength;
+        var wtPart = string.IsNullOrEmpty(escapedWeight) ? "-" : escapedWeight;
+
+        zpl.AppendFormat("^FO80,{0}^FB640,1,0,C,0^FD{1}  Size: {2}  Thk: {3}^FS", y, gradePart, sizePart, thkPart);
+        y += lineHeight;
+        zpl.AppendFormat("^FO80,{0}^FB640,1,0,C,0^FDLen: {1}  Wt: {2}^FS", y, lenPart, wtPart);
         y += lineHeight;
 
         // Optional station line (Visual / Hydrotesting / Revisual; for hydro includes Four Head vs Big).
@@ -78,7 +82,8 @@ public static class ZplNdtLabelBuilder
             y += lineHeight;
         }
 
-        // Middle content – line 3: Date, pieces, type/WIP/FG and optional Reprint
+        // Date, pieces, type/WIP/FG and optional Reprint
+        zpl.Append("^CF0,32");
         var dateText = date.ToString("dd/MM/yy");
         var typeText = string.IsNullOrEmpty(escapedType) ? "" : $"  {escapedType}";
         var reprintText = isReprint ? "  Reprint" : "";

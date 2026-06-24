@@ -6,17 +6,22 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddScoped<INdtReportPrinter, StubNdtReportPrinter>();
 builder.Services.AddScoped<INdtPrintService, NdtPrintService>();
 builder.Services.AddControllers();
-// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
+var showSwagger = app.Environment.IsDevelopment()
+    || app.Configuration.GetValue<bool>("ShowSwagger");
+
+if (showSwagger)
 {
     app.UseSwagger();
-    app.UseSwaggerUI();
+    app.UseSwaggerUI(options =>
+    {
+        options.SwaggerEndpoint("/swagger/v1/swagger.json", "NDT Print API v1");
+        options.RoutePrefix = "swagger";
+    });
 }
 
 app.UseHttpsRedirection();
