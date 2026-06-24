@@ -308,10 +308,11 @@ export default function ReconcilePage() {
       setError("Select a bundle.");
       return;
     }
-    if (!selectedSlitNo.trim()) {
-      setError("Select a slit.");
+    if (slits.length === 0) {
+      setError("No slit rows loaded for this bundle.");
       return;
     }
+    const slitForApi = slitValueForApi({ slitNo: selectedSlitNo });
     if (newSlitNdtPipes < 0) {
       setError("NDT pipes must be non-negative.");
       return;
@@ -321,7 +322,7 @@ export default function ReconcilePage() {
     setError(null);
     setSuccess(null);
     try {
-      const res = await api.reconcileSlit(selectedBatchNo.trim(), selectedSlitNo.trim(), newSlitNdtPipes);
+      const res = await api.reconcileSlit(selectedBatchNo.trim(), slitForApi, newSlitNdtPipes);
       setSuccess(res.message ?? "Slit reconciled. CSV updated.");
       setSlits(Array.isArray(res?.slits) ? res.slits : slits);
       await refresh();

@@ -455,10 +455,7 @@ ORDER BY PrintedAt DESC";
         var bySlit = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
         // Use only per-slit output files (same name as input slit CSV). Exclude bundle summary files.
-        var files = Directory.EnumerateFiles(folder, "*.csv")
-            .Where(p => !Path.GetFileName(p).StartsWith("NDT_Bundle_", StringComparison.OrdinalIgnoreCase))
-            .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        var files = TryListPerSlitOutputCsvFiles();
 
         foreach (var path in files)
         {
@@ -528,7 +525,7 @@ ORDER BY SlitNo";
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
             var slit = reader.IsDBNull(0) ? "—" : reader.GetString(0);
-            var pipes = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
+            var pipes = ReadSqlInt32(reader, 1);
             list.Add((slit, pipes));
         }
 
@@ -538,20 +535,15 @@ ORDER BY SlitNo";
 
     public async Task<int> UpdateOutputCsvFilesForSlitAsync(string batchNo, string slitNo, int newPipes, CancellationToken cancellationToken)
     {
-        var folder = Opt.OutputBundleFolder;
-        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
-            return 0;
-        if (string.IsNullOrWhiteSpace(batchNo) || string.IsNullOrWhiteSpace(slitNo))
+        if (string.IsNullOrWhiteSpace(batchNo))
             return 0;
 
         var batchNoTrimmed = batchNo.Trim();
-        var slitNoTrimmed = slitNo.Trim();
+        var slitNoNormalized = ReconcileCsvParsing.NormalizeSlitKey(slitNo);
 
-        // Update per-slit output files only; do not touch NDT_Bundle_*.csv here.
-        var files = Directory.EnumerateFiles(folder, "*.csv")
-            .Where(p => !Path.GetFileName(p).StartsWith("NDT_Bundle_", StringComparison.OrdinalIgnoreCase))
-            .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        var files = TryListPerSlitOutputCsvFiles();
+        if (files.Count == 0)
+            return 0;
 
         var filesUpdated = 0;
         foreach (var path in files)
@@ -580,12 +572,12 @@ ORDER BY SlitNo";
                     }
 
                     if (!columns.TryGetField(cols, columns.SlitNo, out var slitCell)
-                        || !ReconcileCsvParsing.SlitKeysMatch(slitCell, slitNoTrimmed))
+                        || !ReconcileCsvParsing.SlitKeysMatch(slitCell, slitNoNormalized))
                     {
                         continue;
                     }
 
-                    lines[i] = InputSlitCsvParsing.ReplaceFieldAtIndex(
+                    lines[i] = ReconcileCsvParsing.ReplaceFieldAtIndex(
                         lines[i],
                         columns.NdtPipes,
                         newPipes.ToString(CultureInfo.InvariantCulture));
@@ -605,6 +597,34 @@ ORDER BY SlitNo";
         }
 
         return filesUpdated;
+    }
+
+    private List<string> TryListPerSlitOutputCsvFiles()
+    {
+        var folder = Opt.OutputBundleFolder;
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+            return new List<string>();
+
+        try
+        {
+            return Directory.EnumerateFiles(folder, "*.csv")
+                .Where(p => !Path.GetFileName(p).StartsWith("NDT_Bundle_", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to list per-slit output CSV files in {Folder}.", folder);
+            return new List<string>();
+        }
+    }
+
+    private static int ReadSqlInt32(Microsoft.Data.SqlClient.SqlDataReader reader, int ordinal)
+    {
+        if (reader.IsDBNull(ordinal))
+            return 0;
+
+        return Convert.ToInt32(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
     }
 
     public async Task<(int RowsRemoved, IReadOnlyList<RemovedSlitRowTraceRef> TraceRefs)> DeletePerSlitOutputRowsForBatchSlitsAsync(

@@ -26,7 +26,18 @@ export async function fetchApi<T>(path: string, options?: RequestInit): Promise<
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`API ${res.status}: ${text}`);
+    try {
+      const json = JSON.parse(text) as { message?: string; Message?: string; error?: string; Error?: string; detail?: string; Detail?: string };
+      const msg = json.message ?? json.Message ?? `API ${res.status}`;
+      const err = json.error ?? json.Error;
+      const detail = json.detail ?? json.Detail;
+      const parts = [msg, err, detail].filter(Boolean);
+      throw new Error(parts.join(" — "));
+    } catch (e) {
+      if (e instanceof Error && e.message !== text && !e.message.startsWith("API "))
+        throw e;
+      throw new Error(`API ${res.status}: ${text}`);
+    }
   }
   return res.json() as Promise<T>;
 }

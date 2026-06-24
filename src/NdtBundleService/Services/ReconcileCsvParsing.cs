@@ -52,6 +52,19 @@ public static class ReconcileCsvParsing
     public static bool SlitKeysMatch(string? cell, string? targetSlit) =>
         string.Equals(NormalizeSlitKey(cell), NormalizeSlitKey(targetSlit), StringComparison.OrdinalIgnoreCase);
 
+    public static string ReplaceFieldAtIndex(string line, int fieldIndex, string newCellValue)
+    {
+        if (string.IsNullOrEmpty(line) || fieldIndex < 0)
+            return line;
+
+        var fields = SplitCsvLine(line);
+        if (fieldIndex >= fields.Count)
+            return line;
+
+        fields[fieldIndex] = newCellValue ?? string.Empty;
+        return JoinCsvLine(fields);
+    }
+
     public static List<string> SplitCsvLine(string line)
     {
         var result = new List<string>();
@@ -78,5 +91,25 @@ public static class ReconcileCsvParsing
 
         result.Add(current.ToString().Trim());
         return result;
+    }
+
+    private static string JoinCsvLine(IReadOnlyList<string> fields)
+    {
+        if (fields.Count == 0)
+            return string.Empty;
+
+        var parts = new string[fields.Count];
+        for (var i = 0; i < fields.Count; i++)
+            parts[i] = EscapeCsvField(fields[i] ?? string.Empty);
+        return string.Join(",", parts);
+    }
+
+    private static string EscapeCsvField(string s)
+    {
+        if (s.Length == 0)
+            return s;
+        if (s.IndexOfAny(new[] { ',', '"', '\r', '\n' }) < 0)
+            return s;
+        return "\"" + s.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
     }
 }

@@ -238,13 +238,11 @@ public sealed class ReconcileController : ControllerBase
 
         if (string.IsNullOrWhiteSpace(request.NdtBatchNo))
             return BadRequest(new { Message = "NdtBatchNo is required." });
-        if (string.IsNullOrWhiteSpace(request.SlitNo))
-            return BadRequest(new { Message = "SlitNo is required." });
         if (request.NewNdtPipes < 0)
             return BadRequest(new { Message = "NewNdtPipes must be non-negative." });
 
         var batchNo = request.NdtBatchNo.Trim();
-        var slitNo = request.SlitNo.Trim();
+        var slitNo = ReconcileCsvParsing.NormalizeSlitKey(request.SlitNo);
 
         try
         {
@@ -269,7 +267,19 @@ public sealed class ReconcileController : ControllerBase
                 });
             }
 
-            var slits = await _bundleRepository.GetSlitsForBatchAsync(batchNo, cancellationToken).ConfigureAwait(false);
+            IReadOnlyList<(string SlitNo, int NdtPipes)> slits = Array.Empty<(string, int)>();
+            try
+            {
+                slits = await _bundleRepository.GetSlitsForBatchAsync(batchNo, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception reloadEx)
+            {
+                _logger.LogWarning(
+                    reloadEx,
+                    "Slit reconcile succeeded for bundle {BatchNo} slit {SlitNo} but reloading slit list failed.",
+                    batchNo,
+                    slitNo);
+            }
 
             _logger.LogInformation(
                 "Reconciled slit {SlitNo} for bundle {BatchNo}: NewNdtPipes={NewPipes}, FilesUpdated={FilesUpdated}, SqlRowsUpdated={SqlRowsUpdated}, BundleTotalNdtPcs={BundleTotal}.",
@@ -303,7 +313,12 @@ public sealed class ReconcileController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Reconcile slit failed for bundle {BatchNo} slit {SlitNo}.", batchNo, slitNo);
-            return StatusCode(500, new { Message = "Slit reconcile failed.", Error = ex.Message });
+            return StatusCode(500, new
+            {
+                Message = "Slit reconcile failed.",
+                Error = ex.Message,
+                Detail = ex.GetType().Name
+            });
         }
     }
 
