@@ -5,14 +5,21 @@ public class NdtBundleOptions
     /// <summary>Folder where Input Slit CSV files are dropped.</summary>
     public string InputSlitFolder { get; set; } = string.Empty;
 
-    /// <summary>
-    /// Optional folder where Input Slit CSV files are moved after acceptance (e.g. SAP). When set, <c>ndt-summary</c> and
-    /// current-PO-per-mill on the dashboard sum/read from both this folder and <see cref="InputSlitFolder"/>; files are never modified.
-    /// </summary>
-    public string InputSlitAcceptedFolder { get; set; } = string.Empty;
+  /// <summary>
+  /// Optional folder where Input Slit CSV files are moved after acceptance (e.g. SAP). When set, <c>ndt-summary</c> and
+  /// current-PO-per-mill on the dashboard sum/read from both this folder and <see cref="InputSlitFolder"/>; files are never modified.
+  /// </summary>
+  public string InputSlitAcceptedFolder { get; set; } = string.Empty;
 
-    /// <summary>
-    /// Folder for NDT Input Slit output CSVs: same columns as input plus <c>NDT Batch No</c> (written by <c>SlitMonitoringWorker</c>).
+  /// <summary>
+  /// When true (default), running PO per mill on the Summary dashboard is resolved from the latest rows in
+  /// <see cref="InputSlitFolder"/> / <see cref="InputSlitAcceptedFolder"/> before SQL <c>Input_Slit_Row</c>.
+  /// This matches the floor truth in the Input Slit inbox (e.g. <c>Z:\To SAP\TM\Input Slit</c>).
+  /// </summary>
+  public bool PreferInputSlitFilesForRunningPo { get; set; } = true;
+
+  /// <summary>
+  /// Folder for NDT Input Slit output CSVs: same columns as input plus <c>NDT Batch No</c> (written by <c>SlitMonitoringWorker</c>).
     /// Production example: <c>Z:\To SAP\TM\NDT\NDT Input Slit\Input Slit</c>. When empty, those files are not written.
     /// </summary>
     public string OutputBundleFolder { get; set; } = string.Empty;

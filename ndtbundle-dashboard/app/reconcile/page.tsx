@@ -665,8 +665,18 @@ export default function ReconcilePage() {
                   </div>
                   <div>
                     <div className="text-gray-500">Total NDT Pipes</div>
-                    <div className="font-semibold text-gray-900">{computedTotal}</div>
-                    <div className="text-xs text-gray-500">Computed from slit rows</div>
+                    <div className="font-semibold text-gray-900">
+                      {selectedBundle.totalNdtPcs != null && selectedBundle.totalNdtPcs > 0
+                        ? selectedBundle.totalNdtPcs
+                        : computedTotal}
+                    </div>
+                    <div className="text-xs text-gray-500">
+                      {selectedBundle.totalNdtPcs != null &&
+                      selectedBundle.totalNdtPcs > 0 &&
+                      selectedBundle.totalNdtPcs !== computedTotal
+                        ? `Slit sum: ${computedTotal} (use Reconcile total to align)`
+                        : "From bundle record / slit sum"}
+                    </div>
                   </div>
                 </div>
 

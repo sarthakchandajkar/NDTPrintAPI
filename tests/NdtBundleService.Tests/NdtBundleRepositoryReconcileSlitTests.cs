@@ -66,11 +66,37 @@ public sealed class NdtBundleRepositoryReconcileSlitTests : IDisposable
         Assert.Equal("PO,100", cols[0]);
     }
 
-    private static NdtBundleRepository CreateRepository(string outputFolder)
+    [Fact]
+    public async Task TrySyncBundleTotalFromSlitsAsync_UpdatesSummaryCsvWhenStoredTotalIsZero()
+    {
+        var batchNo = "1226300099";
+        var summaryFolder = Path.Combine(_tempDir, "summary");
+        Directory.CreateDirectory(summaryFolder);
+        var summaryPath = Path.Combine(summaryFolder, $"NDT_Bundle_{batchNo}.csv");
+        await File.WriteAllTextAsync(summaryPath,
+            "PO Number,Slit No,NDT Pipes,Rejected P,Slit Start Time,Slit Finish Time,Mill No,NDT Short Length Pipe,Rejected Short Length Pipe,NDT Batch No\n" +
+            $"1000055673,01,0,0,2026-06-17T10:00:00,2026-06-17T11:00:00,3,,,{batchNo}\n");
+
+        var slitPath = Path.Combine(_tempDir, "slit_output.csv");
+        await File.WriteAllTextAsync(slitPath,
+            "PO Number,Slit No,NDT Pipes,Rejected P,Slit Start Time,Slit Finish Time,Mill No,NDT Short Length Pipe,Rejected Short Length Pipe,NDT Batch No\n" +
+            $"1000055673,01,15,0,2026-06-17T10:00:00,2026-06-17T11:00:00,3,,,{batchNo}\n");
+
+        var repo = CreateRepository(_tempDir, summaryFolder);
+        var synced = await repo.TrySyncBundleTotalFromSlitsAsync(batchNo, forceFromSlits: false, CancellationToken.None);
+
+        Assert.Equal(15, synced);
+        var line = (await File.ReadAllLinesAsync(summaryPath))[1];
+        var cols = ReconcileCsvParsing.SplitCsvLine(line);
+        Assert.Equal("15", cols[2]);
+    }
+
+    private static NdtBundleRepository CreateRepository(string outputFolder, string? summaryFolder = null)
     {
         var options = Options.Create(new NdtBundleOptions
         {
             OutputBundleFolder = outputFolder,
+            BundleSummaryOutputFolder = summaryFolder ?? outputFolder,
             UseSqlServerForBundles = false
         });
         var monitor = new TestOptionsMonitor<NdtBundleOptions>(options.Value);

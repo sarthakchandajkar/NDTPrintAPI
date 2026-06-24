@@ -179,22 +179,31 @@ WITH Ranked AS (
         Rejected_Short_Length_Pipe,
         ROW_NUMBER() OVER (PARTITION BY Bundle_No ORDER BY PrintedAt DESC) AS rn
     FROM dbo.NDT_Bundle
+),
+SlitSum AS (
+    SELECT NDT_Batch_No, SUM(NDT_Pipes) AS SlitTotal
+    FROM dbo.Output_Slit_Row
+    GROUP BY NDT_Batch_No
 )
 SELECT
-    Bundle_No AS BundleNo,
-    PO_Number AS PoNumber,
-    Mill_No AS MillNo,
-    Total_NDT_Pcs AS TotalNdtPcs,
-    Context_Slit_No AS SlitNo,
-    Slit_Start_Time AS SlitStartTime,
-    Slit_Finish_Time AS SlitFinishTime,
-    PrintedAt,
-    Rejected_P AS RejectedPipes,
-    NDT_Short_Length_Pipe AS NdtShortLengthPipe,
-    Rejected_Short_Length_Pipe AS RejectedShortLengthPipe
-FROM Ranked
-WHERE rn = 1
-ORDER BY PrintedAt DESC";
+    r.Bundle_No AS BundleNo,
+    r.PO_Number AS PoNumber,
+    r.Mill_No AS MillNo,
+    CASE
+        WHEN r.Total_NDT_Pcs > 0 THEN r.Total_NDT_Pcs
+        ELSE COALESCE(s.SlitTotal, r.Total_NDT_Pcs)
+    END AS TotalNdtPcs,
+    r.Context_Slit_No AS SlitNo,
+    r.Slit_Start_Time AS SlitStartTime,
+    r.Slit_Finish_Time AS SlitFinishTime,
+    r.PrintedAt,
+    r.Rejected_P AS RejectedPipes,
+    r.NDT_Short_Length_Pipe AS NdtShortLengthPipe,
+    r.Rejected_Short_Length_Pipe AS RejectedShortLengthPipe
+FROM Ranked r
+LEFT JOIN SlitSum s ON s.NDT_Batch_No = r.Bundle_No
+WHERE r.rn = 1
+ORDER BY r.PrintedAt DESC";
         await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
         var list = new List<NdtBundleRecord>();
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
@@ -241,7 +250,30 @@ ORDER BY PrintedAt DESC";
     private async Task<NdtBundleRecord> ApplyFormedBundleTotalAsync(NdtBundleRecord record, string batchNo, CancellationToken cancellationToken)
     {
         var formedTotal = await TryReadBundleSummaryTotalAsync(batchNo, cancellationToken).ConfigureAwait(false);
-        if (formedTotal is not > 0 || formedTotal.Value <= record.TotalNdtPcs)
+        if (formedTotal is > 0 && formedTotal.Value > record.TotalNdtPcs)
+        {
+            return new NdtBundleRecord
+            {
+                BundleNo = record.BundleNo,
+                PoNumber = record.PoNumber,
+                MillNo = record.MillNo,
+                TotalNdtPcs = formedTotal.Value,
+                SlitNo = record.SlitNo,
+                SlitStartTime = record.SlitStartTime,
+                SlitFinishTime = record.SlitFinishTime,
+                PrintedAt = record.PrintedAt,
+                RejectedPipes = record.RejectedPipes,
+                NdtShortLengthPipe = record.NdtShortLengthPipe,
+                RejectedShortLengthPipe = record.RejectedShortLengthPipe
+            };
+        }
+
+        if (record.TotalNdtPcs > 0)
+            return record;
+
+        var slits = await GetSlitsForBatchAsync(batchNo, cancellationToken).ConfigureAwait(false);
+        var slitSum = slits.Sum(s => s.NdtPipes);
+        if (slitSum <= 0)
             return record;
 
         return new NdtBundleRecord
@@ -249,10 +281,11 @@ ORDER BY PrintedAt DESC";
             BundleNo = record.BundleNo,
             PoNumber = record.PoNumber,
             MillNo = record.MillNo,
-            TotalNdtPcs = formedTotal.Value,
+            TotalNdtPcs = slitSum,
             SlitNo = record.SlitNo,
             SlitStartTime = record.SlitStartTime,
             SlitFinishTime = record.SlitFinishTime,
+            PrintedAt = record.PrintedAt,
             RejectedPipes = record.RejectedPipes,
             NdtShortLengthPipe = record.NdtShortLengthPipe,
             RejectedShortLengthPipe = record.RejectedShortLengthPipe
@@ -760,6 +793,70 @@ ORDER BY SlitNo";
             _logger.LogError(ex, "Failed to update bundle total in DB for {BatchNo}.", batchNo);
             throw;
         }
+    }
+
+    public async Task<int> TrySyncBundleTotalFromSlitsAsync(string batchNo, bool forceFromSlits, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(batchNo))
+            return 0;
+
+        var batchNoTrimmed = batchNo.Trim();
+        var slits = await GetSlitsForBatchAsync(batchNoTrimmed, cancellationToken).ConfigureAwait(false);
+        var slitSum = slits.Sum(s => s.NdtPipes);
+        if (slitSum <= 0)
+            return 0;
+
+        var storedTotal = await TryGetStoredBundleTotalAsync(batchNoTrimmed, cancellationToken).ConfigureAwait(false);
+        if (!forceFromSlits && storedTotal > 0)
+            return storedTotal;
+
+        if (storedTotal == slitSum)
+            return slitSum;
+
+        if (UseDatabase)
+            await UpdateBundleTotalInDatabaseAsync(batchNoTrimmed, slitSum, cancellationToken).ConfigureAwait(false);
+
+        await UpdateBundleSummaryCsvAsync(batchNoTrimmed, slitSum, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation(
+            "Synced bundle total for {BatchNo} from slit sum: {OldTotal} → {NewTotal} (force={Force}).",
+            batchNoTrimmed,
+            storedTotal,
+            slitSum,
+            forceFromSlits);
+
+        return slitSum;
+    }
+
+    private async Task<int> TryGetStoredBundleTotalAsync(string batchNo, CancellationToken cancellationToken)
+    {
+        if (UseDatabase)
+        {
+            try
+            {
+                await using var conn = SqlTraceabilityConnection.Create(Opt);
+                await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+                const string sql = @"
+SELECT TOP 1 Total_NDT_Pcs
+FROM dbo.NDT_Bundle
+WHERE Bundle_No = @BatchNo
+ORDER BY PrintedAt DESC";
+                await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+                cmd.Parameters.AddWithValue("@BatchNo", batchNo);
+                var scalar = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+                if (scalar is int i)
+                    return i;
+                if (scalar is not null && scalar != DBNull.Value && int.TryParse(scalar.ToString(), out var parsed))
+                    return parsed;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Could not read stored bundle total for {BatchNo}.", batchNo);
+            }
+        }
+
+        var summaryTotal = await TryReadBundleSummaryTotalAsync(batchNo, cancellationToken).ConfigureAwait(false);
+        return summaryTotal ?? 0;
     }
 
     public async Task<bool> UpdateBundleSummaryCsvAsync(string batchNo, int newTotalPipes, CancellationToken cancellationToken)

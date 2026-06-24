@@ -416,8 +416,9 @@ namespace NdtBundleService.Controllers;
 
     /// <summary>
     /// Returns WIP plan rows grouped for mills 1–4.
-    /// <b>Current PO per mill</b> comes first from the latest slit CSV rows in <see cref="NdtBundleOptions.InputSlitFolder"/> and, when set, <see cref="NdtBundleOptions.InputSlitAcceptedFolder"/> (read-only; real-time).
-    /// When a mill has no slit row yet, the PO is taken from the latest <c>WIP_MM_…</c> filename in <see cref="MillSlitLiveOptions.WipBundleFolder"/> / <see cref="MillSlitLiveOptions.WipBundleAcceptedFolder"/> (same as <see cref="IWipBundleRunningPoProvider"/>).
+    /// <b>Current PO per mill</b> comes from the latest slit rows in <see cref="NdtBundleOptions.InputSlitFolder"/> and, when set,
+    /// <see cref="NdtBundleOptions.InputSlitAcceptedFolder"/> (e.g. <c>Z:\To SAP\TM\Input Slit</c>) when <see cref="NdtBundleOptions.PreferInputSlitFilesForRunningPo"/> is true (default).
+    /// SQL <c>Input_Slit_Row</c> fills mills missing from the inbox scan. WIP bundle filenames are used only when a mill has no slit PO yet.
     /// Pipe size, planned month, and SAP pieces/bundle are enriched from merged WIP files in <see cref="NdtBundleOptions.PoPlanFolder"/> when the PO matches.
     /// When <see cref="NdtBundleOptions.PoPlanFolder"/> is set, WIP CSVs are merged (newer files override per mill) for enrichment only.
     /// </summary>

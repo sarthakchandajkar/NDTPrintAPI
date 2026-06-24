@@ -38,54 +38,47 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
     /// <inheritdoc />
     public async Task<IReadOnlyDictionary<int, string>> GetLatestPoByMillAsync(CancellationToken cancellationToken)
     {
-        if (UseDatabaseForSummary)
+        var result = await BuildSlitPoMapAsync(cancellationToken).ConfigureAwait(false);
+        return await MergeRunningPoFromWipAsync(result, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Resolves PO per mill from Input Slit sources only (files and/or SQL). WIP bundle filenames are not used here.
+    /// </summary>
+    private async Task<Dictionary<int, string>> BuildSlitPoMapAsync(CancellationToken cancellationToken)
+    {
+        if (_options.PreferInputSlitFilesForRunningPo)
+        {
+            var fromFiles = await GetLatestPoPerMillFromLatestFilesAsync(cancellationToken).ConfigureAwait(false);
+            if (fromFiles.Count > 0)
+            {
+                if (!UseDatabaseForSummary || fromFiles.Count == 4)
+                    return fromFiles;
+
+                var merged = new Dictionary<int, string>(fromFiles);
+                var fromDb = await GetLatestPoPerMillFromDatabaseAsync(cancellationToken).ConfigureAwait(false);
+                foreach (var kv in fromDb)
+                {
+                    if (!merged.ContainsKey(kv.Key))
+                        merged[kv.Key] = kv.Value;
+                }
+
+                if (merged.Count > 0)
+                    return merged;
+            }
+        }
+        else if (UseDatabaseForSummary)
         {
             var fromDb = await GetLatestPoPerMillFromDatabaseAsync(cancellationToken).ConfigureAwait(false);
             if (fromDb.Count > 0)
-                return await MergeRunningPoFromWipAsync(fromDb, cancellationToken).ConfigureAwait(false);
+                return fromDb;
         }
 
         var fromLatestFiles = await GetLatestPoPerMillFromLatestFilesAsync(cancellationToken).ConfigureAwait(false);
         if (fromLatestFiles.Count > 0)
-            return await MergeRunningPoFromWipAsync(fromLatestFiles, cancellationToken).ConfigureAwait(false);
+            return fromLatestFiles;
 
-        var result = new Dictionary<int, string>();
-        var files = GetEligibleInputSlitCsvFilesOrdered();
-        foreach (var fullPath in files)
-        {
-            await using var stream = File.OpenRead(fullPath);
-            using var reader = new StreamReader(stream);
-
-            var headerLine = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
-            if (headerLine is null)
-                continue;
-
-            headerLine = InputSlitCsvParsing.StripBom(headerLine);
-            var headers = InputSlitCsvParsing.SplitCsvFields(headerLine);
-            var poIndex = InputSlitCsvParsing.HeaderIndex(headers, "PO Number", "PO_No", "PO No");
-            var millIndex = InputSlitCsvParsing.HeaderIndex(headers, "Mill No", "Mill Number");
-            if (poIndex < 0 || millIndex < 0)
-                continue;
-
-            while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
-            {
-                if (string.IsNullOrWhiteSpace(line))
-                    continue;
-                var cols = InputSlitCsvParsing.SplitCsvFields(line);
-                if (cols.Length == 0)
-                    continue;
-                string Get(int i) => i >= 0 && i < cols.Length ? cols[i].Trim() : string.Empty;
-                var millRaw = Get(millIndex);
-                if (!InputSlitCsvParsing.TryParseMillNo(millRaw, out var millNo))
-                    continue;
-                var po = Get(poIndex);
-                if (string.IsNullOrWhiteSpace(po))
-                    continue;
-                result[millNo] = InputSlitCsvParsing.NormalizePo(po);
-            }
-        }
-
-        return await MergeRunningPoFromWipAsync(result, cancellationToken).ConfigureAwait(false);
+        return await GetLatestPoPerMillFromAllFilesForwardScanAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<IReadOnlyDictionary<int, string>> MergeRunningPoFromWipAsync(
@@ -95,6 +88,9 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
         for (var millNo = 1; millNo <= 4; millNo++)
         {
             if (_wipRunningPo.IsWaitingForNewWipAfterPoEnd(millNo))
+                continue;
+
+            if (result.TryGetValue(millNo, out var slitPo) && !string.IsNullOrWhiteSpace(slitPo))
                 continue;
 
             var wipPo = await _wipRunningPo.TryGetRunningPoForMillAsync(millNo, CancellationToken.None).ConfigureAwait(false);
@@ -179,6 +175,47 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
                 if (string.IsNullOrWhiteSpace(po))
                     continue;
 
+                result[millNo] = InputSlitCsvParsing.NormalizePo(po);
+            }
+        }
+
+        return result;
+    }
+
+    private async Task<Dictionary<int, string>> GetLatestPoPerMillFromAllFilesForwardScanAsync(CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<int, string>();
+        var files = GetEligibleInputSlitCsvFilesOrdered();
+        foreach (var fullPath in files)
+        {
+            await using var stream = File.OpenRead(fullPath);
+            using var reader = new StreamReader(stream);
+
+            var headerLine = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            if (headerLine is null)
+                continue;
+
+            headerLine = InputSlitCsvParsing.StripBom(headerLine);
+            var headers = InputSlitCsvParsing.SplitCsvFields(headerLine);
+            var poIndex = InputSlitCsvParsing.HeaderIndex(headers, "PO Number", "PO_No", "PO No");
+            var millIndex = InputSlitCsvParsing.HeaderIndex(headers, "Mill No", "Mill Number");
+            if (poIndex < 0 || millIndex < 0)
+                continue;
+
+            while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                    continue;
+                var cols = InputSlitCsvParsing.SplitCsvFields(line);
+                if (cols.Length == 0)
+                    continue;
+                string Get(int i) => i >= 0 && i < cols.Length ? cols[i].Trim() : string.Empty;
+                var millRaw = Get(millIndex);
+                if (!InputSlitCsvParsing.TryParseMillNo(millRaw, out var millNo))
+                    continue;
+                var po = Get(poIndex);
+                if (string.IsNullOrWhiteSpace(po))
+                    continue;
                 result[millNo] = InputSlitCsvParsing.NormalizePo(po);
             }
         }

@@ -27,6 +27,13 @@ public interface INdtBundleRepository
     Task<bool> UpdateBundleSummaryCsvAsync(string batchNo, int newTotalPipes, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Aligns <c>NDT_Bundle.Total_NDT_Pcs</c> (and bundle summary CSV when present) with the sum of per-slit output rows.
+    /// When <paramref name="forceFromSlits"/> is false, only updates rows whose stored total is zero.
+    /// Returns the effective total after sync (or the unchanged stored total).
+    /// </summary>
+    Task<int> TrySyncBundleTotalFromSlitsAsync(string batchNo, bool forceFromSlits, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Removes data rows for the given NDT batch and slit numbers from per-slit output CSVs (excludes NDT_Bundle_*).
     /// Deletes a file when only the header row would remain. Returns rows removed and refs for SQL traceability cleanup.
     /// </summary>

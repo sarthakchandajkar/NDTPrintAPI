@@ -281,6 +281,12 @@ public sealed class ReconcileController : ControllerBase
                     slitNo);
             }
 
+            var syncedTotal = await _bundleRepository
+                .TrySyncBundleTotalFromSlitsAsync(batchNo, forceFromSlits: true, cancellationToken)
+                .ConfigureAwait(false);
+            bundle = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
+            var bundleTotal = bundle?.TotalNdtPcs ?? syncedTotal;
+
             _logger.LogInformation(
                 "Reconciled slit {SlitNo} for bundle {BatchNo}: NewNdtPipes={NewPipes}, FilesUpdated={FilesUpdated}, SqlRowsUpdated={SqlRowsUpdated}, BundleTotalNdtPcs={BundleTotal}.",
                 slitNo,
@@ -288,14 +294,15 @@ public sealed class ReconcileController : ControllerBase
                 request.NewNdtPipes,
                 filesUpdated,
                 sqlRowsUpdated,
-                bundle.TotalNdtPcs);
+                bundleTotal);
 
             var message = filesUpdated > 0
                 ? "Slit reconciled. Per-slit output CSV updated."
                 : "Slit reconciled in SQL (no matching per-slit output CSV row was updated on disk).";
             if (sqlRowsUpdated > 0)
                 message += $" {sqlRowsUpdated} Output_Slit_Row row(s) updated.";
-            message += " Bundle total (printed tag count) is unchanged; use POST /api/Reconcile/reconcile to change the bundle total.";
+            if (syncedTotal > 0)
+                message += $" Bundle total synced to {syncedTotal} NDT pipe(s) from slit sum.";
 
             return Ok(new
             {
@@ -305,8 +312,8 @@ public sealed class ReconcileController : ControllerBase
                 NewNdtPipes = request.NewNdtPipes,
                 FilesUpdated = filesUpdated,
                 SqlRowsUpdated = sqlRowsUpdated,
-                NewBundleTotalNdtPcs = bundle.TotalNdtPcs,
-                BundleSummaryUpdated = false,
+                NewBundleTotalNdtPcs = bundleTotal,
+                BundleSummaryUpdated = syncedTotal > 0,
                 Slits = slits.Select(s => new { SlitNo = s.SlitNo, NdtPipes = s.NdtPipes }).ToList()
             });
         }
@@ -348,18 +355,25 @@ public sealed class ReconcileController : ControllerBase
         await _traceability.DeleteOutputSlitRowsForRemovedOutputLinesAsync(batchNo, traceRefs, cancellationToken).ConfigureAwait(false);
 
         var slits = await _bundleRepository.GetSlitsForBatchAsync(batchNo, cancellationToken).ConfigureAwait(false);
+        var syncedTotal = await _bundleRepository
+            .TrySyncBundleTotalFromSlitsAsync(batchNo, forceFromSlits: true, cancellationToken)
+            .ConfigureAwait(false);
+        bundle = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
+        var bundleTotal = bundle?.TotalNdtPcs ?? syncedTotal;
 
         _logger.LogInformation(
             "Deleted {RowsRemoved} slit output row(s) for bundle {BatchNo}; trace refs {TraceCount}; bundle total {BundleTotal}.",
-            rowsRemoved, batchNo, traceRefs.Count, bundle.TotalNdtPcs);
+            rowsRemoved, batchNo, traceRefs.Count, bundleTotal);
 
         return Ok(new
         {
-            Message = "Selected slit row(s) removed from output CSV(s); Output_Slit_Row entries removed where configured (Input_Slit_Row unchanged). Bundle total (printed tag count) is unchanged; use POST /api/Reconcile/reconcile to change it.",
+            Message = syncedTotal > 0
+                ? "Selected slit row(s) removed; bundle total synced from remaining slit sum."
+                : "Selected slit row(s) removed from output CSV(s); Output_Slit_Row entries removed where configured (Input_Slit_Row unchanged).",
             NdtBatchNo = batchNo,
             RowsRemoved = rowsRemoved,
-            NewBundleTotalNdtPcs = bundle.TotalNdtPcs,
-            BundleSummaryUpdated = false,
+            NewBundleTotalNdtPcs = bundleTotal,
+            BundleSummaryUpdated = syncedTotal > 0,
             Slits = slits.Select(s => new { SlitNo = s.SlitNo, NdtPipes = s.NdtPipes }).ToList()
         });
     }

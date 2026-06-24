@@ -23,6 +23,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
     private readonly INdtBundleRuntimeStateStore _runtimeState;
     private readonly PlcPoEndPollHandler _plcPoEndPollHandler;
     private readonly ITraceabilityRepository _traceability;
+    private readonly INdtBundleRepository _bundleRepository;
     private readonly ISqlTraceabilityWriteTracker _sqlWriteTracker;
     private readonly IWipBundleRunningPoProvider _wipRunningPo;
     private readonly IMillNdtCountReader _millNdtCountReader;
@@ -42,6 +43,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         INdtBundleRuntimeStateStore runtimeState,
         PlcPoEndPollHandler plcPoEndPollHandler,
         ITraceabilityRepository traceability,
+        INdtBundleRepository bundleRepository,
         ISqlTraceabilityWriteTracker sqlWriteTracker,
         IWipBundleRunningPoProvider wipRunningPo,
         IMillNdtCountReader millNdtCountReader,
@@ -56,6 +58,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         _runtimeState = runtimeState;
         _plcPoEndPollHandler = plcPoEndPollHandler;
         _traceability = traceability;
+        _bundleRepository = bundleRepository;
         _sqlWriteTracker = sqlWriteTracker;
         _wipRunningPo = wipRunningPo;
         _millNdtCountReader = millNdtCountReader;
@@ -464,6 +467,26 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 {
                     await _traceability.RecordInputSlitRowsAsync(fileFull, inputRowsForSql, cancellationToken).ConfigureAwait(false);
                     await _traceability.RecordOutputSlitRowsAsync(outputPath ?? fileFull, outputRowsForSql, cancellationToken).ConfigureAwait(false);
+
+                    foreach (var batchNo in outputRowsForSql
+                                 .Select(r => r.NdtBatchNo)
+                                 .Where(static b => !string.IsNullOrWhiteSpace(b))
+                                 .Distinct(StringComparer.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            await _bundleRepository
+                                .TrySyncBundleTotalFromSlitsAsync(batchNo, forceFromSlits: false, cancellationToken)
+                                .ConfigureAwait(false);
+                        }
+                        catch (Exception syncEx)
+                        {
+                            _logger.LogWarning(
+                                syncEx,
+                                "Failed to sync NDT_Bundle total from slit sum for batch {BatchNo} after output slit import.",
+                                batchNo);
+                        }
+                    }
                 }
 
                 LogSqlWriteFailuresIfAny(fileFull);
