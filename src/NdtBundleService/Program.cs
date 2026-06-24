@@ -6,6 +6,7 @@ using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Services;
 using NdtBundleService.Services.PlcHandshake;
+using NdtBundleService.Services.FileBasedPoChange;
 using QuestPDF.Infrastructure;
 using Serilog;
 using Serilog.Events;
@@ -54,6 +55,7 @@ builder.Services.AddSingleton<IMillPrinterSettingsService, MillPrinterSettingsSe
 builder.Services.AddSingleton<IFormationChartSettingsService, FormationChartSettingsService>();
 builder.Services.AddSingleton<IActivePoPerMillService, ActivePoPerMillService>();
 builder.Services.AddSingleton<IWipBundleRunningPoProvider, WipBundleRunningPoProvider>();
+builder.Services.AddSingleton<FileBasedPoChangeQueue>();
 builder.Services.AddSingleton<IMillNdtCountReader, S7MillNdtCountReader>();
 builder.Services.AddSingleton<IMillSlitLiveNdtAccumulator, MillSlitLiveNdtAccumulator>();
 builder.Services.AddSingleton<IPoEndWorkflowService, PoEndWorkflowService>();
@@ -126,6 +128,7 @@ builder.Services.AddSwaggerGen();
 
 // Background worker that orchestrates the flow
 builder.Services.AddHostedService<PlcHandshakeWorker>();
+builder.Services.AddHostedService<FileBasedPoChangeWorker>();
 builder.Services.AddHostedService<SlitMonitoringWorker>();
 builder.Services.AddHostedService<UploadNdtBundleSchedulerWorker>();
 

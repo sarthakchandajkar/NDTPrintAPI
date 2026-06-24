@@ -79,6 +79,28 @@ export interface LiveMillNdtPollResponse {
   message?: string;
 }
 
+export interface PoEndPending {
+  poNumber?: string;
+  millNo?: number;
+  pendingFromSizeCounts?: number;
+  pendingRunningTotal?: number;
+  activePoForMill?: string;
+  poMatchesActiveMill?: boolean;
+  waitingForNewWip?: boolean;
+}
+
+export interface PoEndResponse {
+  message?: string;
+  poNumber?: string;
+  millNo?: number;
+  bundlesClosed?: number;
+  totalNdtPcsClosed?: number;
+  advancedPoPlanFile?: boolean;
+  waitingForNewWip?: boolean;
+  activePoForMill?: string;
+  warning?: string;
+}
+
 export interface NdtSummary {
   poNumber?: string;
   millNo?: number;
@@ -262,6 +284,8 @@ export interface SettingsPlcLineRunningSignal {
 export interface SettingsPlcDiagnostics {
   plcPoEndEnabled?: boolean;
   plcHandshakeEnabled?: boolean;
+  fileBasedPoEndEnabled?: boolean;
+  poEndSource?: string;
   driver?: string;
   lastReadOk?: boolean;
   lastPlcError?: string | null;
@@ -366,10 +390,19 @@ export const api = {
   ndtSummaryRunningPo: () => fetchApi<RunningPoNdtSummary[]>("/api/Test/ndt-summary-running-po"),
   bundles: () => fetchApi<BundleFile[]>("/api/Test/bundles"),
   poEnd: (poNumber: string, millNo: number) =>
-    fetchApi<{ message?: string }>("/api/Test/po-end", {
+    fetchApi<PoEndResponse>("/api/Test/po-end", {
       method: "POST",
       body: JSON.stringify({ poNumber, millNo }),
     }),
+  poEndPending: (poNumber: string, millNo: number) =>
+    fetchApi<PoEndPending>(
+      `/api/Test/po-end-pending?poNumber=${encodeURIComponent(poNumber)}&millNo=${millNo}`
+    ),
+  resumeWipAfterPoEnd: (millNo: number) =>
+    fetchApi<{ message?: string; resumed?: boolean; runningPo?: string }>(
+      `/api/Test/resume-wip/${millNo}`,
+      { method: "POST" }
+    ),
   reconcileBundles: () => fetchApi<ReconcileBundle[]>("/api/Reconcile/bundles"),
   reconcile: (ndtBatchNo: string, newNdtPipes: number) =>
     fetchApi<{ message?: string; csvFilesUpdated?: number }>("/api/Reconcile/reconcile", {

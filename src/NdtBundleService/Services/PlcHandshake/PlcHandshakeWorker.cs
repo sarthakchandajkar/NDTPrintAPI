@@ -72,11 +72,18 @@ public sealed class PlcHandshakeWorker : BackgroundService
             mills.Count,
             handshake.PollIntervalMs);
 
+        if (_options.Value.FileBasedPoEnd?.Enabled == true)
+        {
+            _logger.LogInformation(
+                "FileBasedPoEnd is enabled — PLC PO-change triggers are ignored; PO end uses TM Bundle WIP filenames.");
+        }
+
         foreach (var mill in mills)
         {
             var service = new PlcHandshakeService(
                 mill,
                 handshake,
+                _options.Value,
                 _poChangeHandler,
                 _statusRegistry,
                 _connectionHealth,

@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
+using NdtBundleService.Services.FileBasedPoChange;
 
 namespace NdtBundleService.Services;
 
@@ -21,6 +22,7 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
     }
 
     private readonly IOptions<NdtBundleOptions> _options;
+    private readonly FileBasedPoChangeQueue? _fileBasedPoChangeQueue;
     private readonly ILogger<WipBundleRunningPoProvider> _logger;
 
     private readonly object _lock = new();
@@ -32,13 +34,20 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
     private FileSystemWatcher? _watchFgBundle;
     private FileSystemWatcher? _watchFgAccepted;
 
-    public WipBundleRunningPoProvider(IOptions<NdtBundleOptions> options, ILogger<WipBundleRunningPoProvider> logger)
+    public WipBundleRunningPoProvider(
+        IOptions<NdtBundleOptions> options,
+        ILogger<WipBundleRunningPoProvider> logger,
+        FileBasedPoChangeQueue? fileBasedPoChangeQueue = null)
     {
         _options = options;
         _logger = logger;
+        _fileBasedPoChangeQueue = fileBasedPoChangeQueue;
 
         TryStartWatchers();
     }
+
+    private bool IsFileBasedPoEndEnabled() =>
+        _options.Value.FileBasedPoEnd?.Enabled == true && _fileBasedPoChangeQueue is not null;
 
     public Task<string?> TryGetRunningPoForMillAsync(int millNo, CancellationToken cancellationToken)
     {
@@ -237,18 +246,8 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
                     return;
                 }
 
-                if (st.RunningWipStampUtc >= stampUtc)
-                    return;
-
-                st.RunningPo = meta.PoNumber;
-                st.RunningWipStampUtc = stampUtc;
+                TryApplyRunningPoUpdateUnsafe(meta.MillNo, meta.PoNumber, stampUtc, name);
             }
-
-            _logger.LogInformation(
-                "Mill {Mill}: running PO updated from WIP bundle file {File} → PO {Po}.",
-                meta.MillNo,
-                name,
-                meta.PoNumber);
         }
         catch
         {
@@ -301,11 +300,10 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
                 if (best.MillNo == 0)
                     continue;
 
-                if (st.RunningWipStampUtc >= best.StampUtc)
+                if (st.WaitingForNewWip)
                     continue;
 
-                st.RunningPo = best.PoNumber;
-                st.RunningWipStampUtc = best.StampUtc;
+                TryApplyRunningPoUpdateUnsafe(millNo, best.PoNumber, best.StampUtc, best.FileName);
             }
         }
     }
@@ -384,6 +382,110 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
             normalized,
             fileName);
 
+        return true;
+    }
+
+    public bool TrySetRunningPoFromWipFile(int millNo, string newPo, DateTime wipStampUtc, string wipFileName)
+    {
+        if (millNo is < 1 or > 4)
+            return false;
+
+        lock (_lock)
+        {
+            var st = _mills[millNo - 1];
+            if (st.WaitingForNewWip)
+                return TryAcceptCandidateUnsafe(millNo, newPo, wipStampUtc, wipFileName);
+
+            var normalized = InputSlitCsvParsing.NormalizePo(newPo);
+            if (string.IsNullOrWhiteSpace(normalized))
+                return false;
+
+            if (st.RunningWipStampUtc >= wipStampUtc &&
+                InputSlitCsvParsing.PoEquals(st.RunningPo, normalized))
+                return false;
+
+            st.RunningPo = normalized;
+            st.RunningWipStampUtc = wipStampUtc;
+            st.WaitingForNewWip = false;
+            st.EndedPo = null;
+            return true;
+        }
+    }
+
+    private bool TryEnqueueFileBasedPoChange(
+        int millNo,
+        string endedPo,
+        string newPo,
+        DateTime wipStampUtc,
+        string wipFileName)
+    {
+        if (!IsFileBasedPoEndEnabled())
+            return false;
+
+        var normalizedEnded = InputSlitCsvParsing.NormalizePo(endedPo);
+        var normalizedNew = InputSlitCsvParsing.NormalizePo(newPo);
+        if (string.IsNullOrWhiteSpace(normalizedNew))
+            return false;
+
+        if (!string.IsNullOrWhiteSpace(normalizedEnded) &&
+            InputSlitCsvParsing.PoEquals(normalizedEnded, normalizedNew))
+            return false;
+
+        var enqueued = _fileBasedPoChangeQueue!.TryEnqueue(new FileBasedPoChangeRequest
+        {
+            MillNo = millNo,
+            EndedPo = normalizedEnded,
+            NewPo = normalizedNew,
+            WipStampUtc = wipStampUtc,
+            WipFileName = wipFileName
+        });
+
+        if (enqueued)
+        {
+            _logger.LogInformation(
+                "Mill {Mill}: WIP bundle PO change {OldPo} → {NewPo} from {File}; file-based PO end queued.",
+                millNo,
+                string.IsNullOrWhiteSpace(normalizedEnded) ? "(none)" : normalizedEnded,
+                normalizedNew,
+                wipFileName);
+        }
+
+        return enqueued;
+    }
+
+    private bool TryApplyRunningPoUpdateUnsafe(
+        int millNo,
+        string newPo,
+        DateTime wipStampUtc,
+        string wipFileName)
+    {
+        var st = _mills[millNo - 1];
+        var normalizedNew = InputSlitCsvParsing.NormalizePo(newPo);
+        if (string.IsNullOrWhiteSpace(normalizedNew))
+            return false;
+
+        if (!string.IsNullOrWhiteSpace(st.RunningPo) &&
+            InputSlitCsvParsing.PoEquals(st.RunningPo, normalizedNew) &&
+            st.RunningWipStampUtc >= wipStampUtc)
+            return false;
+
+        if (IsFileBasedPoEndEnabled() &&
+            !string.IsNullOrWhiteSpace(st.RunningPo) &&
+            !InputSlitCsvParsing.PoEquals(st.RunningPo, normalizedNew))
+        {
+            return TryEnqueueFileBasedPoChange(millNo, st.RunningPo, normalizedNew, wipStampUtc, wipFileName);
+        }
+
+        if (st.RunningWipStampUtc >= wipStampUtc && InputSlitCsvParsing.PoEquals(st.RunningPo, normalizedNew))
+            return false;
+
+        st.RunningPo = normalizedNew;
+        st.RunningWipStampUtc = wipStampUtc;
+        _logger.LogInformation(
+            "Mill {Mill}: running PO updated from WIP bundle file {File} → PO {Po}.",
+            millNo,
+            wipFileName,
+            normalizedNew);
         return true;
     }
 

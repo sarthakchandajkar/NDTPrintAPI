@@ -251,6 +251,10 @@ public sealed class SettingsController : ControllerBase
             {
                 plcPoEndEnabled = true,
                 plcHandshakeEnabled = true,
+                fileBasedPoEndEnabled = _options.FileBasedPoEnd?.Enabled == true,
+                poEndSource = _options.FileBasedPoEnd?.Enabled == true
+                    ? "TM Bundle WIP filename"
+                    : "PLC PO-change trigger",
                 driver = "S7-Handshake",
                 lastReadOk = snapshot.Count > 0 && snapshot.All(m => m.Connected),
                 lastPlcError = _handshakeStatus.FirstError() ?? _plcHealth.LastError,

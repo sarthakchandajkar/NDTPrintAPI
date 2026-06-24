@@ -73,7 +73,7 @@ public interface ITraceabilityRepository
         CancellationToken cancellationToken);
 
     /// <summary>Updates NDT_Pipes on all Output_Slit_Row rows for the batch and slit.</summary>
-    Task UpdateOutputSlitRowNdtPipesByBatchAndSlitAsync(
+    Task<int> UpdateOutputSlitRowNdtPipesByBatchAndSlitAsync(
         string ndtBatchNo,
         string slitNo,
         int ndtPipes,
@@ -636,17 +636,17 @@ VALUES
         }
     }
 
-    public async Task UpdateOutputSlitRowNdtPipesByBatchAndSlitAsync(
+    public async Task<int> UpdateOutputSlitRowNdtPipesByBatchAndSlitAsync(
         string ndtBatchNo,
         string slitNo,
         int ndtPipes,
         CancellationToken cancellationToken)
     {
         if (!Enabled || string.IsNullOrWhiteSpace(ndtBatchNo))
-            return;
+            return 0;
 
         var batch = ndtBatchNo.Trim();
-        var slit = string.IsNullOrWhiteSpace(slitNo) ? "—" : slitNo.Trim();
+        var slit = ReconcileCsvParsing.NormalizeSlitKey(slitNo);
 
         try
         {
@@ -678,11 +678,14 @@ WHERE NDT_Batch_No = @BatchNo
                     slit,
                     ndtPipes);
             }
+
+            return rows;
         }
         catch (Exception ex)
         {
             _writeTracker.RecordFailure("Output_Slit_Row", ex.Message, batch);
             _logger.LogWarning(ex, "Failed to update Output_Slit_Row for batch {BatchNo} slit {SlitNo}.", batch, slit);
+            return 0;
         }
     }
 

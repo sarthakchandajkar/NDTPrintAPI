@@ -518,7 +518,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             wip?.PipeSize ?? "",
             wip?.PipeThickness ?? "",
             wip?.PipeLength ?? "",
-            wip?.PipeWeightPerMeter ?? "",
+            NdtBundleWeightCalculator.FormatBundleWeight(wip?.PipeWeightPerMeter, wip?.PipeLength, pcs),
             wip?.PipeType ?? "",
             date,
             pcs,

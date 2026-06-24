@@ -30,6 +30,7 @@ namespace NdtBundleService.Controllers;
     private readonly IWipBundleRunningPoProvider _wipBundleRunningPo;
     private readonly IMillNdtCountReader _millNdtCountReader;
     private readonly IPoEndWorkflowService _poEndWorkflow;
+    private readonly INdtBundleRuntimeStateStore _runtimeState;
     private readonly ILogger<TestController> _logger;
     private readonly NdtBundleOptions _options;
 
@@ -47,6 +48,7 @@ namespace NdtBundleService.Controllers;
         IWipBundleRunningPoProvider wipBundleRunningPo,
         IMillNdtCountReader millNdtCountReader,
         IPoEndWorkflowService poEndWorkflow,
+        INdtBundleRuntimeStateStore runtimeState,
         ICurrentPoPlanService? currentPoPlanService = null)
     {
         _bundleTagPrinter = bundleTagPrinter;
@@ -60,6 +62,7 @@ namespace NdtBundleService.Controllers;
         _wipBundleRunningPo = wipBundleRunningPo;
         _millNdtCountReader = millNdtCountReader;
         _poEndWorkflow = poEndWorkflow;
+        _runtimeState = runtimeState;
         _currentPoPlanService = currentPoPlanService;
         _logger = logger;
         _options = options.Value;
@@ -69,6 +72,30 @@ namespace NdtBundleService.Controllers;
     {
         public string PoNumber { get; set; } = string.Empty;
         public int MillNo { get; set; }
+    }
+
+    public sealed class PoEndPendingDto
+    {
+        public string PoNumber { get; set; } = string.Empty;
+        public int MillNo { get; set; }
+        public int PendingFromSizeCounts { get; set; }
+        public int PendingRunningTotal { get; set; }
+        public string? ActivePoForMill { get; set; }
+        public bool PoMatchesActiveMill { get; set; }
+        public bool WaitingForNewWip { get; set; }
+    }
+
+    public sealed class PoEndResponseDto
+    {
+        public string Message { get; set; } = string.Empty;
+        public string PoNumber { get; set; } = string.Empty;
+        public int MillNo { get; set; }
+        public int BundlesClosed { get; set; }
+        public int TotalNdtPcsClosed { get; set; }
+        public bool AdvancedPoPlanFile { get; set; }
+        public bool WaitingForNewWip { get; set; }
+        public string? ActivePoForMill { get; set; }
+        public string? Warning { get; set; }
     }
 
     public sealed class BackfillBundleTotalsRequest
@@ -129,11 +156,14 @@ namespace NdtBundleService.Controllers;
 
     /// <summary>
     /// Simulate PO-end for a given PO number and mill (1–4). Same workflow as a PLC PO-end: closes partial bundles, increments NDT batch state for that (PO, Mill),
-    /// and optional PO plan file advance when <c>NdtBundle:PlcPoEnd:AdvancePoPlanFileOnPoEnd</c> is true (normally false while testing without PLC).
+    /// and optional PO plan file advance when configured for the active PO-end source (PLC handshake, file-based WIP, or legacy PlcPoEnd).
     /// </summary>
     [HttpPost("po-end")]
-    public async Task<IActionResult> SimulatePoEnd([FromBody] PoEndRequest request, CancellationToken cancellationToken)
+    public async Task<IActionResult> SimulatePoEnd([FromBody] PoEndRequest? request, CancellationToken cancellationToken)
     {
+        if (request is null)
+            return BadRequest(new { Message = "Request body is required." });
+
         if (string.IsNullOrWhiteSpace(request.PoNumber))
             return BadRequest(new { Message = "PoNumber is required." });
 
@@ -141,26 +171,127 @@ namespace NdtBundleService.Controllers;
             return BadRequest(new { Message = "MillNo must be between 1 and 4." });
 
         var po = InputSlitCsvParsing.NormalizePo(request.PoNumber.Trim());
-        var advancePlan = _options.PlcPoEnd?.AdvancePoPlanFileOnPoEnd == true && _currentPoPlanService != null;
+        var advancePlan = ShouldAdvancePoPlanOnPoEnd();
 
         _logger.LogInformation("Simulating PO end for PO {PO} Mill {Mill} (advance PO plan file: {Advance})", po, request.MillNo, advancePlan);
 
+        string? activePoForMill = null;
+        string? warning = null;
         try
         {
-            await _poEndWorkflow.ExecuteAsync(po, request.MillNo, advancePlan, cancellationToken).ConfigureAwait(false);
+            var activePoByMill = await _activePoPerMill.GetLatestPoByMillAsync(cancellationToken).ConfigureAwait(false);
+            if (activePoByMill.TryGetValue(request.MillNo, out var activePo) && !string.IsNullOrWhiteSpace(activePo))
+            {
+                activePoForMill = InputSlitCsvParsing.NormalizePo(activePo);
+                if (!InputSlitCsvParsing.PoEquals(activePoForMill, po))
+                {
+                    warning =
+                        $"Active PO for Mill {request.MillNo} is {activePoForMill}, but you simulated PO end for {po}. " +
+                        "Partial bundles are keyed by the PO you enter — use the running PO for this mill if you expect open partials to close.";
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not resolve active PO for Mill {Mill} during simulate PO end.", request.MillNo);
+        }
+
+        PoEndWorkflowResult result;
+        try
+        {
+            result = await _poEndWorkflow.ExecuteAsync(po, request.MillNo, advancePlan, cancellationToken).ConfigureAwait(false);
         }
         catch (ArgumentOutOfRangeException ex)
         {
             return BadRequest(new { Message = ex.Message });
         }
-
-        return Ok(new
+        catch (Exception ex)
         {
-            Message = "PO end simulated.",
-            PoNumber = po,
-            MillNo = request.MillNo,
-            AdvancedPoPlanFile = advancePlan
+            _logger.LogError(ex, "Simulate PO end failed for PO {PO} Mill {Mill}.", po, request.MillNo);
+            return StatusCode(500, new { Message = "PO end workflow failed.", Error = ex.Message });
+        }
+
+        var message = result.BundlesClosed > 0
+            ? $"PO end simulated: closed {result.BundlesClosed} bundle(s), {result.TotalNdtPcsClosed} NDT pipe(s)."
+            : "PO end simulated: no open partial bundles were found for this PO and mill.";
+
+        if (result.WaitingForNewWip)
+            message += " Mill is now waiting for a new WIP bundle file before slit bundling resumes.";
+
+        return Ok(new PoEndResponseDto
+        {
+            Message = message,
+            PoNumber = result.PoNumber,
+            MillNo = result.MillNo,
+            BundlesClosed = result.BundlesClosed,
+            TotalNdtPcsClosed = result.TotalNdtPcsClosed,
+            AdvancedPoPlanFile = result.AdvancedPoPlanFile,
+            WaitingForNewWip = result.WaitingForNewWip,
+            ActivePoForMill = activePoForMill,
+            Warning = warning
         });
+    }
+
+    /// <summary>
+    /// Open partial NDT counts for a PO/mill before simulating PO end (from in-memory runtime state).
+    /// </summary>
+    [HttpGet("po-end-pending")]
+    public async Task<IActionResult> GetPoEndPending([FromQuery] string poNumber, [FromQuery] int millNo, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(poNumber))
+            return BadRequest(new { Message = "poNumber is required." });
+
+        if (millNo is < 1 or > 4)
+            return BadRequest(new { Message = "millNo must be between 1 and 4." });
+
+        var po = InputSlitCsvParsing.NormalizePo(poNumber.Trim());
+        await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
+
+        var sizeCounts = _runtimeState.GetSizeCounts(po, millNo);
+        var pendingFromSizes = sizeCounts.Values.Where(static v => v > 0).Sum();
+        var pendingRunningTotal = _runtimeState.GetRunningTotal(po, millNo);
+
+        string? activePoForMill = null;
+        var poMatchesActive = false;
+        try
+        {
+            var activePoByMill = await _activePoPerMill.GetLatestPoByMillAsync(cancellationToken).ConfigureAwait(false);
+            if (activePoByMill.TryGetValue(millNo, out var activePo) && !string.IsNullOrWhiteSpace(activePo))
+            {
+                activePoForMill = InputSlitCsvParsing.NormalizePo(activePo);
+                poMatchesActive = InputSlitCsvParsing.PoEquals(activePoForMill, po);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not resolve active PO for Mill {Mill} during po-end-pending.", millNo);
+        }
+
+        return Ok(new PoEndPendingDto
+        {
+            PoNumber = po,
+            MillNo = millNo,
+            PendingFromSizeCounts = pendingFromSizes,
+            PendingRunningTotal = pendingRunningTotal,
+            ActivePoForMill = activePoForMill,
+            PoMatchesActiveMill = poMatchesActive,
+            WaitingForNewWip = _wipBundleRunningPo.IsWaitingForNewWipAfterPoEnd(millNo)
+        });
+    }
+
+    private bool ShouldAdvancePoPlanOnPoEnd()
+    {
+        if (_currentPoPlanService is null)
+            return false;
+
+        var o = _options;
+        if (o.PlcHandshake?.Enabled == true)
+            return o.PlcHandshake.AdvancePoPlanFileOnPoEnd;
+
+        if (o.FileBasedPoEnd?.Enabled == true)
+            return o.FileBasedPoEnd.AdvancePoPlanFileOnPoEnd;
+
+        return o.PlcPoEnd?.AdvancePoPlanFileOnPoEnd == true;
     }
 
     /// <summary>

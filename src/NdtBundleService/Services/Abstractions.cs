@@ -190,12 +190,23 @@ public interface IPlcClient
     Task AcknowledgeMesPoChangeAsync(int millNo, CancellationToken cancellationToken);
 }
 
+/// <summary>Outcome of <see cref="IPoEndWorkflowService.ExecuteAsync"/>.</summary>
+public sealed class PoEndWorkflowResult
+{
+    public string PoNumber { get; init; } = string.Empty;
+    public int MillNo { get; init; }
+    public int BundlesClosed { get; init; }
+    public int TotalNdtPcsClosed { get; init; }
+    public bool WaitingForNewWip { get; init; }
+    public bool AdvancedPoPlanFile { get; init; }
+}
+
 /// <summary>
 /// Runs the same steps as <c>POST /api/Test/po-end</c>: close partial bundles, advance batch state, optional PO plan file advance.
 /// </summary>
 public interface IPoEndWorkflowService
 {
-    Task ExecuteAsync(string poNumber, int millNo, bool advancePoPlanFile, CancellationToken cancellationToken);
+    Task<PoEndWorkflowResult> ExecuteAsync(string poNumber, int millNo, bool advancePoPlanFile, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -228,6 +239,11 @@ public interface IWipBundleRunningPoProvider
     /// </summary>
     /// <returns>True when the mill was waiting and has been resumed.</returns>
     bool ResumeRunningWipForMill(int millNo);
+
+    /// <summary>
+    /// After file-based PO end workflow, set the WIP file that triggered the PO change as the new running PO.
+    /// </summary>
+    bool TrySetRunningPoFromWipFile(int millNo, string newPo, DateTime wipStampUtc, string wipFileName);
 }
 
 /// <summary>Live NDT pipe counter from the mill Siemens PLC (data block INT).</summary>

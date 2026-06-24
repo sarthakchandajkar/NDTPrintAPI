@@ -104,7 +104,10 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
                     slitGrade = wip.PipeGrade;
                 var slitThick = wip.PipeThickness;
                 var lenPerPipe = wip.PipeLength;
-                var totalBundleWt = FormatWeight(wip.PipeWeightPerMeter, okPcs);
+                var totalBundleWt = NdtBundleWeightCalculator.FormatBundleWeight(
+                    wip.PipeWeightPerMeter,
+                    lenPerPipe,
+                    okPcs);
 
                 var outputLine = string.Join(",",
                     Escape(poNo),
@@ -213,14 +216,6 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
     private static int ParseInt(string value)
     {
         return int.TryParse(value.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : 0;
-    }
-
-    private static string FormatWeight(string pipeWeightPerMeter, int numOfPipes)
-    {
-        if (!decimal.TryParse(pipeWeightPerMeter.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var perMeter))
-            return string.Empty;
-        var total = perMeter * numOfPipes;
-        return total.ToString("0.###", CultureInfo.InvariantCulture);
     }
 
     private static string Escape(string value)

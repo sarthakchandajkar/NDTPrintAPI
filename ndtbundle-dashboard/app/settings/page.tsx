@@ -516,6 +516,10 @@ export default function SettingsPage() {
         <div className="space-y-4">
           <div className="bg-white rounded-lg border border-gray-200 p-5 text-sm space-y-2">
             <p>
+              <span className="text-gray-500">PO end source:</span>{" "}
+              <span className="font-medium">{plc?.poEndSource ?? (plc?.fileBasedPoEndEnabled ? "TM Bundle WIP filename" : "PLC PO-change trigger")}</span>
+            </p>
+            <p>
               <span className="text-gray-500">Driver:</span>{" "}
               <span className="font-medium">{plc?.driver ?? "—"}</span>
               {plc?.plcHandshakeEnabled

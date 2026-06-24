@@ -15,6 +15,7 @@ public sealed class PlcHandshakeService
 {
     private readonly MillConfig _mill;
     private readonly PlcHandshakeOptions _options;
+    private readonly NdtBundleOptions _bundleOptions;
     private readonly IPoChangeHandler _poChangeHandler;
     private readonly PlcHandshakeStatusRegistry _statusRegistry;
     private readonly PlcConnectionHealth _connectionHealth;
@@ -54,6 +55,7 @@ public sealed class PlcHandshakeService
     public PlcHandshakeService(
         MillConfig mill,
         PlcHandshakeOptions options,
+        NdtBundleOptions bundleOptions,
         IPoChangeHandler poChangeHandler,
         PlcHandshakeStatusRegistry statusRegistry,
         PlcConnectionHealth connectionHealth,
@@ -64,6 +66,7 @@ public sealed class PlcHandshakeService
     {
         _mill = mill;
         _options = options;
+        _bundleOptions = bundleOptions;
         _poChangeHandler = poChangeHandler;
         _statusRegistry = statusRegistry;
         _connectionHealth = connectionHealth;
@@ -83,6 +86,9 @@ public sealed class PlcHandshakeService
             HandshakeState = _plcConnectionEnabled ? "Starting" : "Disconnected (manual)"
         });
     }
+
+    private bool IsFileBasedPoEndEnabled() =>
+        _bundleOptions.FileBasedPoEnd?.Enabled == true;
 
     public bool IsPlcConnectionEnabled => _plcConnectionEnabled;
 
@@ -236,8 +242,24 @@ public sealed class PlcHandshakeService
                     }
                     else if (_options.RecoverLatchedTriggerAtStartup && !_startupRecoveryAttempted)
                     {
-                        await RunStartupRecoveryAsync(millNo, stoppingToken).ConfigureAwait(false);
-                        trigger = ReadMerkerBit(_mill.TriggerByte, _mill.TriggerBit);
+                        if (IsFileBasedPoEndEnabled())
+                        {
+                            _startupRecoveryAttempted = true;
+                            _loggedStartupTriggerWait = false;
+                            _prevTriggerActive = trigger;
+                            _poChangePulseHandled = true;
+                            ArmAfterTriggerClear(isStartup: false);
+                            SetState(millNo, "Idle (file-based PO end)");
+                            _logger.LogInformation(
+                                "{MillName}: latched trigger {Trigger} at startup ignored — PO end uses TM Bundle WIP files.",
+                                _mill.Name,
+                                _mill.TriggerAddress);
+                        }
+                        else
+                        {
+                            await RunStartupRecoveryAsync(millNo, stoppingToken).ConfigureAwait(false);
+                            trigger = ReadMerkerBit(_mill.TriggerByte, _mill.TriggerBit);
+                        }
                     }
                     else
                     {
@@ -273,7 +295,18 @@ public sealed class PlcHandshakeService
                     !_settingsTestInProgress)
                 {
                     _poChangePulseHandled = true;
-                    await RunHandshakeAsync(millNo, stoppingToken).ConfigureAwait(false);
+                    if (IsFileBasedPoEndEnabled())
+                    {
+                        SetState(millNo, "Idle (file-based PO end)");
+                        _logger.LogInformation(
+                            "{MillName}: PLC PO-change trigger {Trigger} ignored — PO end uses TM Bundle WIP filename changes.",
+                            _mill.Name,
+                            _mill.TriggerAddress);
+                    }
+                    else
+                    {
+                        await RunHandshakeAsync(millNo, stoppingToken).ConfigureAwait(false);
+                    }
                 }
                 else if (!_handshakeInProgress && !_settingsTestInProgress)
                 {

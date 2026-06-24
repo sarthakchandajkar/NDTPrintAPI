@@ -33,7 +33,7 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
         _currentPoPlanService = currentPoPlanService;
     }
 
-    public async Task ExecuteAsync(string poNumber, int millNo, bool advancePoPlanFile, CancellationToken cancellationToken)
+    public async Task<PoEndWorkflowResult> ExecuteAsync(string poNumber, int millNo, bool advancePoPlanFile, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(poNumber))
             throw new ArgumentException("PoNumber is required.", nameof(poNumber));
@@ -44,6 +44,9 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
         var po = InputSlitCsvParsing.NormalizePo(poNumber.Trim());
         _logger.LogInformation("PO end workflow: PO {PO} Mill {Mill} (advance plan file: {Advance})", po, millNo, advancePoPlanFile);
 
+        var bundlesClosed = 0;
+        var totalNdtPcsClosed = 0;
+
         await _bundleEngine.HandlePoEndAsync(
             po,
             millNo,
@@ -52,6 +55,8 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
                 if (totalNdtPcs <= 0)
                     return;
 
+                bundlesClosed++;
+                totalNdtPcsClosed += totalNdtPcs;
                 await _outputWriter.WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken).ConfigureAwait(false);
                 _logger.LogInformation(
                     "PO end bundle closed: PO {PO} Mill {Mill} Batch index {Batch} NdtPcs {Pcs}",
@@ -70,5 +75,15 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
 
         if (advancePoPlanFile && _currentPoPlanService != null)
             await _currentPoPlanService.AdvanceToNextPoAsync(cancellationToken).ConfigureAwait(false);
+
+        return new PoEndWorkflowResult
+        {
+            PoNumber = po,
+            MillNo = millNo,
+            BundlesClosed = bundlesClosed,
+            TotalNdtPcsClosed = totalNdtPcsClosed,
+            WaitingForNewWip = _wipRunningPo.IsWaitingForNewWipAfterPoEnd(millNo),
+            AdvancedPoPlanFile = advancePoPlanFile && _currentPoPlanService != null
+        };
     }
 }

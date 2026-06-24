@@ -191,6 +191,9 @@ public class NdtBundleOptions
     /// </summary>
     public PlcHandshakeOptions PlcHandshake { get; set; } = new();
 
+    /// <summary>PO end detection from TM Bundle WIP filenames instead of the PLC PO-change trigger.</summary>
+    public FileBasedPoEndOptions FileBasedPoEnd { get; set; } = new();
+
     /// <summary>Optional live NDT count + running PO from WIP bundle folder for one mill (e.g. Mill-3 S7).</summary>
     public MillSlitLiveOptions MillSlitLive { get; set; } = new();
 

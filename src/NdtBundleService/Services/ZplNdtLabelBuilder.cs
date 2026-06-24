@@ -8,7 +8,7 @@ namespace NdtBundleService.Services;
 /// - Top: Code 128 barcode with NDT Batch Number (human-readable line printed by the barcode command)
 /// - Middle content (3 lines):
 ///   Mill, PO Number, NDT Batch Number on one line
-///   Grade, Pipe Size, Pipe Thickness, Pipe Length, Bundle/pipe weight on one line
+///   Grade, Pipe Size, Pipe Thickness, Pipe Length, bundle total weight (kg) on one line
 ///   Date, Number of NDT pipes, Pipe type/WIP/FG and optional "Reprint" on one line
 /// - Bottom: two stacked Code 128 barcodes with the same NDT Batch Number.
 /// </summary>
@@ -25,7 +25,7 @@ public static class ZplNdtLabelBuilder
         string pipeSize,
         string pipeThickness,
         string pipeLength,
-        string pipeWeightPerMeter,
+        string bundleWeight,
         string pipeType,
         DateTime date,
         int pcsInBundle,
@@ -45,7 +45,7 @@ public static class ZplNdtLabelBuilder
         var escapedSize = Escape(pipeSize);
         var escapedThickness = Escape(pipeThickness);
         var escapedLength = Escape(pipeLength);
-        var escapedWeight = Escape(pipeWeightPerMeter);
+        var escapedWeight = Escape(bundleWeight);
         var escapedType = Escape(pipeType);
         var escapedStation = Escape(stationText);
 

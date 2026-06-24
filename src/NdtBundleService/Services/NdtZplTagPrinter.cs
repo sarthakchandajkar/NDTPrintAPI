@@ -61,7 +61,10 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
         var pipeSize = wip?.PipeSize ?? "";
         var pipeThickness = wip?.PipeThickness ?? "";
         var pipeLength = wip?.PipeLength ?? "";
-        var pipeWeight = wip?.PipeWeightPerMeter ?? "";
+        var bundleWeight = NdtBundleWeightCalculator.FormatBundleWeight(
+            wip?.PipeWeightPerMeter,
+            pipeLength,
+            totalNdtPcs);
         var pipeType = wip?.PipeType ?? "";
 
         if (wip is null
@@ -69,7 +72,7 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
                 && string.IsNullOrWhiteSpace(pipeSize)
                 && string.IsNullOrWhiteSpace(pipeThickness)
                 && string.IsNullOrWhiteSpace(pipeLength)
-                && string.IsNullOrWhiteSpace(pipeWeight)))
+                && string.IsNullOrWhiteSpace(wip.PipeWeightPerMeter)))
         {
             _logger.LogWarning(
                 "NDT tag for batch {BatchNo} PO {PoNumber} mill {MillNo} is missing WIP label fields (grade/size/thickness/length/weight). Check PO plan and WIP bundle CSVs.",
@@ -88,7 +91,7 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
             pipeSize,
             pipeThickness,
             pipeLength,
-            pipeWeight,
+            bundleWeight,
             pipeType,
             date,
             totalNdtPcs,

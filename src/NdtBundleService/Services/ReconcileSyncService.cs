@@ -14,7 +14,7 @@ public interface IReconcileSyncService
         CancellationToken cancellationToken);
 
     /// <summary>After per-slit reconcile: align Output_Slit_Row for that slit.</summary>
-    Task SyncAfterSlitReconcileAsync(
+    Task<int> SyncAfterSlitReconcileAsync(
         string ndtBatchNo,
         string slitNo,
         int newNdtPipes,
@@ -109,13 +109,13 @@ public sealed class ReconcileSyncService : IReconcileSyncService
         await _traceability.SyncOutputSlitRowsFromPerSlitCsvForBatchAsync(batch, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task SyncAfterSlitReconcileAsync(
+    public async Task<int> SyncAfterSlitReconcileAsync(
         string ndtBatchNo,
         string slitNo,
         int newNdtPipes,
         CancellationToken cancellationToken)
     {
-        await _traceability.UpdateOutputSlitRowNdtPipesByBatchAndSlitAsync(
+        var sqlRows = await _traceability.UpdateOutputSlitRowNdtPipesByBatchAndSlitAsync(
             ndtBatchNo.Trim(),
             slitNo,
             newNdtPipes,
@@ -123,6 +123,8 @@ public sealed class ReconcileSyncService : IReconcileSyncService
 
         await _traceability.SyncOutputSlitRowsFromPerSlitCsvForBatchAsync(ndtBatchNo.Trim(), cancellationToken)
             .ConfigureAwait(false);
+
+        return sqlRows;
     }
 
     public async Task SyncAfterManualStationReconcileAsync(

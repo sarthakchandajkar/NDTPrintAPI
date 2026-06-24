@@ -231,8 +231,11 @@ public sealed class ReconcileController : ControllerBase
     /// then recompute and persist the bundle total (DB + NDT_Bundle_*.csv if present).
     /// </summary>
     [HttpPost("reconcile-slit")]
-    public async Task<IActionResult> ReconcileSlit([FromBody] ReconcileSlitRequest request, CancellationToken cancellationToken)
+    public async Task<IActionResult> ReconcileSlit([FromBody] ReconcileSlitRequest? request, CancellationToken cancellationToken)
     {
+        if (request is null)
+            return BadRequest(new { Message = "Request body is required." });
+
         if (string.IsNullOrWhiteSpace(request.NdtBatchNo))
             return BadRequest(new { Message = "NdtBatchNo is required." });
         if (string.IsNullOrWhiteSpace(request.SlitNo))
@@ -243,33 +246,65 @@ public sealed class ReconcileController : ControllerBase
         var batchNo = request.NdtBatchNo.Trim();
         var slitNo = request.SlitNo.Trim();
 
-        var bundle = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
-        if (bundle is null)
-            return NotFound(new { Message = $"Bundle {batchNo} not found." });
-
-        var filesUpdated = await _bundleRepository.UpdateOutputCsvFilesForSlitAsync(batchNo, slitNo, request.NewNdtPipes, cancellationToken).ConfigureAwait(false);
-        if (filesUpdated == 0)
-            return NotFound(new { Message = $"No output CSV row found for bundle {batchNo} and slit {slitNo}." });
-
-        await _reconcileSync.SyncAfterSlitReconcileAsync(batchNo, slitNo, request.NewNdtPipes, cancellationToken).ConfigureAwait(false);
-
-        var slits = await _bundleRepository.GetSlitsForBatchAsync(batchNo, cancellationToken).ConfigureAwait(false);
-
-        _logger.LogInformation(
-            "Reconciled slit {SlitNo} for bundle {BatchNo}: NewNdtPipes={NewPipes}, FilesUpdated={FilesUpdated}, BundleTotalNdtPcs={BundleTotal}.",
-            slitNo, batchNo, request.NewNdtPipes, filesUpdated, bundle.TotalNdtPcs);
-
-        return Ok(new
+        try
         {
-            Message = "Slit reconciled. Per-slit output CSV updated; bundle total (printed tag count) is unchanged. Use POST /api/Reconcile/reconcile to change the bundle total.",
-            NdtBatchNo = batchNo,
-            SlitNo = slitNo,
-            NewNdtPipes = request.NewNdtPipes,
-            FilesUpdated = filesUpdated,
-            NewBundleTotalNdtPcs = bundle.TotalNdtPcs,
-            BundleSummaryUpdated = false,
-            Slits = slits.Select(s => new { SlitNo = s.SlitNo, NdtPipes = s.NdtPipes }).ToList()
-        });
+            var bundle = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
+            if (bundle is null)
+                return NotFound(new { Message = $"Bundle {batchNo} not found." });
+
+            var filesUpdated = await _bundleRepository
+                .UpdateOutputCsvFilesForSlitAsync(batchNo, slitNo, request.NewNdtPipes, cancellationToken)
+                .ConfigureAwait(false);
+
+            var sqlRowsUpdated = await _reconcileSync
+                .SyncAfterSlitReconcileAsync(batchNo, slitNo, request.NewNdtPipes, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (filesUpdated == 0 && sqlRowsUpdated == 0)
+            {
+                return NotFound(new
+                {
+                    Message =
+                        $"No per-slit output CSV row or SQL Output_Slit_Row entry found for bundle {batchNo} and slit {ReconcileCsvParsing.NormalizeSlitKey(slitNo)}."
+                });
+            }
+
+            var slits = await _bundleRepository.GetSlitsForBatchAsync(batchNo, cancellationToken).ConfigureAwait(false);
+
+            _logger.LogInformation(
+                "Reconciled slit {SlitNo} for bundle {BatchNo}: NewNdtPipes={NewPipes}, FilesUpdated={FilesUpdated}, SqlRowsUpdated={SqlRowsUpdated}, BundleTotalNdtPcs={BundleTotal}.",
+                slitNo,
+                batchNo,
+                request.NewNdtPipes,
+                filesUpdated,
+                sqlRowsUpdated,
+                bundle.TotalNdtPcs);
+
+            var message = filesUpdated > 0
+                ? "Slit reconciled. Per-slit output CSV updated."
+                : "Slit reconciled in SQL (no matching per-slit output CSV row was updated on disk).";
+            if (sqlRowsUpdated > 0)
+                message += $" {sqlRowsUpdated} Output_Slit_Row row(s) updated.";
+            message += " Bundle total (printed tag count) is unchanged; use POST /api/Reconcile/reconcile to change the bundle total.";
+
+            return Ok(new
+            {
+                Message = message,
+                NdtBatchNo = batchNo,
+                SlitNo = ReconcileCsvParsing.NormalizeSlitKey(slitNo),
+                NewNdtPipes = request.NewNdtPipes,
+                FilesUpdated = filesUpdated,
+                SqlRowsUpdated = sqlRowsUpdated,
+                NewBundleTotalNdtPcs = bundle.TotalNdtPcs,
+                BundleSummaryUpdated = false,
+                Slits = slits.Select(s => new { SlitNo = s.SlitNo, NdtPipes = s.NdtPipes }).ToList()
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Reconcile slit failed for bundle {BatchNo} slit {SlitNo}.", batchNo, slitNo);
+            return StatusCode(500, new { Message = "Slit reconcile failed.", Error = ex.Message });
+        }
     }
 
     /// <summary>
@@ -340,7 +375,10 @@ public sealed class ReconcileController : ControllerBase
         var pipeSize = wip?.PipeSize ?? "";
         var pipeThickness = wip?.PipeThickness ?? "";
         var pipeLength = wip?.PipeLength ?? "";
-        var pipeWeight = wip?.PipeWeightPerMeter ?? "";
+        var bundleWeight = NdtBundleWeightCalculator.FormatBundleWeight(
+            wip?.PipeWeightPerMeter,
+            pipeLength,
+            bundle.TotalNdtPcs);
         var pipeType = wip?.PipeType ?? "";
 
         var zplBytes = ZplNdtLabelBuilder.BuildNdtTagZpl(
@@ -351,7 +389,7 @@ public sealed class ReconcileController : ControllerBase
             pipeSize,
             pipeThickness,
             pipeLength,
-            pipeWeight,
+            bundleWeight,
             pipeType,
             DateTime.Now,
             bundle.TotalNdtPcs,

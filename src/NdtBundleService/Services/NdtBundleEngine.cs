@@ -106,6 +106,7 @@ public sealed class NdtBundleEngine : IBundleEngine
 
         var contextRecord = _runtimeState.GetLastRecord(poNumber, millNo) ?? CreateSyntheticRecord(poNumber, millNo);
         var sizeCounts = _runtimeState.GetSizeCounts(poNumber, millNo);
+        var closedFromSizeCounts = false;
 
         foreach (var sizeKey in sizeCounts.Keys.ToList())
         {
@@ -113,6 +114,7 @@ public sealed class NdtBundleEngine : IBundleEngine
             if (count <= 0)
                 continue;
 
+            closedFromSizeCounts = true;
             var batchNo = _runtimeState.CloseBundle(poNumber, millNo, count, sizeThreshold);
             sizeCounts[sizeKey] = 0;
             _logger.LogInformation(
@@ -122,6 +124,22 @@ public sealed class NdtBundleEngine : IBundleEngine
                 millNo,
                 sizeKey);
             await onBundleClosedAsync(contextRecord, batchNo, count).ConfigureAwait(false);
+        }
+
+        if (!closedFromSizeCounts)
+        {
+            var runningTotal = _runtimeState.GetRunningTotal(poNumber, millNo);
+            if (runningTotal > 0)
+            {
+                var batchNo = _runtimeState.CloseBundle(poNumber, millNo, runningTotal, sizeThreshold);
+                _logger.LogInformation(
+                    "Closing partial running-total bundle {BatchNo} for PO {PO} Mill {Mill} ({Total} pcs) due to PO end.",
+                    batchNo,
+                    poNumber,
+                    millNo,
+                    runningTotal);
+                await onBundleClosedAsync(contextRecord, batchNo, runningTotal).ConfigureAwait(false);
+            }
         }
 
         _runtimeState.SetSizeCounts(poNumber, millNo, sizeCounts);

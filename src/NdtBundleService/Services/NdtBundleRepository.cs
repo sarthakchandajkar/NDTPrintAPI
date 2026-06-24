@@ -465,18 +465,30 @@ ORDER BY PrintedAt DESC";
             try
             {
                 var lines = await File.ReadAllLinesAsync(path, cancellationToken).ConfigureAwait(false);
+                if (lines.Length == 0)
+                    continue;
+
+                var columns = ReconcileCsvParsing.ResolveOutputCsvColumns(lines[0]);
                 for (var i = 1; i < lines.Length; i++)
                 {
-                    var cols = SplitCsvLine(lines[i]);
-                    if (cols.Count < MinColumns)
-                        continue;
-                    if (!cols[ColNdtBatchNo].Trim().Equals(batchNoTrimmed, StringComparison.OrdinalIgnoreCase))
+                    if (string.IsNullOrWhiteSpace(lines[i]))
                         continue;
 
-                    var slit = cols[ColSlitNo].Trim();
-                    if (string.IsNullOrEmpty(slit))
-                        slit = "—";
-                    var pipes = int.TryParse(cols[ColNdtPipes].Trim(), out var p) ? p : 0;
+                    var cols = ReconcileCsvParsing.SplitCsvLine(lines[i]);
+                    if (cols.Count < columns.MinColumns)
+                        continue;
+                    if (!columns.TryGetField(cols, columns.NdtBatchNo, out var batchCell)
+                        || !batchCell.Equals(batchNoTrimmed, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    if (!columns.TryGetField(cols, columns.SlitNo, out var slitCell))
+                        slitCell = string.Empty;
+                    var slit = ReconcileCsvParsing.NormalizeSlitKey(slitCell);
+                    if (!columns.TryGetField(cols, columns.NdtPipes, out var ndtRaw))
+                        ndtRaw = "0";
+                    var pipes = int.TryParse(ndtRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var p) ? p : 0;
                     bySlit[slit] = bySlit.TryGetValue(slit, out var existing) ? existing + pipes : pipes;
                 }
             }
@@ -547,20 +559,36 @@ ORDER BY SlitNo";
             try
             {
                 var lines = await File.ReadAllLinesAsync(path, cancellationToken).ConfigureAwait(false);
+                if (lines.Length == 0)
+                    continue;
+
+                var columns = ReconcileCsvParsing.ResolveOutputCsvColumns(lines[0]);
                 var changed = false;
                 for (var i = 1; i < lines.Length; i++)
                 {
-                    var cols = SplitCsvLine(lines[i]);
-                    if (cols.Count < MinColumns)
+                    if (string.IsNullOrWhiteSpace(lines[i]))
                         continue;
 
-                    if (!cols[ColNdtBatchNo].Trim().Equals(batchNoTrimmed, StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    if (!cols[ColSlitNo].Trim().Equals(slitNoTrimmed, StringComparison.OrdinalIgnoreCase))
+                    var cols = ReconcileCsvParsing.SplitCsvLine(lines[i]);
+                    if (cols.Count < columns.MinColumns)
                         continue;
 
-                    cols[ColNdtPipes] = newPipes.ToString(CultureInfo.InvariantCulture);
-                    lines[i] = string.Join(",", cols);
+                    if (!columns.TryGetField(cols, columns.NdtBatchNo, out var batchCell)
+                        || !batchCell.Equals(batchNoTrimmed, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    if (!columns.TryGetField(cols, columns.SlitNo, out var slitCell)
+                        || !ReconcileCsvParsing.SlitKeysMatch(slitCell, slitNoTrimmed))
+                    {
+                        continue;
+                    }
+
+                    lines[i] = InputSlitCsvParsing.ReplaceFieldAtIndex(
+                        lines[i],
+                        columns.NdtPipes,
+                        newPipes.ToString(CultureInfo.InvariantCulture));
                     changed = true;
                 }
 
@@ -572,7 +600,7 @@ ORDER BY SlitNo";
             }
             catch (Exception ex)
             {
-                _logger.LogDebug(ex, "Failed slit update for file {Path}.", path);
+                _logger.LogWarning(ex, "Failed slit reconcile update for file {Path}.", path);
             }
         }
 
@@ -751,15 +779,15 @@ ORDER BY SlitNo";
     {
         return new NdtBundleRecord
         {
-            BundleNo = reader.GetString(0),
-            PoNumber = reader.GetString(1),
-            MillNo = reader.GetInt32(2),
-            TotalNdtPcs = reader.GetInt32(3),
+            BundleNo = reader.IsDBNull(0) ? string.Empty : reader.GetString(0),
+            PoNumber = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+            MillNo = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+            TotalNdtPcs = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
             SlitNo = reader.IsDBNull(4) ? "" : reader.GetString(4),
             SlitStartTime = reader.IsDBNull(5) ? null : reader.GetDateTime(5),
             SlitFinishTime = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
             PrintedAt = reader.IsDBNull(7) ? null : reader.GetDateTime(7),
-            RejectedPipes = reader.GetInt32(8),
+            RejectedPipes = reader.IsDBNull(8) ? 0 : reader.GetInt32(8),
             NdtShortLengthPipe = reader.IsDBNull(9) ? "" : reader.GetString(9),
             RejectedShortLengthPipe = reader.IsDBNull(10) ? "" : reader.GetString(10)
         };
