@@ -31,6 +31,7 @@ namespace NdtBundleService.Controllers;
     private readonly IMillNdtCountReader _millNdtCountReader;
     private readonly IPoEndWorkflowService _poEndWorkflow;
     private readonly INdtBundleRuntimeStateStore _runtimeState;
+    private readonly INdtBundleRepository _bundleRepository;
     private readonly ILogger<TestController> _logger;
     private readonly NdtBundleOptions _options;
 
@@ -49,6 +50,7 @@ namespace NdtBundleService.Controllers;
         IMillNdtCountReader millNdtCountReader,
         IPoEndWorkflowService poEndWorkflow,
         INdtBundleRuntimeStateStore runtimeState,
+        INdtBundleRepository bundleRepository,
         ICurrentPoPlanService? currentPoPlanService = null)
     {
         _bundleTagPrinter = bundleTagPrinter;
@@ -63,6 +65,7 @@ namespace NdtBundleService.Controllers;
         _millNdtCountReader = millNdtCountReader;
         _poEndWorkflow = poEndWorkflow;
         _runtimeState = runtimeState;
+        _bundleRepository = bundleRepository;
         _currentPoPlanService = currentPoPlanService;
         _logger = logger;
         _options = options.Value;
@@ -102,6 +105,12 @@ namespace NdtBundleService.Controllers;
     {
         public string PoNumber { get; set; } = string.Empty;
         public int MillNo { get; set; }
+        public bool DryRun { get; set; } = true;
+    }
+
+    public sealed class PurgePhantomBundlesRequest
+    {
+        public int? MillNo { get; set; }
         public bool DryRun { get; set; } = true;
     }
 
@@ -1153,6 +1162,133 @@ ORDER BY
             ExistingBundleRows = existing.Count,
             DryRun = request.DryRun,
             Mapping = mapping
+        });
+    }
+
+    /// <summary>
+    /// Compares SQL bundle sequence per mill with printed vs placeholder rows. Use to diagnose gaps between
+    /// <c>MAX(Bundle_No)</c> in SQL and the Reconcile bundle dropdown.
+    /// </summary>
+    [HttpGet("bundle-sequence-audit")]
+    public async Task<IActionResult> BundleSequenceAudit(CancellationToken cancellationToken)
+    {
+        var bundles = await _bundleRepository.GetBundlesAsync(cancellationToken).ConfigureAwait(false);
+        var mills = new List<object>();
+
+        for (var mill = 1; mill <= 4; mill++)
+        {
+            var forMill = bundles
+                .Where(b => b.MillNo == mill && NdtBundleSequence.TryParseSequenceForCurrentYear(b.BundleNo, mill, out _))
+                .ToList();
+
+            if (forMill.Count == 0)
+            {
+                mills.Add(new
+                {
+                    MillNo = mill,
+                    SqlBundleCount = 0,
+                    MaxBundleNo = (string?)null,
+                    MaxPrintedBundleNo = (string?)null,
+                    PhantomCount = 0,
+                    PhantomBundleNos = Array.Empty<string>()
+                });
+                continue;
+            }
+
+            var ordered = forMill
+                .OrderBy(b => NdtBundleSequence.TryParseSequenceForCurrentYear(b.BundleNo, mill, out var s) ? s : 0)
+                .ToList();
+
+            var max = ordered[^1];
+            var maxPrinted = ordered.LastOrDefault(b => b.TotalNdtPcs > 0);
+            var phantoms = ordered
+                .Where(b => b.TotalNdtPcs <= 0 && b.PrintedAt is null)
+                .Select(b => b.BundleNo)
+                .ToList();
+
+            mills.Add(new
+            {
+                MillNo = mill,
+                SqlBundleCount = forMill.Count,
+                MaxBundleNo = max.BundleNo,
+                MaxPrintedBundleNo = maxPrinted?.BundleNo,
+                PhantomCount = phantoms.Count,
+                PhantomBundleNos = phantoms
+            });
+        }
+
+        return Ok(new
+        {
+            Message = "Phantom rows have Total_NDT_Pcs=0 and no PrintedAt (often created from output slits without a tag print).",
+            Mills = mills
+        });
+    }
+
+    /// <summary>
+    /// Raises in-memory mill/PO batch sequence floors from printed bundles in SQL/CSV and persists runtime state.
+    /// Run after correcting phantom rows or restoring from backup.
+    /// </summary>
+    [HttpPost("sync-mill-batch-sequences")]
+    public async Task<IActionResult> SyncMillBatchSequences(CancellationToken cancellationToken)
+    {
+        await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
+        await _runtimeState.SyncBatchSequencesFromBundlesAsync(cancellationToken).ConfigureAwait(false);
+        await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
+        return Ok(new { Message = "NDT bundle runtime state synced from SQL/CSV bundle records." });
+    }
+
+    /// <summary>
+    /// Removes placeholder NDT_Bundle rows (zero total, never printed) that have no slit contribution.
+    /// Dry-run by default; set DryRun=false to delete.
+    /// </summary>
+    [HttpPost("purge-phantom-bundles")]
+    public async Task<IActionResult> PurgePhantomBundles([FromBody] PurgePhantomBundlesRequest? request, CancellationToken cancellationToken)
+    {
+        request ??= new PurgePhantomBundlesRequest();
+        if (!_options.UseSqlServerForBundles || string.IsNullOrWhiteSpace(_options.ConnectionString))
+            return BadRequest(new { Message = "Purge requires SQL mode (UseSqlServerForBundles=true and ConnectionString set)." });
+
+        var bundles = await _bundleRepository.GetBundlesAsync(cancellationToken).ConfigureAwait(false);
+        var candidates = bundles
+            .Where(b => b.TotalNdtPcs <= 0 && b.PrintedAt is null)
+            .Where(b => !request.MillNo.HasValue || b.MillNo == request.MillNo.Value)
+            .ToList();
+
+        var toDelete = new List<string>();
+        foreach (var bundle in candidates)
+        {
+            var slits = await _bundleRepository.GetSlitsForBatchAsync(bundle.BundleNo, cancellationToken).ConfigureAwait(false);
+            if (slits.Count == 0 || slits.Sum(s => s.NdtPipes) <= 0)
+                toDelete.Add(bundle.BundleNo);
+        }
+
+        if (!request.DryRun && toDelete.Count > 0)
+        {
+            await using var conn = new SqlConnection(_options.ConnectionString);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            foreach (var batchNo in toDelete)
+            {
+                await using var cmd = new SqlCommand("DELETE FROM dbo.NDT_Bundle WHERE Bundle_No = @BundleNo", conn);
+                cmd.Parameters.AddWithValue("@BundleNo", batchNo);
+                await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await _runtimeState.SyncBatchSequencesFromBundlesAsync(cancellationToken).ConfigureAwait(false);
+            await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        return Ok(new
+        {
+            Message = request.DryRun
+                ? "Dry run completed. No DB changes applied."
+                : $"Deleted {toDelete.Count} phantom bundle row(s) from NDT_Bundle.",
+            DryRun = request.DryRun,
+            MillNo = request.MillNo,
+            CandidateCount = candidates.Count,
+            DeletedOrWouldDelete = toDelete,
+            NextStep = request.DryRun && toDelete.Count > 0
+                ? "Re-run with DryRun=false, then POST /api/Test/sync-mill-batch-sequences."
+                : (string?)null
         });
     }
 

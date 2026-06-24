@@ -91,6 +91,12 @@ public class NdtBundleOptions
     /// </summary>
     public Dictionary<string, string> InitialMillBatchNumbers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// When true (default), startup and manual sequence sync ignore placeholder <c>NDT_Bundle</c> rows
+    /// (<c>Total_NDT_Pcs = 0</c>, never printed) so restarts continue from the last real tag print.
+    /// </summary>
+    public bool SyncRuntimeStateFromPrintedBundlesOnly { get; set; } = true;
+
     /// <summary>When true, writes <c>NDT_Bundle_{batchNo}.csv</c> to <see cref="BundleSummaryOutputFolder"/>. When false, bundle summary CSV is skipped (ZPL may still be written on print).</summary>
     public bool EnableBundleSummaryCsvFiles { get; set; } = true;
 

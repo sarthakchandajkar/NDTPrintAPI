@@ -31,7 +31,30 @@ public sealed class NdtBundleEnginePoEndTests
 
         Assert.Single(closed);
         Assert.Equal(12, closed[0].Pcs);
-        Assert.Equal(12, runtime.GetRunningTotal("PO-100", 1));
+        Assert.Equal(0, runtime.GetRunningTotal("PO-100", 1));
+    }
+
+    [Fact]
+    public async Task PoEndWorkflow_AdvanceOnPoEnd_DoesNotBurnSequenceAfterHandlePoEnd()
+    {
+        var formation = new FormationChartProviderStub(new Dictionary<string, int> { ["Default"] = 20 });
+        var pipeSize = new PipeSizeProviderStub(new Dictionary<string, string>());
+        var runtime = new InMemoryRuntimeStateStore();
+        var engine = new NdtBundleEngine(formation, pipeSize, runtime, NullLogger<NdtBundleEngine>.Instance);
+
+        await runtime.EnsureInitializedAsync(CancellationToken.None);
+        runtime.ApplySlitContribution("PO-100", 1, ndtPipes: 12, threshold: 20, out _, out _);
+
+        await engine.HandlePoEndAsync(
+            "PO-100",
+            1,
+            (_, _, _) => Task.CompletedTask,
+            CancellationToken.None);
+
+        runtime.AdvanceOnPoEnd("PO-100", 1, threshold: 20);
+
+        Assert.Equal(1, runtime.GetEngineBatchNo("PO-100", 1));
+        Assert.Equal(1, runtime.GetBatchOffset("PO-100", 1));
     }
 
     [Fact]
@@ -123,6 +146,10 @@ public sealed class NdtBundleEnginePoEndTests
 
         public int GetRunningTotal(string poNumber, int millNo) => Slot(poNumber, millNo).RunningTotal;
 
+        public void ClearRunningTotal(string poNumber, int millNo) => Slot(poNumber, millNo).RunningTotal = 0;
+
+        public Task SyncBatchSequencesFromBundlesAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
         public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int batchNumberForRow, out int totalSoFar)
         {
             var slot = Slot(poNumber, millNo);
@@ -151,16 +178,9 @@ public sealed class NdtBundleEnginePoEndTests
         public void AdvanceOnPoEnd(string poNumber, int millNo, int threshold)
         {
             var slot = Slot(poNumber, millNo);
-            if (slot.RunningTotal <= 0)
-            {
-                slot.RunningTotal = 0;
-                return;
-            }
-
-            var sequence = Math.Max(1, ((slot.RunningTotal - 1) / threshold) + 1);
-            slot.BatchOffset += sequence;
             slot.RunningTotal = 0;
-            slot.EngineBatchNo = slot.BatchOffset;
+            if (slot.BatchOffset < slot.EngineBatchNo)
+                slot.BatchOffset = slot.EngineBatchNo;
         }
 
         public int GetEngineBatchNo(string poNumber, int millNo) => Slot(poNumber, millNo).EngineBatchNo;

@@ -388,6 +388,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                                 pipeSize)
                             .ConfigureAwait(false);
 
+                        int? closedPrintedBatch = null;
                         if (bundleRecord.NdtPipes > 0)
                         {
                             try
@@ -399,6 +400,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                                         if (totalNdtPcs <= 0)
                                             return;
 
+                                        closedPrintedBatch = batchNo;
                                         try
                                         {
                                             await _outputWriter.WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken).ConfigureAwait(false);
@@ -421,8 +423,9 @@ public sealed class SlitMonitoringWorker : BackgroundService
                             }
                         }
 
-                        ndtBatchNoFormatted = bn > 0
-                            ? FormatNdtBatchNo(bn, effectiveRecord.MillNo)
+                        var batchForOutput = closedPrintedBatch ?? bn;
+                        ndtBatchNoFormatted = batchForOutput > 0
+                            ? FormatNdtBatchNo(batchForOutput, effectiveRecord.MillNo)
                             : string.Empty;
                     }
 

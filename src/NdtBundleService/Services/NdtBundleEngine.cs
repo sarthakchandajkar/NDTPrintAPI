@@ -143,6 +143,7 @@ public sealed class NdtBundleEngine : IBundleEngine
         }
 
         _runtimeState.SetSizeCounts(poNumber, millNo, sizeCounts);
+        _runtimeState.ClearRunningTotal(poNumber, millNo);
         await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
     }
 

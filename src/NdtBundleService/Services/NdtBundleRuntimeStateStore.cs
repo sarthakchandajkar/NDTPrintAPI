@@ -17,12 +17,17 @@ public interface INdtBundleRuntimeStateStore
 
     int GetRunningTotal(string poNumber, int millNo);
 
+    void ClearRunningTotal(string poNumber, int millNo);
+
     void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int batchNumberForRow, out int totalSoFar);
 
     /// <summary>Increments completed-bundle count and returns the sequence used for the closed bundle (print + summary CSV).</summary>
     int CloseBundle(string poNumber, int millNo, int closedTotalPcs, int threshold);
 
     void AdvanceOnPoEnd(string poNumber, int millNo, int threshold);
+
+    /// <summary>Raises PO/mill and mill-wide sequence counters to match printed bundles in SQL/CSV.</summary>
+    Task SyncBatchSequencesFromBundlesAsync(CancellationToken cancellationToken);
 
     int GetEngineBatchNo(string poNumber, int millNo);
 
@@ -99,9 +104,12 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
 
             lock (_stateLock)
             {
-                RebuildMillMaxFromSlots();
+                if (!Opt.SyncRuntimeStateFromPrintedBundlesOnly)
+                    RebuildMillMaxFromSlots();
                 ApplyInitialMillBatchNumberSeeds();
                 SyncAllSlotsToMillFloors();
+                if (Opt.SyncRuntimeStateFromPrintedBundlesOnly)
+                    ClampIdleSlotsToMillFloor();
                 _logger.LogInformation(
                     "NDT batch sequence floors after initialization: {MillFloors}. Next bundle per mill is floor + 1 when a new bundle closes.",
                     FormatMillFloorsSnapshot());
@@ -131,6 +139,15 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         lock (_stateLock)
             return GetSlot(poNumber, millNo).RunningTotal;
     }
+
+    public void ClearRunningTotal(string poNumber, int millNo)
+    {
+        lock (_stateLock)
+            GetSlot(poNumber, millNo).RunningTotal = 0;
+    }
+
+    public Task SyncBatchSequencesFromBundlesAsync(CancellationToken cancellationToken) =>
+        ApplyMaxSequencesFromBundlesAsync(mergeIntoExisting: true, cancellationToken);
 
     public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int batchNumberForRow, out int totalSoFar)
     {
@@ -183,18 +200,12 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         {
             var slot = GetSlot(poNumber, millNo);
             TouchSlotActivity(slot);
-            var total = slot.RunningTotal;
-            if (total <= 0)
-            {
-                slot.RunningTotal = 0;
-                return;
-            }
-
-            var offset = slot.BatchOffset;
-            var sequence = Math.Max(1, ((total - 1) / threshold) + 1);
-            slot.BatchOffset = offset + sequence;
+            // HandlePoEndAsync already closes partials via CloseBundle (print path). Only clear
+            // bookkeeping and align the output-column offset with the engine sequence — do not burn
+            // extra bundle numbers without a tag print.
             slot.RunningTotal = 0;
-            slot.EngineBatchNo = slot.BatchOffset;
+            if (slot.BatchOffset < slot.EngineBatchNo)
+                slot.BatchOffset = slot.EngineBatchNo;
             RaiseMillMaxSequence(millNo, slot.BatchOffset);
         }
     }
@@ -363,6 +374,13 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
     private async Task ApplyMaxSequencesFromBundlesAsync(bool mergeIntoExisting, CancellationToken cancellationToken)
     {
         var bundles = await _bundleRepository.GetBundlesAsync(cancellationToken).ConfigureAwait(false);
+        if (Opt.SyncRuntimeStateFromPrintedBundlesOnly)
+        {
+            bundles = bundles
+                .Where(b => b.TotalNdtPcs > 0)
+                .ToList();
+        }
+
         if (bundles.Count == 0)
         {
             if (!mergeIntoExisting)
@@ -389,17 +407,31 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         }
 
         var raised = 0;
+        var printedOnly = Opt.SyncRuntimeStateFromPrintedBundlesOnly;
         lock (_stateLock)
         {
             foreach (var (mill, maxSeq) in byMill)
-                RaiseMillMaxSequence(mill, maxSeq);
+            {
+                if (printedOnly && mergeIntoExisting)
+                    SetMillMaxSequence(mill, maxSeq);
+                else
+                    RaiseMillMaxSequence(mill, maxSeq);
+            }
 
             foreach (var (key, maxSeq) in byKey)
             {
                 var (po, mill) = ParseKey(key);
                 var slot = GetSlotWithoutMillFloorSync(po, mill);
-                if (mergeIntoExisting && maxSeq <= slot.BatchOffset && maxSeq <= slot.EngineBatchNo)
+                if (mergeIntoExisting && !printedOnly && maxSeq <= slot.BatchOffset && maxSeq <= slot.EngineBatchNo)
                     continue;
+
+                if (printedOnly && mergeIntoExisting && IsIdleSlot(slot))
+                {
+                    slot.BatchOffset = maxSeq;
+                    slot.EngineBatchNo = maxSeq;
+                    raised++;
+                    continue;
+                }
 
                 if (maxSeq > slot.BatchOffset)
                     slot.BatchOffset = maxSeq;
@@ -412,8 +444,9 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         if (mergeIntoExisting && raised > 0)
         {
             _logger.LogWarning(
-                "Raised NDT bundle sequence for {Count} PO/mill slot(s) to match printed bundles in SQL/CSV (state file was behind).",
-                raised);
+                "Raised NDT bundle sequence for {Count} PO/mill slot(s) to match {Source} bundles in SQL/CSV (state file was behind).",
+                raised,
+                printedOnly ? "printed" : "printed/placeholder");
         }
         else if (!mergeIntoExisting)
         {
@@ -482,6 +515,27 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
             SyncSlotToMillFloor(slot);
     }
 
+    private static bool IsIdleSlot(PersistedMillSlot slot) =>
+        slot.RunningTotal <= 0 && !slot.SizeCounts.Values.Any(v => v > 0);
+
+    private void ClampIdleSlotsToMillFloor()
+    {
+        foreach (var slot in _root.Mills.Values)
+        {
+            if (!IsIdleSlot(slot))
+                continue;
+
+            var floor = GetMillMaxSequence(slot.MillNo);
+            if (floor <= 0)
+                continue;
+
+            if (slot.BatchOffset > floor)
+                slot.BatchOffset = floor;
+            if (slot.EngineBatchNo > floor)
+                slot.EngineBatchNo = floor;
+        }
+    }
+
     private void SyncSlotToMillFloor(PersistedMillSlot slot)
     {
         var floor = GetMillMaxSequence(slot.MillNo);
@@ -505,6 +559,13 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
 
     private void RaiseMillMaxSequence(int millNo, int sequence) =>
         NdtBundleRuntimeStateLogic.RaiseMillMaxSequence(_root.MillMaxSequence, millNo, sequence);
+
+    private void SetMillMaxSequence(int millNo, int sequence)
+    {
+        var key = millNo.ToString(CultureInfo.InvariantCulture);
+        if (sequence > 0)
+            _root.MillMaxSequence[key] = sequence;
+    }
 
     private string FormatMillFloorsSnapshot()
     {

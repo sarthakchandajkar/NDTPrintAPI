@@ -56,12 +56,16 @@ public sealed class ReconcileController : ControllerBase
     /// List all NDT bundles (from database or from output CSV folder). Used for dropdown in Reconcile UI.
     /// </summary>
     [HttpGet("bundles")]
-    public async Task<IActionResult> GetBundles(CancellationToken cancellationToken)
+    public async Task<IActionResult> GetBundles(
+        [FromQuery] bool includeOpenPartials = false,
+        CancellationToken cancellationToken = default)
     {
         try
         {
             var list = await _bundleRepository.GetBundlesAsync(CancellationToken.None).ConfigureAwait(false);
-            var filtered = await ExcludeOpenPartialLatestBatchesAsync(list, CancellationToken.None).ConfigureAwait(false);
+            var filtered = includeOpenPartials
+                ? SortBundlesNewestFirst(list)
+                : await ExcludeOpenPartialLatestBatchesAsync(list, CancellationToken.None).ConfigureAwait(false);
             return Ok(filtered.Select(b => new
             {
                 b.BundleNo,
