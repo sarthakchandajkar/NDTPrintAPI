@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using NdtBundleService.Models;
+using Serilog.Context;
 
 namespace NdtBundleService.Services;
 
@@ -94,7 +95,21 @@ public sealed class NdtBundleEngine : IBundleEngine
         string poNumber,
         int millNo,
         Func<InputSlitRecord, int, int, Task> onBundleClosedAsync,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Guid? correlationId = null)
+    {
+        using (correlationId is { } id ? LogContext.PushProperty("CorrelationId", id) : null)
+        {
+            await HandlePoEndCoreAsync(poNumber, millNo, onBundleClosedAsync, cancellationToken, correlationId).ConfigureAwait(false);
+        }
+    }
+
+    private async Task HandlePoEndCoreAsync(
+        string poNumber,
+        int millNo,
+        Func<InputSlitRecord, int, int, Task> onBundleClosedAsync,
+        CancellationToken cancellationToken,
+        Guid? correlationId)
     {
         await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
 
@@ -118,11 +133,12 @@ public sealed class NdtBundleEngine : IBundleEngine
             var batchNo = _runtimeState.CloseBundle(poNumber, millNo, count, sizeThreshold);
             sizeCounts[sizeKey] = 0;
             _logger.LogInformation(
-                "Closing partial size-based bundle {BatchNo} for PO {PO} Mill {Mill} Size {Size} due to PO end.",
+                "Closing partial size-based bundle {BatchNo} for PO {PO} Mill {Mill} Size {Size} due to PO end. CorrelationId {CorrelationId}",
                 batchNo,
                 poNumber,
                 millNo,
-                sizeKey);
+                sizeKey,
+                correlationId);
             await onBundleClosedAsync(contextRecord, batchNo, count).ConfigureAwait(false);
         }
 
@@ -133,11 +149,12 @@ public sealed class NdtBundleEngine : IBundleEngine
             {
                 var batchNo = _runtimeState.CloseBundle(poNumber, millNo, runningTotal, sizeThreshold);
                 _logger.LogInformation(
-                    "Closing partial running-total bundle {BatchNo} for PO {PO} Mill {Mill} ({Total} pcs) due to PO end.",
+                    "Closing partial running-total bundle {BatchNo} for PO {PO} Mill {Mill} ({Total} pcs) due to PO end. CorrelationId {CorrelationId}",
                     batchNo,
                     poNumber,
                     millNo,
-                    runningTotal);
+                    runningTotal,
+                    correlationId);
                 await onBundleClosedAsync(contextRecord, batchNo, runningTotal).ConfigureAwait(false);
             }
         }

@@ -2,6 +2,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
+using NdtBundleService.Services.PlcHandshake.PlcPoEnd;
 
 namespace NdtBundleService.Services.PlcHandshake;
 
@@ -18,6 +19,7 @@ public sealed class PlcHandshakeWorker : BackgroundService
     private readonly IActivePoPerMillService _activePoPerMill;
     private readonly IMillHooterPlcValuesService _hooterValues;
     private readonly IWipBundleRunningPoProvider _wipRunningPo;
+    private readonly PlcPoEndQueue _plcPoEndQueue;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<PlcHandshakeWorker> _logger;
 
@@ -33,6 +35,7 @@ public sealed class PlcHandshakeWorker : BackgroundService
         IActivePoPerMillService activePoPerMill,
         IMillHooterPlcValuesService hooterValues,
         IWipBundleRunningPoProvider wipRunningPo,
+        PlcPoEndQueue plcPoEndQueue,
         ILoggerFactory loggerFactory,
         ILogger<PlcHandshakeWorker> logger)
     {
@@ -44,6 +47,7 @@ public sealed class PlcHandshakeWorker : BackgroundService
         _activePoPerMill = activePoPerMill;
         _hooterValues = hooterValues;
         _wipRunningPo = wipRunningPo;
+        _plcPoEndQueue = plcPoEndQueue;
         _loggerFactory = loggerFactory;
         _logger = logger;
     }
@@ -70,22 +74,31 @@ public sealed class PlcHandshakeWorker : BackgroundService
         if (handshake.TelemetryOnly)
         {
             _logger.LogInformation(
-                "PlcHandshakeWorker starting {Count} mill telemetry loop(s) (default poll {Poll}ms) — OK/NOK/NDT counts, line running, and hooter when configured; no PO-change handshake.",
+                "PlcHandshakeWorker starting {Count} mill loop(s) (default poll {Poll}ms) — global TelemetryOnly: all mills S7 read-only.",
                 mills.Count,
                 handshake.PollIntervalMs);
         }
         else
         {
             _logger.LogInformation(
-                "PlcHandshakeWorker starting {Count} mill handshake loop(s) (default poll {Poll}ms).",
+                "PlcHandshakeWorker starting {Count} mill loop(s) (default poll {Poll}ms).",
                 mills.Count,
                 handshake.PollIntervalMs);
         }
 
-        if (_options.Value.FileBasedPoEnd?.Enabled == true && !handshake.TelemetryOnly)
+        foreach (var mill in mills)
         {
+            var millNo = mill.ResolveMillNo();
+            if (millNo is < 1 or > 4)
+                continue;
+
+            var source = mill.ResolvePoEndSource(_options.Value);
             _logger.LogInformation(
-                "FileBasedPoEnd is enabled — PLC PO-change triggers are ignored; PO end uses TM Bundle WIP filenames.");
+                "{MillName} (Mill {MillNo}): PoEndSource={PoEndSource} — {Description}.",
+                mill.Name,
+                millNo,
+                MillPoEndSourceResolver.ToConfigValue(source),
+                MillPoEndSourceResolver.Describe(source));
         }
 
         foreach (var mill in mills)
@@ -95,6 +108,7 @@ public sealed class PlcHandshakeWorker : BackgroundService
                 handshake,
                 _options.Value,
                 _poChangeHandler,
+                _plcPoEndQueue,
                 _statusRegistry,
                 _connectionHealth,
                 _activePoPerMill,

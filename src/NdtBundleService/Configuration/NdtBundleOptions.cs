@@ -138,7 +138,10 @@ public class NdtBundleOptions
     public string NdtTagPrinterLocalBindAddress { get; set; } = string.Empty;
 
     /// <summary>When false, SQL Server is never used for bundles (reads/writes use CSV folders only), even if <see cref="ConnectionString"/> is set (e.g. env override).</summary>
-    public bool UseSqlServerForBundles { get; set; } = true;
+    public bool UseSqlServerForBundles { get; set; }
+
+    /// <summary>Default age threshold in minutes for <see cref="INdtBundleRepository.GetStuckPrintsAsync"/>.</summary>
+    public int StuckPrintThresholdMinutes { get; set; } = 10;
 
     /// <summary>
     /// When true and <see cref="UseSqlServerForBundles"/> is enabled, reconcile/printed-tags list endpoints read bundles and slits from SQL first.

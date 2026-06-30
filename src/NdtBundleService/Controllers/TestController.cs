@@ -180,7 +180,7 @@ namespace NdtBundleService.Controllers;
             return BadRequest(new { Message = "MillNo must be between 1 and 4." });
 
         var po = InputSlitCsvParsing.NormalizePo(request.PoNumber.Trim());
-        var advancePlan = ShouldAdvancePoPlanOnPoEnd();
+        var advancePlan = ShouldAdvancePoPlanOnPoEnd(request.MillNo);
 
         _logger.LogInformation("Simulating PO end for PO {PO} Mill {Mill} (advance PO plan file: {Advance})", po, request.MillNo, advancePlan);
 
@@ -288,17 +288,22 @@ namespace NdtBundleService.Controllers;
         });
     }
 
-    private bool ShouldAdvancePoPlanOnPoEnd()
+    private bool ShouldAdvancePoPlanOnPoEnd(int millNo)
     {
         if (_currentPoPlanService is null)
             return false;
 
         var o = _options;
-        if (o.PlcHandshake?.Enabled == true)
+        var source = MillPoEndSourceResolver.ForMill(millNo, o);
+
+        if (source == MillPoEndSource.Plc && o.PlcHandshake?.Enabled == true)
             return o.PlcHandshake.AdvancePoPlanFileOnPoEnd;
 
-        if (o.FileBasedPoEnd?.Enabled == true)
-            return o.FileBasedPoEnd.AdvancePoPlanFileOnPoEnd;
+        if (source == MillPoEndSource.TcpOpen && o.PlcHandshake?.Enabled == true)
+            return o.PlcHandshake.AdvancePoPlanFileOnPoEnd;
+
+        if (source == MillPoEndSource.File)
+            return (o.FileBasedPoEnd ?? new FileBasedPoEndOptions()).AdvancePoPlanFileOnPoEnd;
 
         return o.PlcPoEnd?.AdvancePoPlanFileOnPoEnd == true;
     }

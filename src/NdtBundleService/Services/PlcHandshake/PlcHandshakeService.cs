@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using NdtBundleService.Configuration;
+using NdtBundleService.Services.PlcHandshake.PlcPoEnd;
 using S7.Net;
 using S7.Net.Types;
 
@@ -17,6 +18,7 @@ public sealed class PlcHandshakeService
     private readonly PlcHandshakeOptions _options;
     private readonly NdtBundleOptions _bundleOptions;
     private readonly IPoChangeHandler _poChangeHandler;
+    private readonly PlcPoEndQueue _plcPoEndQueue;
     private readonly PlcHandshakeStatusRegistry _statusRegistry;
     private readonly PlcConnectionHealth _connectionHealth;
     private readonly IActivePoPerMillService _activePoPerMill;
@@ -36,6 +38,8 @@ public sealed class PlcHandshakeService
     private bool _poChangePulseHandled;
     private int _consecutiveTriggerFalsePolls;
     private bool _handshakeInProgress;
+    private bool _ackAwaitingTriggerClear;
+    private System.DateTime _ackClearDeadlineUtc;
     private volatile bool _plcConnectionEnabled;
     private bool _settingsTestInProgress;
     private bool _suppressNdtUntilPoChange;
@@ -57,6 +61,7 @@ public sealed class PlcHandshakeService
         PlcHandshakeOptions options,
         NdtBundleOptions bundleOptions,
         IPoChangeHandler poChangeHandler,
+        PlcPoEndQueue plcPoEndQueue,
         PlcHandshakeStatusRegistry statusRegistry,
         PlcConnectionHealth connectionHealth,
         IActivePoPerMillService activePoPerMill,
@@ -68,6 +73,7 @@ public sealed class PlcHandshakeService
         _options = options;
         _bundleOptions = bundleOptions;
         _poChangeHandler = poChangeHandler;
+        _plcPoEndQueue = plcPoEndQueue;
         _statusRegistry = statusRegistry;
         _connectionHealth = connectionHealth;
         _activePoPerMill = activePoPerMill;
@@ -87,8 +93,14 @@ public sealed class PlcHandshakeService
         });
     }
 
-    private bool IsFileBasedPoEndEnabled() =>
-        _bundleOptions.FileBasedPoEnd?.Enabled == true;
+    private bool IsS7PoEndHandshakeDisabled() =>
+        _options.TelemetryOnly || !_mill.UsesPlcHandshakeForPoEnd(_bundleOptions);
+
+    private string NonPlcPoEndIdleState()
+    {
+        var source = _mill.ResolvePoEndSource(_bundleOptions);
+        return $"Idle (PoEndSource={MillPoEndSourceResolver.ToConfigValue(source)})";
+    }
 
     public bool IsPlcConnectionEnabled => _plcConnectionEnabled;
 
@@ -162,12 +174,14 @@ public sealed class PlcHandshakeService
     public async Task RunAsync(CancellationToken stoppingToken)
     {
         var millNo = _mill.ResolveMillNo();
-        if (_options.TelemetryOnly)
+        if (IsS7PoEndHandshakeDisabled())
         {
+            var source = _mill.ResolvePoEndSource(_bundleOptions);
             _logger.LogInformation(
-                "PlcHandshakeService starting for {MillName} at {Host} (telemetry-only: OK/NOK/NDT + line running{Hooter}, poll {Poll}ms).",
+                "PlcHandshakeService starting for {MillName} at {Host} (S7 telemetry-only: PoEndSource={PoEndSource}, OK/NOK/NDT + line running{Hooter}, poll {Poll}ms).",
                 _mill.Name,
                 _mill.IpAddress,
+                MillPoEndSourceResolver.ToConfigValue(source),
                 _mill.Hooter?.Enabled == true ? " + hooter" : string.Empty,
                 ResolvePollIntervalMs());
         }
@@ -223,7 +237,7 @@ public sealed class PlcHandshakeService
                     continue;
                 }
 
-                if (_options.TelemetryOnly)
+                if (IsS7PoEndHandshakeDisabled())
                 {
                     UpdateStatus(millNo, s =>
                     {
@@ -259,6 +273,9 @@ public sealed class PlcHandshakeService
 
                 _connectionHealth.RecordModbusPoll(true, _statusRegistry.AllConnected());
 
+                if (_ackAwaitingTriggerClear)
+                    TryCompleteMesAckSequence(millNo, trigger);
+
                 if (!_primed)
                 {
                     if (!trigger)
@@ -273,18 +290,19 @@ public sealed class PlcHandshakeService
                     }
                     else if (_options.RecoverLatchedTriggerAtStartup && !_startupRecoveryAttempted)
                     {
-                        if (IsFileBasedPoEndEnabled())
+                        if (IsS7PoEndHandshakeDisabled())
                         {
                             _startupRecoveryAttempted = true;
                             _loggedStartupTriggerWait = false;
                             _prevTriggerActive = trigger;
                             _poChangePulseHandled = true;
                             ArmAfterTriggerClear(isStartup: false);
-                            SetState(millNo, "Idle (file-based PO end)");
+                            SetState(millNo, NonPlcPoEndIdleState());
                             _logger.LogInformation(
-                                "{MillName}: latched trigger {Trigger} at startup ignored — PO end uses TM Bundle WIP files.",
+                                "{MillName}: latched trigger {Trigger} at startup ignored — PoEndSource={PoEndSource}.",
                                 _mill.Name,
-                                _mill.TriggerAddress);
+                                _mill.TriggerAddress,
+                                MillPoEndSourceResolver.ToConfigValue(_mill.ResolvePoEndSource(_bundleOptions)));
                         }
                         else
                         {
@@ -326,13 +344,14 @@ public sealed class PlcHandshakeService
                     !_settingsTestInProgress)
                 {
                     _poChangePulseHandled = true;
-                    if (IsFileBasedPoEndEnabled())
+                    if (IsS7PoEndHandshakeDisabled())
                     {
-                        SetState(millNo, "Idle (file-based PO end)");
+                        SetState(millNo, NonPlcPoEndIdleState());
                         _logger.LogInformation(
-                            "{MillName}: PLC PO-change trigger {Trigger} ignored — PO end uses TM Bundle WIP filename changes.",
+                            "{MillName}: PLC PO-change trigger {Trigger} ignored — PoEndSource={PoEndSource}.",
                             _mill.Name,
-                            _mill.TriggerAddress);
+                            _mill.TriggerAddress,
+                            MillPoEndSourceResolver.ToConfigValue(_mill.ResolvePoEndSource(_bundleOptions)));
                     }
                     else
                     {
@@ -341,7 +360,9 @@ public sealed class PlcHandshakeService
                 }
                 else if (!_handshakeInProgress && !_settingsTestInProgress)
                 {
-                    if (trigger && _poChangePulseHandled)
+                    if (_ackAwaitingTriggerClear)
+                        SetState(millNo, "WaitingTriggerClear");
+                    else if (trigger && _poChangePulseHandled)
                         SetState(millNo, "Idle (pulse handled, waiting for trigger clear)");
                     else if (trigger && !_prevTriggerActive && !rearmedBeforePoll)
                         SetState(millNo, "Idle (re-arming after last handshake)");
@@ -451,7 +472,7 @@ public sealed class PlcHandshakeService
         UpdateStatus(millNo, s => s.AckActive = false);
     }
 
-    private async Task RunHandshakeCoreAsync(int millNo, CancellationToken stoppingToken, bool startupRecovery = false)
+    private Task RunHandshakeCoreAsync(int millNo, CancellationToken stoppingToken, bool startupRecovery = false)
     {
         SetState(millNo, startupRecovery ? "StartupRecovery" : "ProcessingPoChange");
 
@@ -472,15 +493,10 @@ public sealed class PlcHandshakeService
                     _mill.TriggerAddress);
             }
         }
-        else
-        {
-            _logger.LogInformation(
-                "{MillName}: PO change rising edge on {Trigger} — handshake started.",
-                _mill.Name,
-                _mill.TriggerAddress);
-        }
 
         var runPoEndWorkflow = !startupRecovery || _options.RunPoEndWorkflowOnStartupRecovery;
+        var correlationId = Guid.NewGuid();
+        var detectedAt = DateTimeOffset.UtcNow;
 
         var poIdVal = 0;
         var ndtFinal = 0;
@@ -504,56 +520,52 @@ public sealed class PlcHandshakeService
                 {
                     PoId = poIdVal,
                     NdtCountFinal = ndtFinal,
-                    TimestampUtc = DateTimeOffset.UtcNow
+                    TimestampUtc = detectedAt
                 };
                 s.NdtCount = 0;
             });
 
-            try
-            {
-                await _poChangeHandler.HandlePoChangeAsync(_mill, stoppingToken).ConfigureAwait(false);
-                UpdateStatus(millNo, s => s.LastPoChangeUtc = DateTimeOffset.UtcNow);
-                await SyncHooterMemoryAfterPoEndAsync(millNo, stoppingToken).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "{MillName}: PO change handler failed; continuing handshake ack sequence.", _mill.Name);
-            }
+            PlcPoEndEdgeProcessor.ProcessDecoupledEdge(
+                new PlcPoEndEdgeProcessor.EdgeProcessInput(
+                    millNo,
+                    _mill.Name,
+                    poIdVal,
+                    ndtFinal,
+                    correlationId,
+                    detectedAt,
+                    startupRecovery,
+                    _mill.TriggerAddress),
+                beginAckTrue: () => BeginMesAckSequence(millNo),
+                tryEnqueue: _plcPoEndQueue.TryEnqueue,
+                _logger);
+        }
+        else
+        {
+            BeginMesAckSequence(millNo);
         }
 
-        await RunMesAckSequenceAsync(millNo, stoppingToken).ConfigureAwait(false);
-
-        SetState(millNo, "Idle");
+        return Task.CompletedTask;
     }
 
-    private async Task RunMesAckSequenceAsync(int millNo, CancellationToken stoppingToken)
+    private void BeginMesAckSequence(int millNo)
     {
         SetState(millNo, "AckSent");
         WriteMerkerBit(_mill.AckByte, _mill.AckBit, true);
         UpdateStatus(millNo, s => s.AckActive = true);
-
-        _logger.LogInformation(
-            "{MillName}: wrote ack {Ack}=TRUE.",
-            _mill.Name,
-            _mill.AckAddress);
-
+        _ackAwaitingTriggerClear = true;
+        _ackClearDeadlineUtc = System.DateTime.UtcNow.AddMilliseconds(Math.Max(1000, _mill.TriggerClearTimeoutMs));
         SetState(millNo, "WaitingTriggerClear");
-        var clearDeadline = System.DateTime.UtcNow.AddMilliseconds(Math.Max(1000, _mill.TriggerClearTimeoutMs));
-        while (!stoppingToken.IsCancellationRequested && System.DateTime.UtcNow < clearDeadline)
-        {
-            if (!ReadMerkerBit(_mill.TriggerByte, _mill.TriggerBit))
-            {
-                _logger.LogInformation(
-                    "{MillName}: trigger {Trigger} cleared by PLC.",
-                    _mill.Name,
-                    _mill.TriggerAddress);
-                break;
-            }
+    }
 
-            await Task.Delay(ResolvePollIntervalMs(), stoppingToken).ConfigureAwait(false);
-        }
+    private void TryCompleteMesAckSequence(int millNo, bool trigger)
+    {
+        if (!_ackAwaitingTriggerClear)
+            return;
 
-        if (ReadMerkerBit(_mill.TriggerByte, _mill.TriggerBit))
+        if (trigger && System.DateTime.UtcNow < _ackClearDeadlineUtc)
+            return;
+
+        if (trigger)
         {
             _logger.LogWarning(
                 "{MillName}: trigger {Trigger} still TRUE after {Timeout}ms; resetting ack anyway.",
@@ -561,19 +573,29 @@ public sealed class PlcHandshakeService
                 _mill.TriggerAddress,
                 _mill.TriggerClearTimeoutMs);
         }
+        else
+        {
+            _logger.LogInformation(
+                "{MillName}: trigger {Trigger} cleared by PLC.",
+                _mill.Name,
+                _mill.TriggerAddress);
+        }
 
         SetState(millNo, "AckReset");
         WriteMerkerBit(_mill.AckByte, _mill.AckBit, false);
+        _ackAwaitingTriggerClear = false;
         UpdateStatus(millNo, s =>
         {
             s.AckActive = false;
-            s.TriggerActive = ReadMerkerBit(_mill.TriggerByte, _mill.TriggerBit);
+            s.TriggerActive = trigger;
         });
 
         _logger.LogInformation(
             "{MillName}: wrote ack {Ack}=FALSE — handshake complete.",
             _mill.Name,
             _mill.AckAddress);
+
+        SetState(millNo, "Idle");
     }
 
     private void UpdateTriggerEdgeTracking(bool trigger)
@@ -622,6 +644,7 @@ public sealed class PlcHandshakeService
         _prevTriggerActive = false;
         _poChangePulseHandled = false;
         _consecutiveTriggerFalsePolls = 0;
+        _ackAwaitingTriggerClear = false;
     }
 
     private async Task<bool> EnsureConnectedAsync(CancellationToken cancellationToken)
@@ -734,7 +757,7 @@ public sealed class PlcHandshakeService
             var slitId = ReadDbInt(_options.SlitIdByteOffset);
 
             var ndtDisplay = ndtRaw;
-            if (!_options.TelemetryOnly && _suppressNdtUntilPoChange)
+            if (!IsS7PoEndHandshakeDisabled() && _suppressNdtUntilPoChange)
             {
                 if (poId != _poIdWhenSuppressed)
                     _suppressNdtUntilPoChange = false;
@@ -825,7 +848,7 @@ public sealed class PlcHandshakeService
         });
     }
 
-    private async Task SyncHooterMemoryAfterPoEndAsync(int millNo, CancellationToken cancellationToken)
+    internal async Task SyncHooterMemoryAfterPoEndAsync(int millNo, CancellationToken cancellationToken)
     {
         var hooterCfg = _mill.Hooter;
         if (hooterCfg?.Enabled != true || _hooterValues == null)
@@ -1188,15 +1211,19 @@ public sealed class PlcHandshakeService
         var millNo = _mill.ResolveMillNo();
         var steps = new List<string>();
 
-        if (_options.TelemetryOnly)
+        if (IsS7PoEndHandshakeDisabled())
         {
+            var source = _mill.ResolvePoEndSource(_bundleOptions);
+            var reason = _options.TelemetryOnly
+                ? "PlcHandshake.TelemetryOnly is true (global kill-switch)."
+                : $"Mill PoEndSource is {MillPoEndSourceResolver.ToConfigValue(source)} (not Plc).";
             return new PlcPoChangeTestResult
             {
                 Success = false,
                 MillNo = millNo,
                 MillName = _mill.Name,
                 Message =
-                    "PO-change handshake is disabled (PlcHandshake.TelemetryOnly). " +
+                    $"PO-change handshake is disabled for this mill ({reason}) " +
                     "Use POST /api/Test/po-end for workflow-only simulation.",
                 Steps = steps
             };

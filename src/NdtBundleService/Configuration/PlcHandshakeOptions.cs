@@ -11,10 +11,8 @@ public sealed class PlcHandshakeOptions
     public bool Enabled { get; set; }
 
     /// <summary>
-    /// When true, connect to each mill PLC only to read OK/NOK/NDT counts and the line-running bit.
-    /// PO-change trigger/ack handshake, startup recovery, and MES ack writes are disabled.
-    /// Per-mill <see cref="MillConfig.Hooter"/> pulses and MW threshold/accumulated sync still run when configured.
-    /// Use with <see cref="NdtBundleOptions.FileBasedPoEnd"/> for PO end from WIP files.
+    /// When true, all mills use S7 read-only (counts, line running, hooter) — no PO-change handshake on any mill.
+    /// Per-mill <see cref="MillConfig.PoEndSource"/> = <c>File</c> or <c>TcpOpen</c> also skips handshake for that mill.
     /// </summary>
     public bool TelemetryOnly { get; set; }
 

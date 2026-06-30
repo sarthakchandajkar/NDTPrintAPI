@@ -2,6 +2,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
+using Serilog.Context;
 
 namespace NdtBundleService.Services.FileBasedPoChange;
 
@@ -35,15 +36,22 @@ public sealed class FileBasedPoChangeWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var cfg = _options.Value.FileBasedPoEnd ?? new FileBasedPoEndOptions();
-        if (!cfg.Enabled)
+        var bundle = _options.Value;
+        if (MillPoEndSourceResolver.AnyMillUsesFilePoEnd(bundle))
         {
-            _logger.LogInformation("FileBasedPoEnd is disabled; FileBasedPoChangeWorker will not process PO changes.");
-            return;
+            var fileMills = (bundle.PlcHandshake ?? new PlcHandshakeOptions()).Mills
+                .Where(m => m.ResolvePoEndSource(bundle) == MillPoEndSource.File)
+                .Select(m => m.Name)
+                .ToList();
+            _logger.LogInformation(
+                "FileBasedPoChangeWorker started — PO end from WIP filenames for mills: {Mills}.",
+                fileMills.Count > 0 ? string.Join(", ", fileMills) : "(none configured)");
         }
-
-        _logger.LogInformation(
-            "FileBasedPoChangeWorker started — PO end is driven by WIP bundle filename changes in the TM Bundle folder.");
+        else
+        {
+            _logger.LogInformation(
+                "FileBasedPoChangeWorker started — no mill uses PoEndSource=File; queue will drain if WIP events arrive.");
+        }
 
         await foreach (var request in _queue.Reader.ReadAllAsync(stoppingToken).ConfigureAwait(false))
         {
@@ -74,6 +82,31 @@ public sealed class FileBasedPoChangeWorker : BackgroundService
 
     private async Task ProcessRequestAsync(FileBasedPoChangeRequest request, CancellationToken cancellationToken)
     {
+        var correlationId = request.CorrelationId ?? Guid.NewGuid();
+        using (LogContext.PushProperty("CorrelationId", correlationId))
+        {
+            await ProcessRequestCoreAsync(request, correlationId, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task ProcessRequestCoreAsync(
+        FileBasedPoChangeRequest request,
+        Guid correlationId,
+        CancellationToken cancellationToken)
+    {
+        var poEndSource = MillPoEndSourceResolver.ForMill(request.MillNo, _options.Value);
+        if (poEndSource != MillPoEndSource.File)
+        {
+            _logger.LogWarning(
+                "Mill {Mill}: stale file-based PO change from {File} ({OldPo} → {NewPo}) skipped — PoEndSource={Source} (expected File).",
+                request.MillNo,
+                request.WipFileName,
+                request.EndedPo,
+                request.NewPo,
+                MillPoEndSourceResolver.ToConfigValue(poEndSource));
+            return;
+        }
+
         var endedPo = InputSlitCsvParsing.NormalizePo(request.EndedPo);
         if (string.IsNullOrWhiteSpace(endedPo))
         {
@@ -102,14 +135,28 @@ public sealed class FileBasedPoChangeWorker : BackgroundService
         if (!string.IsNullOrWhiteSpace(endedPo))
         {
             var advancePlan = (_options.Value.FileBasedPoEnd ?? new FileBasedPoEndOptions()).AdvancePoPlanFileOnPoEnd;
-            _logger.LogInformation(
-                "Mill {Mill}: file-based PO change {OldPo} → {NewPo} from WIP file {File}; running PO end workflow.",
-                request.MillNo,
-                endedPo,
-                newPo,
-                request.WipFileName);
+            if (request.FromReconciliation)
+            {
+                _logger.LogInformation(
+                    "Mill {Mill}: reconciliation-triggered file-based PO change {OldPo} → {NewPo} from WIP file {File}; running PO end workflow. CorrelationId {CorrelationId}",
+                    request.MillNo,
+                    endedPo,
+                    newPo,
+                    request.WipFileName,
+                    correlationId);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Mill {Mill}: file-based PO change {OldPo} → {NewPo} from WIP file {File}; running PO end workflow. CorrelationId {CorrelationId}",
+                    request.MillNo,
+                    endedPo,
+                    newPo,
+                    request.WipFileName,
+                    correlationId);
+            }
 
-            await _poEndWorkflow.ExecuteAsync(endedPo, request.MillNo, advancePlan, cancellationToken)
+            await _poEndWorkflow.ExecuteAsync(endedPo, request.MillNo, advancePlan, cancellationToken, correlationId)
                 .ConfigureAwait(false);
         }
         else

@@ -201,11 +201,16 @@ public sealed class SettingsController : ControllerBase
                     }
                 }
 
+                var poEndSource = cfg.ResolvePoEndSource(_options);
                 mills.Add(new
                 {
                     millNo,
                     name = cfg.Name,
-                    driver = "S7-Handshake",
+                    poEndSource = MillPoEndSourceResolver.ToConfigValue(poEndSource),
+                    poEndSourceDescription = MillPoEndSourceResolver.Describe(poEndSource),
+                    tcpOpenCommHost = poEndSource == MillPoEndSource.TcpOpen ? cfg.TcpOpenCommHost : null,
+                    tcpOpenCommPort = poEndSource == MillPoEndSource.TcpOpen ? cfg.TcpOpenCommPort : (int?)null,
+                    driver = poEndSource == MillPoEndSource.TcpOpen ? "TcpOpen" : "S7-Handshake",
                     host,
                     port = 102,
                     reachable,
@@ -247,14 +252,24 @@ public sealed class SettingsController : ControllerBase
                 });
             }
 
+            var poEndSourceByMill = Enumerable.Range(1, 4).ToDictionary(
+                m => m.ToString(),
+                m =>
+                {
+                    var src = MillPoEndSourceResolver.ForMill(m, _options);
+                    return new
+                    {
+                        source = MillPoEndSourceResolver.ToConfigValue(src),
+                        description = MillPoEndSourceResolver.Describe(src)
+                    };
+                });
+
             return Ok(new
             {
                 plcPoEndEnabled = true,
                 plcHandshakeEnabled = true,
-                fileBasedPoEndEnabled = _options.FileBasedPoEnd?.Enabled == true,
-                poEndSource = _options.FileBasedPoEnd?.Enabled == true
-                    ? "TM Bundle WIP filename"
-                    : "PLC PO-change trigger",
+                plcHandshakeTelemetryOnly = handshakeCfg.TelemetryOnly,
+                poEndSourceByMill,
                 driver = "S7-Handshake",
                 lastReadOk = snapshot.Count > 0 && snapshot.All(m => m.Connected),
                 lastPlcError = _handshakeStatus.FirstError() ?? _plcHealth.LastError,

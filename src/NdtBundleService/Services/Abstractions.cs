@@ -12,6 +12,16 @@ public sealed record RemovedSlitRowTraceRef(string FileBaseName, int SourceRowNu
 public interface INdtBundleRepository
 {
     Task RecordBundleAsync(NdtBundleRecord record, CancellationToken cancellationToken);
+
+    /// <summary>Upserts bundle row with <see cref="BundlePrintStatus.Pending"/> before ZPL print attempt.</summary>
+    Task RecordBundlePendingPrintAsync(NdtBundleRecord record, CancellationToken cancellationToken);
+
+    /// <summary>Updates <c>Print_Status</c> and optional <c>Print_Error</c> after a print attempt.</summary>
+    Task UpdateBundlePrintStatusAsync(string bundleNo, string printStatus, string? printError, CancellationToken cancellationToken);
+
+    /// <summary>Bundles with <c>Print_Status</c> Pending or PrintFailed older than the threshold.</summary>
+    Task<IReadOnlyList<NdtBundleRecord>> GetStuckPrintsAsync(TimeSpan olderThan, CancellationToken cancellationToken);
+
     Task<IReadOnlyList<NdtBundleRecord>> GetBundlesAsync(CancellationToken cancellationToken);
     Task<NdtBundleRecord?> GetByBatchNoAsync(string batchNo, CancellationToken cancellationToken);
     Task UpdateBundlePipesAsync(string batchNo, int newPipes, CancellationToken cancellationToken);
@@ -41,6 +51,12 @@ public interface INdtBundleRepository
         string batchNo,
         IReadOnlyList<string> slitNos,
         CancellationToken cancellationToken);
+
+    /// <summary>Latest printed bundle row for a mill (<c>Total_NDT_Pcs &gt; 0</c>), or null when SQL is disabled or no row exists.</summary>
+    Task<NdtBundleRecord?> GetLatestPrintedBundleForMillAsync(int millNo, CancellationToken cancellationToken);
+
+    /// <summary>True when a printed bundle exists for the PO on the given mill.</summary>
+    Task<bool> HasPrintedBundleForPoAsync(int millNo, string poNumber, CancellationToken cancellationToken);
 }
 
 public interface IPoPlanProvider
@@ -127,7 +143,7 @@ public interface IBundleLabelInfoProvider
 
 public interface IBundleOutputWriter
 {
-    Task WriteBundleAsync(InputSlitRecord contextRecord, int ndtBatchNo, int totalNdtPcs, CancellationToken cancellationToken);
+    Task WriteBundleAsync(InputSlitRecord contextRecord, int ndtBatchNo, int totalNdtPcs, CancellationToken cancellationToken, Guid? correlationId = null);
 }
 
 /// <summary>
@@ -171,7 +187,8 @@ public interface IBundleEngine
         string poNumber,
         int millNo,
         Func<InputSlitRecord, int, int, Task> onBundleClosedAsync,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        Guid? correlationId = null);
 }
 
 public interface IPlcClient
@@ -213,7 +230,7 @@ public sealed class PoEndWorkflowResult
 /// </summary>
 public interface IPoEndWorkflowService
 {
-    Task<PoEndWorkflowResult> ExecuteAsync(string poNumber, int millNo, bool advancePoPlanFile, CancellationToken cancellationToken);
+    Task<PoEndWorkflowResult> ExecuteAsync(string poNumber, int millNo, bool advancePoPlanFile, CancellationToken cancellationToken, Guid? correlationId = null);
 }
 
 /// <summary>

@@ -6,7 +6,9 @@ using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Services;
 using NdtBundleService.Services.PlcHandshake;
+using NdtBundleService.Services.PlcHandshake.PlcPoEnd;
 using NdtBundleService.Services.FileBasedPoChange;
+using NdtBundleService.Services.TcpOpenComm;
 using QuestPDF.Infrastructure;
 using Serilog;
 using Serilog.Events;
@@ -56,8 +58,11 @@ builder.Services.AddSingleton<IFormationChartSettingsService, FormationChartSett
 builder.Services.AddSingleton<IActivePoPerMillService, ActivePoPerMillService>();
 builder.Services.AddSingleton<IWipBundleRunningPoProvider, WipBundleRunningPoProvider>();
 builder.Services.AddSingleton<FileBasedPoChangeQueue>();
+builder.Services.AddSingleton<IWipBundleReconciliationService, WipBundleReconciliationService>();
+builder.Services.AddSingleton<PlcPoEndQueue>();
 builder.Services.AddSingleton<IMillNdtCountReader, S7MillNdtCountReader>();
 builder.Services.AddSingleton<IMillSlitLiveNdtAccumulator, MillSlitLiveNdtAccumulator>();
+builder.Services.AddSingleton<IMillBundleStateLock, MillBundleStateLock>();
 builder.Services.AddSingleton<IPoEndWorkflowService, PoEndWorkflowService>();
 builder.Services.AddSingleton<MillPoEndTransitionDetector>();
 builder.Services.AddSingleton<PoEndDetectionDiagnostics>();
@@ -128,7 +133,10 @@ builder.Services.AddSwaggerGen();
 
 // Background worker that orchestrates the flow
 builder.Services.AddHostedService<PlcHandshakeWorker>();
+builder.Services.AddHostedService<PlcPoEndQueueWorker>();
+builder.Services.AddHostedService<MillTcpOpenCommWorker>();
 builder.Services.AddHostedService<FileBasedPoChangeWorker>();
+builder.Services.AddHostedService<WipBundleFileReconciliationWorker>();
 builder.Services.AddHostedService<SlitMonitoringWorker>();
 builder.Services.AddHostedService<UploadNdtBundleSchedulerWorker>();
 

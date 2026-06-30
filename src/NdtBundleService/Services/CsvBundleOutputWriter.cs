@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Models;
+using Serilog.Context;
 
 namespace NdtBundleService.Services;
 
@@ -34,7 +35,15 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
         _logger = logger;
     }
 
-    public async Task WriteBundleAsync(InputSlitRecord contextRecord, int ndtBatchNo, int totalNdtPcs, CancellationToken cancellationToken)
+    public async Task WriteBundleAsync(InputSlitRecord contextRecord, int ndtBatchNo, int totalNdtPcs, CancellationToken cancellationToken, Guid? correlationId = null)
+    {
+        using (correlationId is { } id ? LogContext.PushProperty("CorrelationId", id) : null)
+        {
+            await WriteBundleCoreAsync(contextRecord, ndtBatchNo, totalNdtPcs, cancellationToken, correlationId).ConfigureAwait(false);
+        }
+    }
+
+    private async Task WriteBundleCoreAsync(InputSlitRecord contextRecord, int ndtBatchNo, int totalNdtPcs, CancellationToken cancellationToken, Guid? correlationId)
     {
         if (totalNdtPcs <= 0)
         {
@@ -101,18 +110,70 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
             NdtShortLengthPipe = contextRecord.NdtShortLengthPipe,
             RejectedShortLengthPipe = contextRecord.RejectedShortLengthPipe
         };
-        await _bundleRepository.RecordBundleAsync(record, cancellationToken).ConfigureAwait(false);
+        await _bundleRepository.RecordBundlePendingPrintAsync(record, cancellationToken).ConfigureAwait(false);
         await TryRecordBundleLabelAsync(contextRecord.PoNumber, contextRecord.MillNo, cancellationToken).ConfigureAwait(false);
 
-        if (_tagPrinter != null)
+        if (_tagPrinter is null)
+        {
+            _logger.LogDebug(
+                "No tag printer configured for bundle {BatchNo}; marking Print_Status=Printed without ZPL attempt.",
+                ndtBatchNoFormatted);
+            await _bundleRepository.UpdateBundlePrintStatusAsync(
+                ndtBatchNoFormatted,
+                BundlePrintStatus.Printed,
+                null,
+                cancellationToken).ConfigureAwait(false);
+        }
+        else
         {
             try
             {
-                await _tagPrinter.PrintBundleTagAsync(contextRecord, ndtBatchNo, totalNdtPcs, isReprint: false, cancellationToken).ConfigureAwait(false);
+                var printed = await _tagPrinter.PrintBundleTagAsync(
+                    contextRecord,
+                    ndtBatchNo,
+                    totalNdtPcs,
+                    isReprint: false,
+                    cancellationToken).ConfigureAwait(false);
+
+                if (printed)
+                {
+                    _logger.LogInformation(
+                        "Bundle {BatchNo} tag print succeeded; Print_Status=Printed. CorrelationId {CorrelationId}",
+                        ndtBatchNoFormatted,
+                        correlationId);
+                    await _bundleRepository.UpdateBundlePrintStatusAsync(
+                        ndtBatchNoFormatted,
+                        BundlePrintStatus.Printed,
+                        null,
+                        cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    const string error = "PrintBundleTagAsync returned false (ZPL disabled or printer not configured).";
+                    _logger.LogError(
+                        "Bundle {BatchNo} tag print failed: {Error} CorrelationId {CorrelationId}",
+                        ndtBatchNoFormatted,
+                        error,
+                        correlationId);
+                    await _bundleRepository.UpdateBundlePrintStatusAsync(
+                        ndtBatchNoFormatted,
+                        BundlePrintStatus.PrintFailed,
+                        error,
+                        cancellationToken).ConfigureAwait(false);
+                }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Auto-print failed for bundle {BatchNo}.", ndtBatchNoFormatted);
+                _logger.LogError(
+                    ex,
+                    "Auto-print failed for bundle {BatchNo}. CorrelationId {CorrelationId}",
+                    ndtBatchNoFormatted,
+                    correlationId);
+                await _bundleRepository.UpdateBundlePrintStatusAsync(
+                    ndtBatchNoFormatted,
+                    BundlePrintStatus.PrintFailed,
+                    ex.Message,
+                    cancellationToken).ConfigureAwait(false);
             }
         }
     }

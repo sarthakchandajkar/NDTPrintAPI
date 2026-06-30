@@ -35,6 +35,131 @@ public sealed class NdtBundleRepository : INdtBundleRepository
 
     private bool UseDatabase => SqlTraceabilityConnection.IsSqlEnabled(Opt);
 
+    private static string TruncatePrintError(string? error) =>
+        string.IsNullOrEmpty(error) ? string.Empty : error.Length <= 500 ? error : error[..500];
+
+    public async Task RecordBundlePendingPrintAsync(NdtBundleRecord record, CancellationToken cancellationToken)
+    {
+        if (!UseDatabase)
+        {
+            _logger.LogWarning(
+                "NDT_Bundle pending-print SQL write skipped for {BundleNo}: SQL not configured.",
+                record.BundleNo);
+            return;
+        }
+
+        const int maxAttempts = 3;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                await UpsertBundlePendingPrintAsync(record, cancellationToken).ConfigureAwait(false);
+                _writeTracker.RecordSuccess("NDT_Bundle", $"{record.BundleNo} pending print");
+                _logger.LogInformation(
+                    "Recorded bundle {BundleNo} ({Total} NDT pcs) in NDT_Bundle with Print_Status=Pending.",
+                    record.BundleNo,
+                    record.TotalNdtPcs);
+                return;
+            }
+            catch (Exception ex) when (attempt < maxAttempts)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Failed to record pending-print bundle {BundleNo} (attempt {Attempt}/{Max}); retrying.",
+                    record.BundleNo,
+                    attempt,
+                    maxAttempts);
+                await Task.Delay(TimeSpan.FromMilliseconds(400 * attempt), cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _writeTracker.RecordFailure("NDT_Bundle", ex.Message, record.BundleNo);
+                _logger.LogError(
+                    ex,
+                    "Failed to record pending-print bundle {BundleNo} after {Max} attempts.",
+                    record.BundleNo,
+                    maxAttempts);
+            }
+        }
+    }
+
+    public async Task UpdateBundlePrintStatusAsync(
+        string bundleNo,
+        string printStatus,
+        string? printError,
+        CancellationToken cancellationToken)
+    {
+        if (!UseDatabase || string.IsNullOrWhiteSpace(bundleNo))
+            return;
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await SqlTraceabilityConnection.OpenAsync(conn, _logger, "NDT_Bundle print status", cancellationToken).ConfigureAwait(false);
+            const string sql = @"
+UPDATE dbo.NDT_Bundle
+SET Print_Status = @Status,
+    Print_Error = @Error,
+    Print_Attempted_At = COALESCE(Print_Attempted_At, SYSDATETIME())
+WHERE Bundle_No = @BundleNo";
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@BundleNo", bundleNo.Trim());
+            cmd.Parameters.AddWithValue("@Status", printStatus);
+            cmd.Parameters.AddWithValue("@Error", (object?)TruncatePrintError(printError) ?? DBNull.Value);
+            await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to update print status for bundle {BundleNo} to {Status}.", bundleNo, printStatus);
+        }
+    }
+
+    public async Task<IReadOnlyList<NdtBundleRecord>> GetStuckPrintsAsync(TimeSpan olderThan, CancellationToken cancellationToken)
+    {
+        if (!UseDatabase)
+            return Array.Empty<NdtBundleRecord>();
+
+        var cutoffUtc = DateTime.UtcNow - olderThan;
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            const string sql = @"
+SELECT
+    Bundle_No AS BundleNo,
+    PO_Number AS PoNumber,
+    Mill_No AS MillNo,
+    Total_NDT_Pcs AS TotalNdtPcs,
+    Context_Slit_No AS SlitNo,
+    Slit_Start_Time AS SlitStartTime,
+    Slit_Finish_Time AS SlitFinishTime,
+    PrintedAt,
+    Rejected_P AS RejectedPipes,
+    NDT_Short_Length_Pipe AS NdtShortLengthPipe,
+    Rejected_Short_Length_Pipe AS RejectedShortLengthPipe,
+    Print_Status AS PrintStatus,
+    Print_Attempted_At AS PrintAttemptedAt,
+    Print_Error AS PrintError
+FROM dbo.NDT_Bundle
+WHERE Print_Status IN ('Pending', 'PrintFailed')
+  AND COALESCE(Print_Attempted_At, PrintedAt) < @CutoffUtc
+ORDER BY COALESCE(Print_Attempted_At, PrintedAt)";
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@CutoffUtc", cutoffUtc);
+            var list = new List<NdtBundleRecord>();
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                list.Add(ReadBundleFromReader(reader));
+            return list;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to get stuck prints from database.");
+            return Array.Empty<NdtBundleRecord>();
+        }
+    }
+
     public async Task RecordBundleAsync(NdtBundleRecord record, CancellationToken cancellationToken)
     {
         if (!UseDatabase)
@@ -109,6 +234,48 @@ BEGIN
         (@PoNumber, @MillNo, @BundleNo, @TotalNdtPcs, @SlitNo, @SlitStartTime, @SlitFinishTime, @RejectedPipes, @NdtShortLengthPipe, @RejectedShortLengthPipe, 0);
 END";
         await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+        AddBundleUpsertParameters(cmd, record);
+        await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task UpsertBundlePendingPrintAsync(NdtBundleRecord record, CancellationToken cancellationToken)
+    {
+        await using var conn = SqlTraceabilityConnection.Create(Opt);
+        await SqlTraceabilityConnection.OpenAsync(conn, _logger, "NDT_Bundle pending-print upsert", cancellationToken).ConfigureAwait(false);
+        const string sql = @"
+IF EXISTS (SELECT 1 FROM dbo.NDT_Bundle WHERE Bundle_No = @BundleNo)
+BEGIN
+    UPDATE dbo.NDT_Bundle
+    SET PO_Number = @PoNumber,
+        Mill_No = @MillNo,
+        Total_NDT_Pcs = @TotalNdtPcs,
+        Context_Slit_No = @SlitNo,
+        Slit_Start_Time = @SlitStartTime,
+        Slit_Finish_Time = @SlitFinishTime,
+        Rejected_P = @RejectedPipes,
+        NDT_Short_Length_Pipe = @NdtShortLengthPipe,
+        Rejected_Short_Length_Pipe = @RejectedShortLengthPipe,
+        PrintedAt = SYSDATETIME(),
+        IsReprint = 0,
+        Print_Status = 'Pending',
+        Print_Attempted_At = SYSDATETIME(),
+        Print_Error = NULL
+    WHERE Bundle_No = @BundleNo;
+END
+ELSE
+BEGIN
+    INSERT INTO dbo.NDT_Bundle
+        (PO_Number, Mill_No, Bundle_No, Total_NDT_Pcs, Context_Slit_No, Slit_Start_Time, Slit_Finish_Time, Rejected_P, NDT_Short_Length_Pipe, Rejected_Short_Length_Pipe, IsReprint, Print_Status, Print_Attempted_At, Print_Error)
+    VALUES
+        (@PoNumber, @MillNo, @BundleNo, @TotalNdtPcs, @SlitNo, @SlitStartTime, @SlitFinishTime, @RejectedPipes, @NdtShortLengthPipe, @RejectedShortLengthPipe, 0, 'Pending', SYSDATETIME(), NULL);
+END";
+        await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+        AddBundleUpsertParameters(cmd, record);
+        await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static void AddBundleUpsertParameters(Microsoft.Data.SqlClient.SqlCommand cmd, NdtBundleRecord record)
+    {
         cmd.Parameters.AddWithValue("@PoNumber", record.PoNumber);
         cmd.Parameters.AddWithValue("@MillNo", record.MillNo);
         cmd.Parameters.AddWithValue("@BundleNo", record.BundleNo);
@@ -119,7 +286,6 @@ END";
         cmd.Parameters.AddWithValue("@RejectedPipes", record.RejectedPipes);
         cmd.Parameters.AddWithValue("@NdtShortLengthPipe", (object?)record.NdtShortLengthPipe ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@RejectedShortLengthPipe", (object?)record.RejectedShortLengthPipe ?? DBNull.Value);
-        await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<IReadOnlyList<NdtBundleRecord>> GetBundlesAsync(CancellationToken cancellationToken)
@@ -177,6 +343,9 @@ WITH Ranked AS (
         Rejected_P,
         NDT_Short_Length_Pipe,
         Rejected_Short_Length_Pipe,
+        Print_Status,
+        Print_Attempted_At,
+        Print_Error,
         ROW_NUMBER() OVER (PARTITION BY Bundle_No ORDER BY PrintedAt DESC) AS rn
     FROM dbo.NDT_Bundle
 ),
@@ -199,7 +368,10 @@ SELECT
     r.PrintedAt,
     r.Rejected_P AS RejectedPipes,
     r.NDT_Short_Length_Pipe AS NdtShortLengthPipe,
-    r.Rejected_Short_Length_Pipe AS RejectedShortLengthPipe
+    r.Rejected_Short_Length_Pipe AS RejectedShortLengthPipe,
+    r.Print_Status AS PrintStatus,
+    r.Print_Attempted_At AS PrintAttemptedAt,
+    r.Print_Error AS PrintError
 FROM Ranked r
 LEFT JOIN SlitSum s ON s.NDT_Batch_No = r.Bundle_No
 WHERE r.rn = 1
@@ -226,7 +398,7 @@ ORDER BY r.PrintedAt DESC";
             {
                 await using var conn = SqlTraceabilityConnection.Create(Opt);
                 await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
-                const string sql = "SELECT TOP 1 Bundle_No AS BundleNo, PO_Number AS PoNumber, Mill_No AS MillNo, Total_NDT_Pcs AS TotalNdtPcs, Context_Slit_No AS SlitNo, Slit_Start_Time AS SlitStartTime, Slit_Finish_Time AS SlitFinishTime, PrintedAt, Rejected_P AS RejectedPipes, NDT_Short_Length_Pipe AS NdtShortLengthPipe, Rejected_Short_Length_Pipe AS RejectedShortLengthPipe FROM dbo.NDT_Bundle WHERE Bundle_No = @BatchNo ORDER BY PrintedAt DESC";
+                const string sql = "SELECT TOP 1 Bundle_No AS BundleNo, PO_Number AS PoNumber, Mill_No AS MillNo, Total_NDT_Pcs AS TotalNdtPcs, Context_Slit_No AS SlitNo, Slit_Start_Time AS SlitStartTime, Slit_Finish_Time AS SlitFinishTime, PrintedAt, Rejected_P AS RejectedPipes, NDT_Short_Length_Pipe AS NdtShortLengthPipe, Rejected_Short_Length_Pipe AS RejectedShortLengthPipe, Print_Status AS PrintStatus, Print_Attempted_At AS PrintAttemptedAt, Print_Error AS PrintError FROM dbo.NDT_Bundle WHERE Bundle_No = @BatchNo ORDER BY PrintedAt DESC";
                 await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
                 cmd.Parameters.AddWithValue("@BatchNo", batchNo.Trim());
                 await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
@@ -247,6 +419,80 @@ ORDER BY r.PrintedAt DESC";
         return await ApplyFormedBundleTotalAsync(match, batchNo.Trim(), cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<NdtBundleRecord?> GetLatestPrintedBundleForMillAsync(int millNo, CancellationToken cancellationToken)
+    {
+        if (millNo is < 1 or > 4 || !UseDatabase)
+            return null;
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            const string sql = @"
+SELECT TOP 1
+    Bundle_No AS BundleNo,
+    PO_Number AS PoNumber,
+    Mill_No AS MillNo,
+    Total_NDT_Pcs AS TotalNdtPcs,
+    Context_Slit_No AS SlitNo,
+    Slit_Start_Time AS SlitStartTime,
+    Slit_Finish_Time AS SlitFinishTime,
+    PrintedAt,
+    Rejected_P AS RejectedPipes,
+    NDT_Short_Length_Pipe AS NdtShortLengthPipe,
+    Rejected_Short_Length_Pipe AS RejectedShortLengthPipe,
+    Print_Status AS PrintStatus,
+    Print_Attempted_At AS PrintAttemptedAt,
+    Print_Error AS PrintError
+FROM dbo.NDT_Bundle
+WHERE Mill_No = @MillNo AND Total_NDT_Pcs > 0
+ORDER BY PrintedAt DESC";
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@MillNo", millNo);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                return ReadBundleFromReader(reader);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to get latest printed bundle for Mill {MillNo} from database.", millNo);
+        }
+
+        return null;
+    }
+
+    public async Task<bool> HasPrintedBundleForPoAsync(int millNo, string poNumber, CancellationToken cancellationToken)
+    {
+        if (millNo is < 1 or > 4 || string.IsNullOrWhiteSpace(poNumber) || !UseDatabase)
+            return false;
+
+        var normalized = InputSlitCsvParsing.NormalizePo(poNumber);
+        var requested = poNumber.Trim();
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            const string sql = @"
+SELECT TOP 1 1
+FROM dbo.NDT_Bundle
+WHERE Mill_No = @MillNo
+  AND Total_NDT_Pcs > 0
+  AND (PO_Number = @Po OR PO_Number = @PoNormalized)";
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@MillNo", millNo);
+            cmd.Parameters.AddWithValue("@Po", requested);
+            cmd.Parameters.AddWithValue("@PoNormalized", normalized);
+            var result = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            return result is not null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to check printed bundle for Mill {MillNo} PO {Po} in database.", millNo, poNumber);
+            return false;
+        }
+    }
+
     private async Task<NdtBundleRecord> ApplyFormedBundleTotalAsync(NdtBundleRecord record, string batchNo, CancellationToken cancellationToken)
     {
         var formedTotal = await TryReadBundleSummaryTotalAsync(batchNo, cancellationToken).ConfigureAwait(false);
@@ -262,6 +508,9 @@ ORDER BY r.PrintedAt DESC";
                 SlitStartTime = record.SlitStartTime,
                 SlitFinishTime = record.SlitFinishTime,
                 PrintedAt = record.PrintedAt,
+                PrintStatus = record.PrintStatus,
+                PrintAttemptedAt = record.PrintAttemptedAt,
+                PrintError = record.PrintError,
                 RejectedPipes = record.RejectedPipes,
                 NdtShortLengthPipe = record.NdtShortLengthPipe,
                 RejectedShortLengthPipe = record.RejectedShortLengthPipe
@@ -286,6 +535,9 @@ ORDER BY r.PrintedAt DESC";
             SlitStartTime = record.SlitStartTime,
             SlitFinishTime = record.SlitFinishTime,
             PrintedAt = record.PrintedAt,
+            PrintStatus = record.PrintStatus,
+            PrintAttemptedAt = record.PrintAttemptedAt,
+            PrintError = record.PrintError,
             RejectedPipes = record.RejectedPipes,
             NdtShortLengthPipe = record.NdtShortLengthPipe,
             RejectedShortLengthPipe = record.RejectedShortLengthPipe
@@ -919,7 +1171,16 @@ ORDER BY PrintedAt DESC";
             PrintedAt = reader.IsDBNull(7) ? null : reader.GetDateTime(7),
             RejectedPipes = reader.IsDBNull(8) ? 0 : reader.GetInt32(8),
             NdtShortLengthPipe = reader.IsDBNull(9) ? "" : reader.GetString(9),
-            RejectedShortLengthPipe = reader.IsDBNull(10) ? "" : reader.GetString(10)
+            RejectedShortLengthPipe = reader.IsDBNull(10) ? "" : reader.GetString(10),
+            PrintStatus = reader.FieldCount > 11 && !reader.IsDBNull(11)
+                ? reader.GetString(11)
+                : BundlePrintStatus.Pending,
+            PrintAttemptedAt = reader.FieldCount > 12 && !reader.IsDBNull(12)
+                ? reader.GetDateTime(12)
+                : null,
+            PrintError = reader.FieldCount > 13 && !reader.IsDBNull(13)
+                ? reader.GetString(13)
+                : null
         };
     }
 

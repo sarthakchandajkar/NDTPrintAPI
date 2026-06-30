@@ -9,6 +9,12 @@ public sealed class MillConfig
     /// <summary>Display name (e.g. <c>Mill-1</c>).</summary>
     public string Name { get; set; } = string.Empty;
 
+    /// <summary>
+    /// PO-end trigger: <c>Plc</c> (S7 handshake), <c>File</c> (WIP filename), or <c>TcpOpen</c> (Phase 6).
+    /// Defaults to <c>File</c> when missing or unknown.
+    /// </summary>
+    public string PoEndSource { get; set; } = "File";
+
     /// <summary>Mill number 1–4. When 0, parsed from <see cref="Name"/> (<c>Mill-N</c>).</summary>
     public int MillNo { get; set; }
 
@@ -20,6 +26,12 @@ public sealed class MillConfig
 
     /// <summary>PLC IP address (ISO-on-TCP port 102).</summary>
     public string IpAddress { get; set; } = string.Empty;
+
+    /// <summary>TCP open-communication host for <c>PoEndSource=TcpOpen</c> (separate from S7 <see cref="IpAddress"/>).</summary>
+    public string? TcpOpenCommHost { get; set; }
+
+    /// <summary>TCP open-communication port for <c>PoEndSource=TcpOpen</c>.</summary>
+    public int TcpOpenCommPort { get; set; }
 
     /// <summary>S7 rack (typically 0).</summary>
     public short Rack { get; set; }

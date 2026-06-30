@@ -13,6 +13,9 @@ public sealed class NdtBundleRecord
     public DateTime? SlitStartTime { get; init; }
     public DateTime? SlitFinishTime { get; init; }
     public DateTime? PrintedAt { get; init; }
+    public string PrintStatus { get; init; } = BundlePrintStatus.Pending;
+    public DateTime? PrintAttemptedAt { get; init; }
+    public string? PrintError { get; init; }
     public int RejectedPipes { get; init; }
     public string NdtShortLengthPipe { get; init; } = string.Empty;
     public string RejectedShortLengthPipe { get; init; } = string.Empty;

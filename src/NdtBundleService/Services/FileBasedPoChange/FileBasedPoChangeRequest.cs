@@ -14,4 +14,8 @@ public sealed class FileBasedPoChangeRequest
     public DateTime WipStampUtc { get; init; }
 
     public string WipFileName { get; init; } = string.Empty;
+
+    public Guid? CorrelationId { get; init; }
+
+    public bool FromReconciliation { get; init; }
 }

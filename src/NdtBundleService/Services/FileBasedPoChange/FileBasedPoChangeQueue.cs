@@ -46,4 +46,13 @@ public sealed class FileBasedPoChangeQueue
         lock (_sync)
             _queuedOrProcessingMills.Remove(millNo);
     }
+
+    public bool IsMillPending(int millNo)
+    {
+        if (millNo is < 1 or > 4)
+            return false;
+
+        lock (_sync)
+            return _queuedOrProcessingMills.Contains(millNo);
+    }
 }

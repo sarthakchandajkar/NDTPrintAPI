@@ -31,7 +31,10 @@ BEGIN
         NDT_Short_Length_Pipe     NVARCHAR(50)   NULL,
         Rejected_Short_Length_Pipe NVARCHAR(50)  NULL,
         PrintedAt                 DATETIME2(2)   NOT NULL CONSTRAINT DF_NDT_Bundle_PrintedAt DEFAULT (SYSDATETIME()),
-        IsReprint                 BIT            NOT NULL CONSTRAINT DF_NDT_Bundle_IsReprint DEFAULT (0)
+        IsReprint                 BIT            NOT NULL CONSTRAINT DF_NDT_Bundle_IsReprint DEFAULT (0),
+        Print_Status              NVARCHAR(20)   NOT NULL CONSTRAINT DF_NDT_Bundle_Print_Status DEFAULT ('Pending'),
+        Print_Attempted_At        DATETIME2(2)   NULL,
+        Print_Error               NVARCHAR(500)  NULL
     );
 
     CREATE UNIQUE INDEX UQ_NDT_Bundle_Bundle_No ON dbo.NDT_Bundle (Bundle_No);

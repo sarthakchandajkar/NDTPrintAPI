@@ -68,4 +68,16 @@ public sealed class PlcHandshakeCoordinator
 
         return await service.RunSettingsTestAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    public async Task NotifyPoEndWorkflowCompletedAsync(int millNo, CancellationToken cancellationToken)
+    {
+        PlcHandshakeService? service;
+        lock (_sync)
+        {
+            if (!_byMill.TryGetValue(millNo, out service))
+                return;
+        }
+
+        await service.SyncHooterMemoryAfterPoEndAsync(millNo, cancellationToken).ConfigureAwait(false);
+    }
 }

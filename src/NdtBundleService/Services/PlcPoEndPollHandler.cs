@@ -216,7 +216,7 @@ public sealed class PlcPoEndPollHandler
             if (!IsValidPoId(snap.PoId, plcCfg.MinValidPoId, plcCfg.MaxValidPoId))
                 return null;
 
-            var formatted = FormatPoNumberFromPlc(snap.PoId, plcCfg.PoNumberFormatFromPlc);
+            var formatted = PlcPoIdFormatting.Format(snap.PoId, plcCfg.PoNumberFormatFromPlc);
             var normalized = InputSlitCsvParsing.NormalizePo(formatted);
             _logger.LogInformation(
                 "Mill {Mill}: PO-end PO resolved from PLC PO_Id {PoId} → {Po}.",
@@ -233,20 +233,6 @@ public sealed class PlcPoEndPollHandler
     }
 
     private static bool IsValidPoId(int id, int minId, int maxId) => id >= minId && id <= maxId;
-
-    private static string FormatPoNumberFromPlc(int poId, string format)
-    {
-        if (string.IsNullOrWhiteSpace(format))
-            return poId.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        try
-        {
-            return string.Format(System.Globalization.CultureInfo.InvariantCulture, format, poId);
-        }
-        catch (FormatException)
-        {
-            return poId.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        }
-    }
 
     private async Task<bool> RunWorkflowForMillAsync(int millNo, string poNumber, PlcPoEndOptions plcCfg, CancellationToken cancellationToken)
     {

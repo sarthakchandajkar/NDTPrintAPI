@@ -46,8 +46,10 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
         TryStartWatchers();
     }
 
-    private bool IsFileBasedPoEndEnabled() =>
-        _options.Value.FileBasedPoEnd?.Enabled == true && _fileBasedPoChangeQueue is not null;
+    private bool IsFileBasedPoEndForMill(int millNo) =>
+        millNo is >= 1 and <= 4 &&
+        MillPoEndSourceResolver.ForMill(millNo, _options.Value) == MillPoEndSource.File &&
+        _fileBasedPoChangeQueue is not null;
 
     public Task<string?> TryGetRunningPoForMillAsync(int millNo, CancellationToken cancellationToken)
     {
@@ -339,7 +341,7 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
         }
     }
 
-    private void TryAcceptNewWipAfterPoEndUnsafe(int millNo, List<WipCandidate> candidates)
+    private void TryAcceptNewWipAfterPoEndUnsafe(int millNo, List<WipBundleFolderScanner.WipBundleFileCandidate> candidates)
     {
         var st = _mills[millNo - 1];
         if (!st.WaitingForNewWip)
@@ -419,8 +421,22 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
         DateTime wipStampUtc,
         string wipFileName)
     {
-        if (!IsFileBasedPoEndEnabled())
+        if (!IsFileBasedPoEndForMill(millNo))
+        {
+            var source = MillPoEndSourceResolver.ForMill(millNo, _options.Value);
+            if (source is MillPoEndSource.Plc or MillPoEndSource.TcpOpen)
+            {
+                _logger.LogWarning(
+                    "Mill {Mill}: file-based PO change {OldPo} → {NewPo} from {File} rejected — PoEndSource={Source} (expected File).",
+                    millNo,
+                    endedPo,
+                    newPo,
+                    wipFileName,
+                    MillPoEndSourceResolver.ToConfigValue(source));
+            }
+
             return false;
+        }
 
         var normalizedEnded = InputSlitCsvParsing.NormalizePo(endedPo);
         var normalizedNew = InputSlitCsvParsing.NormalizePo(newPo);
@@ -469,11 +485,25 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
             st.RunningWipStampUtc >= wipStampUtc)
             return false;
 
-        if (IsFileBasedPoEndEnabled() &&
+        if (IsFileBasedPoEndForMill(millNo) &&
             !string.IsNullOrWhiteSpace(st.RunningPo) &&
             !InputSlitCsvParsing.PoEquals(st.RunningPo, normalizedNew))
         {
             return TryEnqueueFileBasedPoChange(millNo, st.RunningPo, normalizedNew, wipStampUtc, wipFileName);
+        }
+
+        var poEndSource = MillPoEndSourceResolver.ForMill(millNo, _options.Value);
+        if (!string.IsNullOrWhiteSpace(st.RunningPo) &&
+            !InputSlitCsvParsing.PoEquals(st.RunningPo, normalizedNew) &&
+            poEndSource is MillPoEndSource.Plc or MillPoEndSource.TcpOpen)
+        {
+            _logger.LogWarning(
+                "Mill {Mill}: WIP bundle PO change {OldPo} → {NewPo} from {File} ignored for PO end — PoEndSource={Source} (expected File).",
+                millNo,
+                st.RunningPo,
+                normalizedNew,
+                wipFileName,
+                MillPoEndSourceResolver.ToConfigValue(poEndSource));
         }
 
         if (st.RunningWipStampUtc >= wipStampUtc && InputSlitCsvParsing.PoEquals(st.RunningPo, normalizedNew))
@@ -498,68 +528,9 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
             .Max();
     }
 
-    private List<WipCandidate> ScanAllWipCandidates()
-    {
-        var candidates = new List<WipCandidate>();
-        foreach (var folder in ResolveBundleFolders())
-        {
-            ScanFolder(folder, candidates);
-        }
+    private List<WipBundleFolderScanner.WipBundleFileCandidate> ScanAllWipCandidates() =>
+        WipBundleFolderScanner.Scan(_options.Value).ToList();
 
-        return candidates;
-    }
-
-    private void ScanFolder(string folder, List<WipCandidate> outCandidates)
-    {
-        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
-            return;
-
-        foreach (var path in Directory.EnumerateFiles(folder))
-        {
-            var name = Path.GetFileName(path);
-            if (!name.StartsWith("WIP_", StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            var meta = WipBundleFileName.TryParse(name);
-            if (meta is null)
-                continue;
-
-            DateTime stampUtc;
-            try
-            {
-                stampUtc = File.GetLastWriteTimeUtc(path);
-                if (stampUtc == DateTime.MinValue)
-                    stampUtc = File.GetCreationTimeUtc(path);
-            }
-            catch
-            {
-                stampUtc = DateTime.UtcNow;
-            }
-
-            outCandidates.Add(new WipCandidate(meta.MillNo, stampUtc, meta.PoNumber, meta.SortKey, name));
-        }
-    }
-
-    private IEnumerable<string> ResolveBundleFolders()
-    {
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var opt = _options.Value;
-        var live = opt.MillSlitLive ?? new MillSlitLiveOptions();
-
-        foreach (var folder in new[]
-                 {
-                     live.WipBundleFolder,
-                     live.WipBundleAcceptedFolder,
-                     opt.FgBundleFolder,
-                     opt.FgBundleAcceptedFolder
-                 })
-        {
-            var trimmed = (folder ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(trimmed) || !seen.Add(trimmed))
-                continue;
-            yield return trimmed;
-        }
-    }
-
-    private readonly record struct WipCandidate(int MillNo, DateTime StampUtc, string PoNumber, string SortKey, string FileName);
+    private IEnumerable<string> ResolveBundleFolders() =>
+        WipBundleFolderScanner.ResolveBundleFolders(_options.Value);
 }
