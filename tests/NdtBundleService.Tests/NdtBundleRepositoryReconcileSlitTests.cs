@@ -92,6 +92,27 @@ public sealed class NdtBundleRepositoryReconcileSlitTests : IDisposable
     }
 
     [Fact]
+    public async Task UpdateOutputCsvFilesForBundleAsync_UpdatesLastRowInLastMatchingFile()
+    {
+        var batchNo = "1226100103";
+        var file1 = Path.Combine(_tempDir, "2603832_04_260615_1000059046.csv");
+        var file2 = Path.Combine(_tempDir, "2603832_05_260615_1000059046.csv");
+        const string header =
+            "PO Number,Slit No,NDT Pipes,Rejected P,Slit Start Time,Slit Finish Time,Mill No,NDT Short Length Pipe,Rejected Short Length Pipe,NDT Batch No\n";
+        await File.WriteAllTextAsync(file1, header + $"1000059046,2603832_04,10,0,2026-06-15T10:00:00,2026-06-15T11:00:00,1,,,{batchNo}\n");
+        await File.WriteAllTextAsync(file2, header + $"1000059046,2603832_05,20,0,2026-06-15T10:00:00,2026-06-15T11:00:00,1,,,{batchNo}\n");
+
+        var repo = CreateRepository(_tempDir);
+        var updated = await repo.UpdateOutputCsvFilesForBundleAsync(batchNo, 33, CancellationToken.None);
+
+        Assert.Equal(1, updated);
+        var line1 = (await File.ReadAllLinesAsync(file1))[1];
+        var line2 = (await File.ReadAllLinesAsync(file2))[1];
+        Assert.Equal("10", ReconcileCsvParsing.SplitCsvLine(line1)[2]);
+        Assert.Equal("23", ReconcileCsvParsing.SplitCsvLine(line2)[2]);
+    }
+
+    [Fact]
     public async Task TrySyncBundleTotalFromSlitsAsync_UpdatesSummaryCsvWhenStoredTotalIsZero()
     {
         var batchNo = "1226300099";

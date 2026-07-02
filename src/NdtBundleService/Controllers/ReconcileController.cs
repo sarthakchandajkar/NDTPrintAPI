@@ -255,14 +255,14 @@ public sealed class ReconcileController : ControllerBase
         if (bundle is null)
             return NotFound(new { Message = $"Bundle {batchNo} not found." });
 
-        await _bundleRepository.UpdateBundlePipesAsync(batchNo, request.NewNdtPipes, cancellationToken).ConfigureAwait(false);
-        var summaryUpdated = await _bundleRepository.UpdateBundleSummaryCsvAsync(batchNo, request.NewNdtPipes, cancellationToken).ConfigureAwait(false);
+        await _bundleRepository.UpdateBundlePipesAsync(batchNo, request.NewNdtPipes, CancellationToken.None).ConfigureAwait(false);
+        var summaryUpdated = await _bundleRepository.UpdateBundleSummaryCsvAsync(batchNo, request.NewNdtPipes, CancellationToken.None).ConfigureAwait(false);
 
         await _reconcileSync.SyncAfterBundleTotalReconcileAsync(
             batchNo,
             bundle.PoNumber,
             request.NewNdtPipes,
-            cancellationToken).ConfigureAwait(false);
+            CancellationToken.None).ConfigureAwait(false);
 
         _logger.LogInformation("Reconciled bundle {BatchNo}: NewNdtPipes={NewPipes}.", batchNo, request.NewNdtPipes);
         return Ok(new

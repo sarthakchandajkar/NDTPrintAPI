@@ -831,7 +831,7 @@ WHERE NDT_Batch_No = @BatchNo
         try
         {
             await using var conn = SqlTraceabilityConnection.Create(Opt);
-            await OpenConnectionAsync(conn, "NDT_Process_Consolidated partial update", cancellationToken).ConfigureAwait(false);
+            await OpenConnectionAsync(conn, "NDT_Process_Consolidated partial update", CancellationToken.None).ConfigureAwait(false);
 
             const string sql = @"
 IF EXISTS (SELECT 1 FROM dbo.NDT_Process_Consolidated WHERE NDT_Batch_No = @BatchNo)
@@ -860,7 +860,7 @@ END";
             cmd.Parameters.AddWithValue("@BundleStart", (object?)bundleStart ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@BundleEnd", (object?)bundleEnd ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@OutputFile", (object?)NullIfEmpty(outputFilePath) ?? DBNull.Value);
-            var rows = await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            var rows = await cmd.ExecuteNonQueryAsync(CancellationToken.None).ConfigureAwait(false);
             if (rows > 0)
             {
                 _writeTracker.RecordSuccess("NDT_Process_Consolidated", ndtBatchNo);
