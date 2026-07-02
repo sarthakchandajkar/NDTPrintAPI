@@ -74,6 +74,8 @@ public sealed class ReconcileSyncService : IReconcileSyncService
     {
         var batch = ndtBatchNo.Trim();
         var po = poNumber.Trim();
+        // Bundle reconcile touches UNC CSV folders and SQL; do not honor HTTP request cancellation.
+        var ioToken = CancellationToken.None;
 
         var csvPath = await NdtProcessCsvReconcileHelper.TryUpdateOkForBatchAsync(
             Opt,
@@ -83,7 +85,7 @@ public sealed class ReconcileSyncService : IReconcileSyncService
             hydroReject: null,
             revisualReject: null,
             _logger,
-            cancellationToken).ConfigureAwait(false);
+            ioToken).ConfigureAwait(false);
 
         var metrics = NdtProcessCsvReconcileHelper.TryReadMetricsForBatch(Opt, batch);
         var visualRej = metrics?.VisualReject ?? 0;
@@ -104,9 +106,9 @@ public sealed class ReconcileSyncService : IReconcileSyncService
             bundleStart: null,
             bundleEnd: null,
             outputFilePath: csvPath,
-            cancellationToken).ConfigureAwait(false);
+            ioToken).ConfigureAwait(false);
 
-        await _traceability.SyncOutputSlitRowsFromPerSlitCsvForBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+        await _traceability.SyncOutputSlitRowsFromPerSlitCsvForBatchAsync(batch, ioToken).ConfigureAwait(false);
     }
 
     public async Task<int> SyncAfterSlitReconcileAsync(

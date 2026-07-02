@@ -624,7 +624,9 @@ WHERE Mill_No = @MillNo
             return 0;
 
         var batchNoTrimmed = batchNo.Trim();
-        var filesOrdered = Directory.EnumerateFiles(folder, "*.csv").OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
+        // UNC per-slit folders can hold thousands of CSVs; bundle reconcile must not honor HTTP cancellation.
+        var ioToken = CancellationToken.None;
+        var filesOrdered = await ResolvePerSlitCsvPathsForBundleUpdateAsync(batchNoTrimmed, folder).ConfigureAwait(false);
 
         // Find the last file (by name order) that contains this NDT Batch No
         string? lastFileWithBatch = null;
@@ -632,7 +634,7 @@ WHERE Mill_No = @MillNo
         {
             try
             {
-                var lines = await File.ReadAllLinesAsync(path, cancellationToken).ConfigureAwait(false);
+                var lines = await File.ReadAllLinesAsync(path, ioToken).ConfigureAwait(false);
                 for (var i = 1; i < lines.Length; i++)
                 {
                     var cols = SplitCsvLine(lines[i]);
@@ -663,7 +665,7 @@ WHERE Mill_No = @MillNo
                 break;
             try
             {
-                var lines = await File.ReadAllLinesAsync(path, cancellationToken).ConfigureAwait(false);
+                var lines = await File.ReadAllLinesAsync(path, ioToken).ConfigureAwait(false);
                 for (var i = 1; i < lines.Length; i++)
                 {
                     var cols = SplitCsvLine(lines[i]);
@@ -677,7 +679,7 @@ WHERE Mill_No = @MillNo
         // In the last file, set the last row for this batch so that grand total = newPipes
         try
         {
-            var lines = await File.ReadAllLinesAsync(lastFileWithBatch, cancellationToken).ConfigureAwait(false);
+            var lines = await File.ReadAllLinesAsync(lastFileWithBatch, ioToken).ConfigureAwait(false);
             var lastRowIndex = -1;
             var currentLastFileSum = 0;
             for (var i = 1; i < lines.Length; i++)
@@ -701,7 +703,7 @@ WHERE Mill_No = @MillNo
 
             lastRowCols[ColNdtPipes] = newLastRowValue.ToString();
             lines[lastRowIndex] = string.Join(",", lastRowCols);
-            await File.WriteAllLinesAsync(lastFileWithBatch, lines, cancellationToken).ConfigureAwait(false);
+            await File.WriteAllLinesAsync(lastFileWithBatch, lines, ioToken).ConfigureAwait(false);
             _logger.LogInformation("Updated NDT Pipes for bundle {BatchNo} in last file {Path}: last row set to {NewRowValue} so total = {NewPipes}.", batchNo, lastFileWithBatch, newLastRowValue, newPipes);
             return 1;
         }
@@ -711,6 +713,68 @@ WHERE Mill_No = @MillNo
         }
 
         return 0;
+    }
+
+    private async Task<List<string>> ResolvePerSlitCsvPathsForBundleUpdateAsync(string batchNoTrimmed, string folder)
+    {
+        if (UseDatabase)
+        {
+            try
+            {
+                var fromSql = await GetPerSlitSourceFilePathsForBatchFromSqlAsync(batchNoTrimmed, folder).ConfigureAwait(false);
+                if (fromSql.Count > 0)
+                {
+                    _logger.LogDebug(
+                        "Bundle CSV update narrowed to {Count} per-slit file(s) from Output_Slit_Row for batch {BatchNo}.",
+                        fromSql.Count,
+                        batchNoTrimmed);
+                    return fromSql;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Could not resolve per-slit source files from SQL for batch {BatchNo}; falling back to full folder scan.",
+                    batchNoTrimmed);
+            }
+        }
+
+        return Directory.EnumerateFiles(folder, "*.csv")
+            .Where(p => !Path.GetFileName(p).StartsWith("NDT_Bundle_", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private async Task<List<string>> GetPerSlitSourceFilePathsForBatchFromSqlAsync(string batchNo, string folder)
+    {
+        await using var conn = SqlTraceabilityConnection.Create(Opt);
+        await conn.OpenAsync(CancellationToken.None).ConfigureAwait(false);
+
+        const string sql = @"
+SELECT DISTINCT Source_File
+FROM dbo.Output_Slit_Row
+WHERE NDT_Batch_No = @BatchNo
+  AND Source_File IS NOT NULL
+  AND LTRIM(RTRIM(Source_File)) <> N''";
+
+        var paths = new List<string>();
+        await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@BatchNo", batchNo);
+        await using var reader = await cmd.ExecuteReaderAsync(CancellationToken.None).ConfigureAwait(false);
+        while (await reader.ReadAsync(CancellationToken.None).ConfigureAwait(false))
+        {
+            if (reader.IsDBNull(0))
+                continue;
+            var baseName = reader.GetString(0).Trim();
+            if (baseName.Length == 0)
+                continue;
+            var path = Path.Combine(folder, baseName);
+            if (File.Exists(path))
+                paths.Add(path);
+        }
+
+        return paths.OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
     public async Task<IReadOnlyList<(string SlitNo, int NdtPipes)>> GetSlitsForBatchAsync(string batchNo, CancellationToken cancellationToken)
