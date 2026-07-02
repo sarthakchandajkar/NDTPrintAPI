@@ -67,6 +67,31 @@ public sealed class NdtBundleRepositoryReconcileSlitTests : IDisposable
     }
 
     [Fact]
+    public async Task UpdateOutputCsvFilesForSlitAsync_OnlyScansMatchingFilename()
+    {
+        var batchNo = "1226100100";
+        var targetSlit = "2603832_05";
+        var targetPath = Path.Combine(_tempDir, $"{targetSlit}_260615_1000059046.csv");
+        await File.WriteAllTextAsync(targetPath,
+            "PO Number,Slit No,NDT Pipes,Rejected P,Slit Start Time,Slit Finish Time,Mill No,NDT Short Length Pipe,Rejected Short Length Pipe,NDT Batch No\n" +
+            $"1000059046,{targetSlit},5,0,2026-06-15T10:00:00,2026-06-15T11:00:00,1,,,{batchNo}\n");
+
+        var otherPath = Path.Combine(_tempDir, "2604061_01_260615_1000059046.csv");
+        await File.WriteAllTextAsync(otherPath,
+            "PO Number,Slit No,NDT Pipes,Rejected P,Slit Start Time,Slit Finish Time,Mill No,NDT Short Length Pipe,Rejected Short Length Pipe,NDT Batch No\n" +
+            $"1000059046,2604061_01,9,0,2026-06-15T10:00:00,2026-06-15T11:00:00,1,,,{batchNo}\n");
+
+        var repo = CreateRepository(_tempDir);
+        var updated = await repo.UpdateOutputCsvFilesForSlitAsync(batchNo, targetSlit, 2, CancellationToken.None);
+
+        Assert.Equal(1, updated);
+        var targetLine = (await File.ReadAllLinesAsync(targetPath))[1];
+        var otherLine = (await File.ReadAllLinesAsync(otherPath))[1];
+        Assert.Equal("2", ReconcileCsvParsing.SplitCsvLine(targetLine)[2]);
+        Assert.Equal("9", ReconcileCsvParsing.SplitCsvLine(otherLine)[2]);
+    }
+
+    [Fact]
     public async Task TrySyncBundleTotalFromSlitsAsync_UpdatesSummaryCsvWhenStoredTotalIsZero()
     {
         var batchNo = "1226300099";

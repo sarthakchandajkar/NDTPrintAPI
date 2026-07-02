@@ -826,16 +826,19 @@ ORDER BY SlitNo";
         var batchNoTrimmed = batchNo.Trim();
         var slitNoNormalized = ReconcileCsvParsing.NormalizeSlitKey(slitNo);
 
-        var files = TryListPerSlitOutputCsvFiles();
+        var files = FilterPerSlitOutputCsvFilesForReconcile(slitNoNormalized);
         if (files.Count == 0)
             return 0;
+
+        // UNC per-slit folders can hold thousands of CSVs; reconcile must not honor HTTP request cancellation.
+        var ioToken = CancellationToken.None;
 
         var filesUpdated = 0;
         foreach (var path in files)
         {
             try
             {
-                var lines = await File.ReadAllLinesAsync(path, cancellationToken).ConfigureAwait(false);
+                var lines = await File.ReadAllLinesAsync(path, ioToken).ConfigureAwait(false);
                 if (lines.Length == 0)
                     continue;
 
@@ -871,7 +874,7 @@ ORDER BY SlitNo";
 
                 if (changed)
                 {
-                    await File.WriteAllLinesAsync(path, lines, cancellationToken).ConfigureAwait(false);
+                    await File.WriteAllLinesAsync(path, lines, ioToken).ConfigureAwait(false);
                     filesUpdated++;
                 }
             }
@@ -882,6 +885,33 @@ ORDER BY SlitNo";
         }
 
         return filesUpdated;
+    }
+
+    private List<string> FilterPerSlitOutputCsvFilesForReconcile(string slitNoNormalized)
+    {
+        var all = TryListPerSlitOutputCsvFiles();
+        if (all.Count == 0 || slitNoNormalized == "—")
+            return all;
+
+        var filtered = all
+            .Where(p => ReconcileCsvParsing.PerSlitOutputFileNameMatchesSlit(Path.GetFileName(p), slitNoNormalized))
+            .ToList();
+
+        if (filtered.Count > 0)
+        {
+            _logger.LogDebug(
+                "Slit reconcile narrowed per-slit CSV scan from {Total} to {Filtered} file(s) for slit {SlitNo}.",
+                all.Count,
+                filtered.Count,
+                slitNoNormalized);
+            return filtered;
+        }
+
+        _logger.LogWarning(
+            "Slit reconcile found no per-slit CSV filename match for slit {SlitNo}; scanning all {Total} file(s).",
+            slitNoNormalized,
+            all.Count);
+        return all;
     }
 
     private List<string> TryListPerSlitOutputCsvFiles()

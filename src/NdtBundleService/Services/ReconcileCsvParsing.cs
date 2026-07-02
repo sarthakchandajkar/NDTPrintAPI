@@ -52,6 +52,21 @@ public static class ReconcileCsvParsing
     public static bool SlitKeysMatch(string? cell, string? targetSlit) =>
         string.Equals(NormalizeSlitKey(cell), NormalizeSlitKey(targetSlit), StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Per-slit output CSVs are named like the input slit file (e.g. <c>2603832_05_260615_1000059046.csv</c>).
+    /// Used to avoid scanning every file on a large UNC share during slit reconcile.
+    /// </summary>
+    public static bool PerSlitOutputFileNameMatchesSlit(string fileBaseName, string slitNoNormalized)
+    {
+        if (string.IsNullOrWhiteSpace(fileBaseName))
+            return false;
+        if (slitNoNormalized == "—")
+            return true;
+
+        return fileBaseName.StartsWith(slitNoNormalized + "_", StringComparison.OrdinalIgnoreCase)
+            || fileBaseName.Contains("_" + slitNoNormalized + "_", StringComparison.OrdinalIgnoreCase);
+    }
+
     public static string ReplaceFieldAtIndex(string line, int fieldIndex, string newCellValue)
     {
         if (string.IsNullOrEmpty(line) || fieldIndex < 0)

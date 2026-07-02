@@ -703,11 +703,12 @@ WHERE NDT_Batch_No = @BatchNo
         const int colNdtBatchNo = 9;
         const int minColumns = 10;
         var synced = 0;
+        var ioToken = CancellationToken.None;
 
         try
         {
             await using var conn = SqlTraceabilityConnection.Create(Opt);
-            await OpenConnectionAsync(conn, "Output_Slit_Row sync from CSV", cancellationToken).ConfigureAwait(false);
+            await OpenConnectionAsync(conn, "Output_Slit_Row sync from CSV", CancellationToken.None).ConfigureAwait(false);
 
             const string sql = @"
 UPDATE dbo.Output_Slit_Row
@@ -716,16 +717,15 @@ WHERE NDT_Batch_No = @BatchNo
   AND Source_File = @SourceFile
   AND Source_Row_Number = @SourceRow;";
 
-            var files = Directory.EnumerateFiles(folder, "*.csv")
-                .Where(p => !Path.GetFileName(p).StartsWith("NDT_Bundle_", StringComparison.OrdinalIgnoreCase));
+            var candidatePaths = await ResolvePerSlitCsvPathsForBatchSyncAsync(conn, folder, batch, CancellationToken.None)
+                .ConfigureAwait(false);
 
-            foreach (var path in files)
+            foreach (var path in candidatePaths)
             {
-                cancellationToken.ThrowIfCancellationRequested();
                 string[] lines;
                 try
                 {
-                    lines = await File.ReadAllLinesAsync(path, cancellationToken).ConfigureAwait(false);
+                    lines = await File.ReadAllLinesAsync(path, ioToken).ConfigureAwait(false);
                 }
                 catch
                 {
@@ -753,7 +753,7 @@ WHERE NDT_Batch_No = @BatchNo
                     cmd.Parameters.AddWithValue("@BatchNo", batch);
                     cmd.Parameters.AddWithValue("@SourceFile", baseName);
                     cmd.Parameters.AddWithValue("@SourceRow", i + 1);
-                    synced += await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                    synced += await cmd.ExecuteNonQueryAsync(CancellationToken.None).ConfigureAwait(false);
                 }
             }
 
@@ -771,6 +771,45 @@ WHERE NDT_Batch_No = @BatchNo
             _writeTracker.RecordFailure("Output_Slit_Row", ex.Message, batch);
             _logger.LogWarning(ex, "Failed to sync Output_Slit_Row from CSV for batch {BatchNo}.", batch);
         }
+    }
+
+    private static async Task<List<string>> ResolvePerSlitCsvPathsForBatchSyncAsync(
+        SqlConnection conn,
+        string folder,
+        string batch,
+        CancellationToken cancellationToken)
+    {
+        const string sourceSql = @"
+SELECT DISTINCT Source_File
+FROM dbo.Output_Slit_Row
+WHERE NDT_Batch_No = @BatchNo
+  AND Source_File IS NOT NULL
+  AND LTRIM(RTRIM(Source_File)) <> N''";
+
+        var paths = new List<string>();
+        await using (var cmd = new SqlCommand(sourceSql, conn))
+        {
+            cmd.Parameters.AddWithValue("@BatchNo", batch);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (reader.IsDBNull(0))
+                    continue;
+                var baseName = reader.GetString(0).Trim();
+                if (baseName.Length == 0)
+                    continue;
+                var path = Path.Combine(folder, baseName);
+                if (File.Exists(path))
+                    paths.Add(path);
+            }
+        }
+
+        if (paths.Count > 0)
+            return paths;
+
+        return Directory.EnumerateFiles(folder, "*.csv")
+            .Where(p => !Path.GetFileName(p).StartsWith("NDT_Bundle_", StringComparison.OrdinalIgnoreCase))
+            .ToList();
     }
 
     public async Task UpdateNdtProcessConsolidatedFromStationsAsync(
