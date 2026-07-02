@@ -327,12 +327,13 @@ public sealed class ReconcileController : ControllerBase
             if (bundle is null)
                 return NotFound(new { Message = $"Bundle {batchNo} not found." });
 
+            // Per-slit CSV + SQL updates can exceed HTTP/proxy timeouts on large UNC shares.
             var filesUpdated = await _bundleRepository
-                .UpdateOutputCsvFilesForSlitAsync(batchNo, slitNo, request.NewNdtPipes, cancellationToken)
+                .UpdateOutputCsvFilesForSlitAsync(batchNo, slitNo, request.NewNdtPipes, CancellationToken.None)
                 .ConfigureAwait(false);
 
             var sqlRowsUpdated = await _reconcileSync
-                .SyncAfterSlitReconcileAsync(batchNo, slitNo, request.NewNdtPipes, cancellationToken)
+                .SyncAfterSlitReconcileAsync(batchNo, slitNo, request.NewNdtPipes, CancellationToken.None)
                 .ConfigureAwait(false);
 
             if (filesUpdated == 0 && sqlRowsUpdated == 0)
@@ -351,7 +352,7 @@ public sealed class ReconcileController : ControllerBase
                 filesUpdated,
                 sqlRowsUpdated,
                 bundle.TotalNdtPcs,
-                cancellationToken).ConfigureAwait(false);
+                CancellationToken.None).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

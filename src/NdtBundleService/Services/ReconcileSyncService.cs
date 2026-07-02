@@ -115,16 +115,13 @@ public sealed class ReconcileSyncService : IReconcileSyncService
         int newNdtPipes,
         CancellationToken cancellationToken)
     {
-        var sqlRows = await _traceability.UpdateOutputSlitRowNdtPipesByBatchAndSlitAsync(
+        // Slit reconcile already updates the matching per-slit CSV on disk; a direct SQL update is sufficient.
+        // Avoid SyncOutputSlitRowsFromPerSlitCsvForBatchAsync here — it scans every CSV on the UNC share.
+        return await _traceability.UpdateOutputSlitRowNdtPipesByBatchAndSlitAsync(
             ndtBatchNo.Trim(),
             slitNo,
             newNdtPipes,
-            cancellationToken).ConfigureAwait(false);
-
-        await _traceability.SyncOutputSlitRowsFromPerSlitCsvForBatchAsync(ndtBatchNo.Trim(), cancellationToken)
-            .ConfigureAwait(false);
-
-        return sqlRows;
+            CancellationToken.None).ConfigureAwait(false);
     }
 
     public async Task SyncAfterManualStationReconcileAsync(

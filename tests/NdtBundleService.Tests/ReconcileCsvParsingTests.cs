@@ -20,6 +20,17 @@ public sealed class ReconcileCsvParsingTests
     public void SlitKeysMatch_treats_empty_as_dash(string cell, string target, bool expected) =>
         Assert.Equal(expected, ReconcileCsvParsing.SlitKeysMatch(cell, target));
 
+    [Theory]
+    [InlineData("2603832_05_260615_1000059046.csv", "2603832_05", true)]
+    [InlineData("quoted.csv", "05", false)]
+    [InlineData("2603832_05_260615_1000059046.csv", "05", true)]
+    [InlineData("2604061_01_260615_1000059046.csv", "2603832_05", false)]
+    public void PerSlitOutputFileNameMatchesSlit_matches_input_slit_filename_pattern(
+        string fileName,
+        string slit,
+        bool expected) =>
+        Assert.Equal(expected, ReconcileCsvParsing.PerSlitOutputFileNameMatchesSlit(fileName, slit));
+
     [Fact]
     public void ResolveOutputCsvColumns_uses_header_positions()
     {
