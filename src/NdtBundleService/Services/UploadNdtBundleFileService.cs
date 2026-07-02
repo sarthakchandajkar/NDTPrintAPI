@@ -55,7 +55,12 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
         int? firstMill = null;
 
         var revisualFiles = Directory.EnumerateFiles(ndtProcessFolder, "*.csv")
-            .Where(p => Path.GetFileName(p).StartsWith("NDT process_", StringComparison.OrdinalIgnoreCase))
+            .Where(p =>
+            {
+                var name = Path.GetFileName(p);
+                return name.StartsWith("NDT_process_", StringComparison.OrdinalIgnoreCase) ||
+                       name.StartsWith("NDT process_", StringComparison.OrdinalIgnoreCase);
+            })
             .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
             .ToList();
 

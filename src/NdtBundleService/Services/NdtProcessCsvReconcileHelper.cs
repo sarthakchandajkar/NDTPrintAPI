@@ -92,8 +92,13 @@ internal static class NdtProcessCsvReconcileHelper
         string? latestPath = null;
         var latestTime = DateTime.MinValue;
 
-        foreach (var path in Directory.EnumerateFiles(folder, "NDT process_*.csv"))
+        foreach (var path in Directory.EnumerateFiles(folder, "*.csv"))
         {
+            var fileName = Path.GetFileName(path);
+            if (!fileName.StartsWith("NDT_process_", StringComparison.OrdinalIgnoreCase) &&
+                !fileName.StartsWith("NDT process_", StringComparison.OrdinalIgnoreCase))
+                continue;
+
             try
             {
                 var lines = File.ReadAllLines(path);

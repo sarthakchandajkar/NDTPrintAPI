@@ -421,7 +421,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         var timePart = now.ToString("HHmmss", CultureInfo.InvariantCulture);
         var safePo = CsvOutputFileNaming.SanitizeToken(state.PoNumber.Trim());
         var safeBatch = CsvOutputFileNaming.SanitizeToken(state.NdtBatchNo);
-        var fileName = $"NDT process_{safePo}_{safeBatch}_{datePart}_{timePart}.csv";
+        var fileName = $"NDT_process_{safePo}_{safeBatch}_{datePart}_{timePart}.csv";
         var path = Path.Combine(folder, fileName);
 
         const string header = "PO Number, NDT BATCH NO, NDT Pcs, OK, Visual Reject, Hydrotest Reject, Re visual Reject, Bundle Start, Bundle End";
