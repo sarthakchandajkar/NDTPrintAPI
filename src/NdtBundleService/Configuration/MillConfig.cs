@@ -27,11 +27,20 @@ public sealed class MillConfig
     /// <summary>PLC IP address (ISO-on-TCP port 102).</summary>
     public string IpAddress { get; set; } = string.Empty;
 
-    /// <summary>TCP open-communication host for <c>PoEndSource=TcpOpen</c> (separate from S7 <see cref="IpAddress"/>).</summary>
+    /// <summary>TCP open-communication host for <c>PoEndSource=TcpOpen</c> (falls back to <see cref="IpAddress"/>).</summary>
     public string? TcpOpenCommHost { get; set; }
 
-    /// <summary>TCP open-communication port for <c>PoEndSource=TcpOpen</c>.</summary>
+    /// <summary>TCP open-communication port (open-comm / AG_SEND pool — not S7 port 102).</summary>
+    public int TcpOpenPort { get; set; }
+
+    /// <summary>Legacy alias for <see cref="TcpOpenPort"/>; used when <see cref="TcpOpenPort"/> is 0.</summary>
     public int TcpOpenCommPort { get; set; }
+
+    /// <summary>TCP connect timeout (ms) for <c>PoEndSource=TcpOpen</c>.</summary>
+    public int TcpOpenConnectTimeoutMs { get; set; } = 5000;
+
+    /// <summary>TCP read timeout (ms); 0 = no read timeout (persistent connection, reconnect handles loss).</summary>
+    public int TcpOpenReceiveTimeoutMs { get; set; }
 
     /// <summary>S7 rack (typically 0).</summary>
     public short Rack { get; set; }
@@ -86,4 +95,14 @@ public sealed class MillConfig
     public string TriggerAddress => $"M{TriggerByte}.{TriggerBit}";
 
     public string AckAddress => $"M{AckByte}.{AckBit}";
+
+    public string? ResolveTcpOpenHost()
+    {
+        if (!string.IsNullOrWhiteSpace(TcpOpenCommHost))
+            return TcpOpenCommHost.Trim();
+
+        return string.IsNullOrWhiteSpace(IpAddress) ? null : IpAddress.Trim();
+    }
+
+    public int ResolveTcpOpenPort() => TcpOpenPort > 0 ? TcpOpenPort : TcpOpenCommPort;
 }

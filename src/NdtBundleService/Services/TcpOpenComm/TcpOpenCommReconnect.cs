@@ -8,18 +8,18 @@ public sealed class TcpOpenCommReconnect
 {
     private readonly PlcHandshakeOptions _options;
     private readonly ILogger _logger;
-    private readonly string _millName;
+    private readonly int _millNo;
     private readonly string _endpoint;
     private int _reconnectDelayMs;
 
     public TcpOpenCommReconnect(
         PlcHandshakeOptions options,
-        string millName,
+        int millNo,
         string endpoint,
         ILogger logger)
     {
         _options = options;
-        _millName = millName;
+        _millNo = millNo;
         _endpoint = endpoint;
         _logger = logger;
         Reset();
@@ -31,9 +31,9 @@ public sealed class TcpOpenCommReconnect
     public async Task DelayAsync(CancellationToken cancellationToken)
     {
         _logger.LogWarning(
-            "{MillName}: TCP open-comm reconnect in {Delay}ms (endpoint {Endpoint}).",
-            _millName,
+            "TCP reconnecting in {Delay}ms — Mill {MillNo}, PoEndSource=TcpOpen, endpoint {Endpoint}.",
             _reconnectDelayMs,
+            _millNo,
             _endpoint);
 
         await Task.Delay(_reconnectDelayMs, cancellationToken).ConfigureAwait(false);

@@ -6,4 +6,5 @@ public sealed record MillTcpPoEndMessage(
     ushort PoTypeId,
     bool TriggerActive,
     byte[] RawPayload,
-    DateTimeOffset ReceivedAtUtc);
+    DateTimeOffset ReceivedAtUtc,
+    Guid CorrelationId);

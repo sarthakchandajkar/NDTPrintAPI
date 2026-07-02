@@ -3,12 +3,13 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Services.PlcHandshake.PlcPoEnd;
+using Serilog.Context;
 
 namespace NdtBundleService.Services.TcpOpenComm;
 
 /// <summary>
 /// One TCP open-communication client per mill with <c>PoEndSource=TcpOpen</c>.
-/// Acknowledges PO-end on the wire then enqueues via Phase 1 <see cref="PlcPoEndEdgeProcessor"/>.
+/// Ack on wire must succeed before enqueueing onto the shared <see cref="PlcPoEndQueue"/>.
 /// </summary>
 public sealed class MillTcpOpenCommWorker : BackgroundService
 {
@@ -35,12 +36,12 @@ public sealed class MillTcpOpenCommWorker : BackgroundService
 
         if (tcpMills.Count == 0)
         {
-            _logger.LogInformation("No mill has PoEndSource=TcpOpen; MillTcpOpenCommWorker idle.");
+            _logger.LogInformation("No TcpOpen mills configured — TCP transport idle.");
             return;
         }
 
         _logger.LogInformation(
-            "MillTcpOpenCommWorker started for {Count} mill(s): {Mills}.",
+            "MillTcpOpenCommWorker started for {Count} TcpOpen mill(s): {Mills}.",
             tcpMills.Count,
             string.Join(", ", tcpMills.Select(m => m.Name)));
 
@@ -50,22 +51,26 @@ public sealed class MillTcpOpenCommWorker : BackgroundService
 
     private async Task RunMillLoopAsync(MillConfig mill, PlcHandshakeOptions handshake, CancellationToken stoppingToken)
     {
-        if (string.IsNullOrWhiteSpace(mill.TcpOpenCommHost) || mill.TcpOpenCommPort <= 0)
+        var millNo = mill.ResolveMillNo();
+        var host = mill.ResolveTcpOpenHost();
+        var port = mill.ResolveTcpOpenPort();
+
+        if (string.IsNullOrWhiteSpace(host) || port <= 0)
         {
             _logger.LogWarning(
-                "{MillName}: PoEndSource=TcpOpen but TcpOpenCommHost/TcpOpenCommPort not configured; skipping.",
-                mill.Name);
+                "TCP transport skipped — Mill {MillNo}, PoEndSource=TcpOpen: host/port not configured.",
+                millNo);
             return;
         }
 
-        var endpoint = $"{mill.TcpOpenCommHost}:{mill.TcpOpenCommPort}";
-        var reconnect = new TcpOpenCommReconnect(handshake, mill.Name, endpoint, _logger);
+        var endpoint = $"{host}:{port}";
+        var reconnect = new TcpOpenCommReconnect(handshake, millNo, endpoint, _logger);
 
         while (!stoppingToken.IsCancellationRequested)
         {
             await using var transport = new MillTcpOpenCommTransport(mill, _logger);
-            transport.PoEndMessageReceived += message =>
-                HandlePoEndMessage(message, mill, transport, _plcPoEndQueue, _logger, stoppingToken);
+            transport.OnTriggerMessageAsync = (message, ct) =>
+                HandlePoEndMessageAsync(message, mill, transport, _plcPoEndQueue, _logger, ct);
 
             try
             {
@@ -81,8 +86,8 @@ public sealed class MillTcpOpenCommWorker : BackgroundService
             {
                 _logger.LogWarning(
                     ex,
-                    "{MillName}: TCP open-comm connection or read loop failed ({Endpoint}).",
-                    mill.Name,
+                    "TCP connection or read loop failed — Mill {MillNo}, PoEndSource=TcpOpen, endpoint {Endpoint}.",
+                    millNo,
                     endpoint);
             }
 
@@ -92,7 +97,10 @@ public sealed class MillTcpOpenCommWorker : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogDebug(ex, "{MillName}: disconnect after TCP failure.", mill.Name);
+                _logger.LogDebug(
+                    ex,
+                    "TCP disconnect after failure — Mill {MillNo}, PoEndSource=TcpOpen.",
+                    millNo);
             }
 
             if (stoppingToken.IsCancellationRequested)
@@ -109,8 +117,11 @@ public sealed class MillTcpOpenCommWorker : BackgroundService
         }
     }
 
-    /// <summary>Testable handler: ack on wire then enqueue PO-end workflow (Phase 1 path).</summary>
-    public static void HandlePoEndMessage(
+    /// <summary>
+    /// Ack on wire first; enqueue only after successful ack (PLC M41.7 / AG_RECV path).
+    /// PO resolution uses the same <see cref="PlcPoEndRequest.PoId"/> path as S7 Phase 1.
+    /// </summary>
+    public static async Task HandlePoEndMessageAsync(
         MillTcpPoEndMessage message,
         MillConfig mill,
         IMillTcpTransport transport,
@@ -121,43 +132,59 @@ public sealed class MillTcpOpenCommWorker : BackgroundService
         if (!message.TriggerActive)
             return;
 
-        var correlationId = Guid.NewGuid();
         var millNo = mill.ResolveMillNo();
-        var triggerAddress = $"TcpOpen:{mill.TcpOpenCommHost}:{mill.TcpOpenCommPort}";
+        var correlationId = message.CorrelationId;
+        var triggerAddress = $"TcpOpen:{mill.ResolveTcpOpenHost()}:{mill.ResolveTcpOpenPort()}";
 
-        PlcPoEndEdgeProcessor.ProcessDecoupledEdge(
-            new PlcPoEndEdgeProcessor.EdgeProcessInput(
-                millNo,
-                mill.Name,
-                message.PoTypeId,
-                NdtCountFinal: 0,
-                correlationId,
-                message.ReceivedAtUtc,
-                StartupRecovery: false,
-                triggerAddress),
-            beginAckTrue: () => _ = SendAckFireAndForgetAsync(transport, mill.Name, correlationId, logger, cancellationToken),
-            tryEnqueue: queue.TryEnqueue,
-            logger);
-    }
+        using (LogContext.PushProperty("CorrelationId", correlationId))
+        {
+            try
+            {
+                await transport.SendAckAsync(0x01, cancellationToken).ConfigureAwait(false);
+                logger.LogInformation(
+                    "TCP ack sent — Mill {MillNo}, PoEndSource=TcpOpen, PO_Type_ID {PoTypeId}, CorrelationId {CorrelationId}.",
+                    millNo,
+                    message.PoTypeId,
+                    correlationId);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(
+                    ex,
+                    "TCP ack failed — Mill {MillNo}, PoEndSource=TcpOpen, PO_Type_ID {PoTypeId}, CorrelationId {CorrelationId}. PO end will not be enqueued.",
+                    millNo,
+                    message.PoTypeId,
+                    correlationId);
+                return;
+            }
 
-    private static async Task SendAckFireAndForgetAsync(
-        IMillTcpTransport transport,
-        string millName,
-        Guid correlationId,
-        ILogger logger,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            await transport.SendAckAsync(0x01, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(
-                ex,
-                "{MillName}: failed to send TCP PO-end ack — CorrelationId {CorrelationId}.",
-                millName,
-                correlationId);
+            var request = new PlcPoEndRequest
+            {
+                MillNo = millNo,
+                PoId = message.PoTypeId,
+                NdtCountFinal = 0,
+                CorrelationId = correlationId,
+                DetectedAtUtc = message.ReceivedAtUtc,
+                StartupRecovery = false
+            };
+
+            if (queue.TryEnqueue(request))
+            {
+                logger.LogInformation(
+                    "TCP PO end enqueued — Mill {MillNo}, PoEndSource=TcpOpen, trigger {Trigger}, PO_Type_ID {PoTypeId}, CorrelationId {CorrelationId}.",
+                    millNo,
+                    triggerAddress,
+                    message.PoTypeId,
+                    correlationId);
+            }
+            else
+            {
+                logger.LogWarning(
+                    "TCP PO end not enqueued (mill {MillNo} already queued or processing) — PoEndSource=TcpOpen, PO_Type_ID {PoTypeId}, CorrelationId {CorrelationId}.",
+                    millNo,
+                    message.PoTypeId,
+                    correlationId);
+            }
         }
     }
 }
