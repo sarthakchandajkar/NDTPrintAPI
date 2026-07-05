@@ -526,8 +526,11 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ entries }),
     }),
-  settingsPlc: (token: string) =>
-    fetchSettingsApi<SettingsPlcDiagnostics>("/api/Settings/plc", token),
+  settingsPlc: (token: string, options?: { live?: boolean }) =>
+    fetchSettingsApi<SettingsPlcDiagnostics>(
+      `/api/Settings/plc${options?.live ? "?live=true" : ""}`,
+      token
+    ),
   settingsTestPoChange: (token: string, millNo: number) =>
     fetchSettingsApi<SettingsPoChangeTestResult>("/api/Settings/plc/test-po-change", token, {
       method: "POST",
