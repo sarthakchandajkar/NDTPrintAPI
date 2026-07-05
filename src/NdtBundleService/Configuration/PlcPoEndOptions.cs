@@ -26,10 +26,16 @@ public sealed class PlcPoEndOptions
     public int ModbusConnectTimeoutMs { get; set; } = 3000;
 
     /// <summary>Inclusive lower bound for a valid PO_Id from the PLC (see mill Modbus mapping).</summary>
-    public int MinValidPoId { get; set; } = 1;
+    public int MinValidPoId { get; set; } = 1_000_000_000;
 
     /// <summary>Inclusive upper bound for a valid PO_Id from the PLC.</summary>
     public int MaxValidPoId { get; set; } = int.MaxValue;
+
+    /// <summary>
+    /// Minimum digit count for a formatted PLC PO number (e.g. SAP PO <c>1000059923</c>).
+    /// Values like DB251 PO_Id <c>2</c> are rejected and PO is resolved from Input Slit CSV instead.
+    /// </summary>
+    public int MinSapPoNumberDigits { get; set; } = 10;
 
     /// <summary>Invariant-culture format for converting PLC PO_Id to PO number string (e.g. <c>{0}</c> or <c>PO{0}</c>).</summary>
     public string PoNumberFormatFromPlc { get; set; } = "{0}";

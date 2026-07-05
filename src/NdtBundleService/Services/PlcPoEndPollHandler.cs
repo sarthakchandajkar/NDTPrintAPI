@@ -213,11 +213,9 @@ public sealed class PlcPoEndPollHandler
             if (snapshots is null || !snapshots.TryGetValue(millNo, out var snap) || !snap.ReadOk)
                 return null;
 
-            if (!IsValidPoId(snap.PoId, plcCfg.MinValidPoId, plcCfg.MaxValidPoId))
+            if (!PlcPoNumberResolution.TryResolveFromPlcPoId(snap.PoId, plcCfg, out var normalized))
                 return null;
 
-            var formatted = PlcPoIdFormatting.Format(snap.PoId, plcCfg.PoNumberFormatFromPlc);
-            var normalized = InputSlitCsvParsing.NormalizePo(formatted);
             _logger.LogInformation(
                 "Mill {Mill}: PO-end PO resolved from PLC PO_Id {PoId} → {Po}.",
                 millNo,
@@ -231,8 +229,6 @@ public sealed class PlcPoEndPollHandler
             return null;
         }
     }
-
-    private static bool IsValidPoId(int id, int minId, int maxId) => id >= minId && id <= maxId;
 
     private async Task<bool> RunWorkflowForMillAsync(int millNo, string poNumber, PlcPoEndOptions plcCfg, CancellationToken cancellationToken)
     {

@@ -155,22 +155,28 @@ public sealed class PlcPoEndQueueWorker : BackgroundService
     private async Task<string> ResolvePoNumberAsync(PlcPoEndRequest request, CancellationToken cancellationToken)
     {
         var plcCfg = _options.Value.PlcPoEnd ?? new PlcPoEndOptions();
-        var minId = plcCfg.MinValidPoId;
-        var maxId = plcCfg.MaxValidPoId;
 
-        if (request.PoId >= minId && request.PoId <= maxId)
+        if (PlcPoNumberResolution.TryResolveFromPlcPoId(request.PoId, plcCfg, out var fromPlc))
         {
-            var formatted = PlcPoIdFormatting.Format(request.PoId, plcCfg.PoNumberFormatFromPlc);
-            if (!string.IsNullOrWhiteSpace(formatted))
-            {
-                _logger.LogDebug(
-                    "Mill {MillNo}: PO resolved from PLC PO_Id {PoId} → {PO}, CorrelationId {CorrelationId}.",
-                    request.MillNo,
-                    request.PoId,
-                    formatted,
-                    request.CorrelationId);
-                return InputSlitCsvParsing.NormalizePo(formatted);
-            }
+            _logger.LogDebug(
+                "Mill {MillNo}: PO resolved from PLC PO_Id {PoId} → {PO}, CorrelationId {CorrelationId}.",
+                request.MillNo,
+                request.PoId,
+                fromPlc,
+                request.CorrelationId);
+            return fromPlc;
+        }
+
+        if (request.PoId is not 0)
+        {
+            _logger.LogInformation(
+                "Mill {MillNo}: PLC PO_Id {PoId} is not a plausible SAP PO (range {Min}–{Max}, min {Digits} digits); resolving from Input Slit CSV. CorrelationId {CorrelationId}.",
+                request.MillNo,
+                request.PoId,
+                plcCfg.MinValidPoId,
+                plcCfg.MaxValidPoId,
+                plcCfg.MinSapPoNumberDigits,
+                request.CorrelationId);
         }
 
         var poByMill = await _activePoPerMill.GetLatestPoByMillAsync(cancellationToken).ConfigureAwait(false);

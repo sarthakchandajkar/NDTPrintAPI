@@ -269,12 +269,14 @@ public sealed class PlcHandshakeService
                 });
 
                 TryUpdateDb251Counts(millNo);
-                await TryUpdateMillSignalsAsync(millNo, stoppingToken).ConfigureAwait(false);
 
-                _connectionHealth.RecordModbusPoll(true, _statusRegistry.AllConnected());
-
+                // Handshake (ack + PO-change edge) before slow hooter/MES resolve so Mill-1 polls stay timely.
                 if (_ackAwaitingTriggerClear)
+                {
                     TryCompleteMesAckSequence(millNo, trigger);
+                    if (!_ackAwaitingTriggerClear)
+                        RefreshTriggerAndAck(millNo, out trigger, out ack);
+                }
 
                 if (!_primed)
                 {
@@ -331,6 +333,12 @@ public sealed class PlcHandshakeService
                     }
 
                     _prevTriggerActive = trigger;
+                    await TryUpdateMillSignalsAsync(
+                            millNo,
+                            stoppingToken,
+                            deferHooterResolve: ShouldDeferHooterResolve())
+                        .ConfigureAwait(false);
+                    _connectionHealth.RecordModbusPoll(true, _statusRegistry.AllConnected());
                     await PollDelayAsync(stoppingToken).ConfigureAwait(false);
                     continue;
                 }
@@ -356,6 +364,7 @@ public sealed class PlcHandshakeService
                     else
                     {
                         await RunHandshakeAsync(millNo, stoppingToken).ConfigureAwait(false);
+                        RefreshTriggerAndAck(millNo, out trigger, out ack);
                     }
                 }
                 else if (!_handshakeInProgress && !_settingsTestInProgress)
@@ -371,6 +380,13 @@ public sealed class PlcHandshakeService
                 }
 
                 _prevTriggerActive = trigger;
+
+                await TryUpdateMillSignalsAsync(
+                        millNo,
+                        stoppingToken,
+                        deferHooterResolve: ShouldDeferHooterResolve())
+                    .ConfigureAwait(false);
+                _connectionHealth.RecordModbusPoll(true, _statusRegistry.AllConnected());
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -800,7 +816,25 @@ public sealed class PlcHandshakeService
         }
     }
 
-    private async Task TryUpdateMillSignalsAsync(int millNo, CancellationToken cancellationToken)
+    private bool ShouldDeferHooterResolve() => _ackAwaitingTriggerClear || _handshakeInProgress;
+
+    private void RefreshTriggerAndAck(int millNo, out bool trigger, out bool ack)
+    {
+        trigger = ReadMerkerBit(_mill.TriggerByte, _mill.TriggerBit);
+        ack = ReadMerkerBit(_mill.AckByte, _mill.AckBit);
+        var capturedTrigger = trigger;
+        var capturedAck = ack;
+        UpdateStatus(millNo, s =>
+        {
+            s.TriggerActive = capturedTrigger;
+            s.AckActive = capturedAck;
+        });
+    }
+
+    private async Task TryUpdateMillSignalsAsync(
+        int millNo,
+        CancellationToken cancellationToken,
+        bool deferHooterResolve = false)
     {
         bool? lineRunning = null;
         int? accumulated = null;
@@ -813,7 +847,7 @@ public sealed class PlcHandshakeService
                 lineRunning = ReadDbBit(_options.LineRunningDbNumber, _options.LineRunningByteOffset, _options.LineRunningBit);
 
             var hooterCfg = _mill.Hooter;
-            if (hooterCfg?.Enabled == true && _hooterValues != null)
+            if (hooterCfg?.Enabled == true && _hooterValues != null && !deferHooterResolve)
             {
                 var resolved = await _hooterValues.ResolveAsync(millNo, cancellationToken).ConfigureAwait(false);
                 SyncHooterMemoryWords(hooterCfg, resolved, forcePoResync: false);
