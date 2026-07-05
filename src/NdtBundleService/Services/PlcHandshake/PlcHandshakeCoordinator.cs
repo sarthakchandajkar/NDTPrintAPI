@@ -42,7 +42,7 @@ public sealed class PlcHandshakeCoordinator
                     MillNo = millNo,
                     Message =
                         "Handshake loop for this mill is not running. Ensure PlcHandshake.Enabled is true, " +
-                        "the mill has an IpAddress configured, and restart NdtBundleService."
+                        "PlcHandshakeEnabled is true for this mill, the mill has an IpAddress configured, and restart NdtBundleService."
                 };
             }
 

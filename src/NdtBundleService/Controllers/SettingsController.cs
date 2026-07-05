@@ -222,7 +222,8 @@ public sealed class SettingsController : ControllerBase
                     plcConnectionEnabled = live?.PlcConnectionEnabled ?? cfg.PlcHandshakeEnabled,
                     triggerActive = live?.TriggerActive ?? false,
                     ackActive = live?.AckActive ?? false,
-                    handshakeState = live?.HandshakeState ?? "Unknown",
+                    handshakeState = live?.HandshakeState
+                        ?? (cfg.PlcHandshakeEnabled ? "Unknown" : "Excluded (S7 disabled)"),
                     lastPoChangeUtc = live?.LastPoChangeUtc,
                     lastError = live?.LastError,
                     testAvailable = _handshakeCoordinator.IsMillRegistered(millNo),

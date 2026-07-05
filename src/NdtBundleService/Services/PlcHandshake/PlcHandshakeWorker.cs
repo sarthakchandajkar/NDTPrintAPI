@@ -61,13 +61,25 @@ public sealed class PlcHandshakeWorker : BackgroundService
             return;
         }
 
-        var mills = handshake.Mills
+        var allMills = handshake.Mills
             .Where(m => !string.IsNullOrWhiteSpace(m.IpAddress))
             .ToList();
 
+        foreach (var excluded in allMills.Where(m => !m.PlcHandshakeEnabled))
+        {
+            _logger.LogInformation(
+                "PlcHandshake skipped for {MillName} (Mill {MillNo}): PlcHandshakeEnabled=false — no S7 connection (PoEndSource={PoEndSource}).",
+                excluded.Name,
+                excluded.ResolveMillNo(),
+                MillPoEndSourceResolver.ToConfigValue(excluded.ResolvePoEndSource(_options.Value)));
+        }
+
+        var mills = allMills.Where(m => m.PlcHandshakeEnabled).ToList();
+
         if (mills.Count == 0)
         {
-            _logger.LogWarning("PlcHandshake.Enabled is true but no mills with IpAddress are configured.");
+            _logger.LogWarning(
+                "PlcHandshake.Enabled is true but no mills have PlcHandshakeEnabled=true with IpAddress configured.");
             return;
         }
 
@@ -119,14 +131,6 @@ public sealed class PlcHandshakeWorker : BackgroundService
             var millNo = mill.ResolveMillNo();
             if (millNo is >= 1 and <= 4)
                 _coordinator.Register(service, millNo);
-
-            if (!mill.PlcHandshakeEnabled)
-            {
-                _logger.LogInformation(
-                    "PlcHandshake for {MillName} (Mill {MillNo}) starts with PlcHandshakeEnabled=false; S7 connect suppressed until API connect.",
-                    mill.Name,
-                    millNo);
-            }
 
             _services.Add(service);
             _tasks.Add(service.RunAsync(stoppingToken));

@@ -38,7 +38,7 @@ Dashboard: **Mills PLC** (`/mills-plc`) or **Summary** table (OK / NOK / NDT col
 
 | Variable | Default |
 |----------|---------|
-| `PLC_ENABLED_MILLS` | `1,2,3,4` |
+| `PLC_ENABLED_MILLS` | `1,2,3` (Mill-4 excluded — no S7 client; frees TIA Portal slot on 192.168.0.19) |
 | `PLC_MILL1_HOST` … `PLC_MILL4_HOST` | See table above |
 | `PLC_POLL_MS` | `2000` |
 | `PLC_MILL3_ACK_PULSE_MS` | `1000` (Mill-3); others use `PLC_MILLn_ACK_PULSE_MS` or same default |

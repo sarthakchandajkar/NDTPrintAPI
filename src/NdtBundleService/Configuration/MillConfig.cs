@@ -19,8 +19,9 @@ public sealed class MillConfig
     public int MillNo { get; set; }
 
     /// <summary>
-    /// When false, the mill handshake loop runs but does not open an S7 connection until enabled
-    /// (via config change + restart, or <c>POST /api/Settings/plc/mill/{millNo}/connect</c>).
+    /// When false, no S7 handshake loop is started for this mill (frees the PLC PG connection slot for TIA Portal).
+    /// Mill-4 production uses <c>PoEndSource=File</c> with <c>PlcHandshakeEnabled=false</c>.
+    /// Set true and restart to enable, or use <c>POST /api/Settings/plc/mill/{millNo}/connect</c> when the loop is running.
     /// </summary>
     public bool PlcHandshakeEnabled { get; set; } = true;
 

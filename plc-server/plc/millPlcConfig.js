@@ -34,7 +34,7 @@ function envBool(name, defaultTrue) {
 }
 
 function parseEnabledMillSet() {
-  const raw = (process.env.PLC_ENABLED_MILLS || "1,2,3,4").trim();
+  const raw = (process.env.PLC_ENABLED_MILLS || "1,2,3").trim();
   const set = new Set();
   for (const part of raw.split(/[,;\s]+/)) {
     const n = Number(part.trim());
