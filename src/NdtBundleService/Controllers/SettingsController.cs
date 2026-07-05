@@ -139,17 +139,19 @@ public sealed class SettingsController : ControllerBase
     }
 
     [HttpGet("plc")]
-    public async Task<IActionResult> GetPlcDiagnostics(CancellationToken cancellationToken)
+    public async Task<IActionResult> GetPlcDiagnostics(
+        [FromQuery] bool live,
+        CancellationToken cancellationToken)
     {
         if (!TryAuthorize(out var denied))
             return denied!;
 
-        // Dashboard polls every 2s; do not abort on client disconnect while reading PLC / runtime state.
+        // Dashboard polls while PLC tab is open; do not abort on client disconnect.
         var loadToken = CancellationToken.None;
 
         try
         {
-            return await GetPlcDiagnosticsCoreAsync(loadToken).ConfigureAwait(false);
+            return await GetPlcDiagnosticsCoreAsync(loadToken, liveOnly: live).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -158,7 +160,7 @@ public sealed class SettingsController : ControllerBase
         }
     }
 
-    private async Task<IActionResult> GetPlcDiagnosticsCoreAsync(CancellationToken cancellationToken)
+    private async Task<IActionResult> GetPlcDiagnosticsCoreAsync(CancellationToken cancellationToken, bool liveOnly)
     {
         var handshakeCfg = _options.PlcHandshake ?? new PlcHandshakeOptions();
         if (handshakeCfg.Enabled)
@@ -176,11 +178,29 @@ public sealed class SettingsController : ControllerBase
 
                 var live = snapshot.FirstOrDefault(s => s.MillNo == millNo);
                 var host = (cfg.IpAddress ?? string.Empty).Trim();
-                var reachable = !string.IsNullOrEmpty(host) &&
-                                await TcpProbeAsync(host, 102, cancellationToken).ConfigureAwait(false);
+                var handshakeConnected = live?.Connected ?? false;
+                bool reachable;
+                if (!cfg.PlcHandshakeEnabled)
+                {
+                    reachable = false;
+                }
+                else if (liveOnly)
+                {
+                    // Auto-refresh: use handshake connection state only (no extra TCP clients).
+                    reachable = handshakeConnected;
+                }
+                else if (handshakeConnected)
+                {
+                    reachable = true;
+                }
+                else
+                {
+                    reachable = !string.IsNullOrEmpty(host) &&
+                                await TcpProbeCachedAsync(host, 102, cancellationToken).ConfigureAwait(false);
+                }
 
                 object? mesHooter = null;
-                if (cfg.Hooter?.Enabled == true && millNo is >= 1 and <= 4)
+                if (!liveOnly && cfg.Hooter?.Enabled == true && millNo is >= 1 and <= 4)
                 {
                     try
                     {
@@ -218,7 +238,7 @@ public sealed class SettingsController : ControllerBase
                     reachable,
                     poEndAddress = cfg.TriggerAddress,
                     mesAckAddress = cfg.AckAddress,
-                    handshakeConnected = live?.Connected ?? false,
+                    handshakeConnected,
                     plcConnectionEnabled = live?.PlcConnectionEnabled ?? cfg.PlcHandshakeEnabled,
                     triggerActive = live?.TriggerActive ?? false,
                     ackActive = live?.AckActive ?? false,
@@ -431,7 +451,7 @@ public sealed class SettingsController : ControllerBase
                 var host = (ep.Host ?? string.Empty).Trim();
                 var port = ep.Port > 0 ? ep.Port : 102;
                 var reachable = !string.IsNullOrEmpty(host) &&
-                                await TcpProbeAsync(host, port, cancellationToken).ConfigureAwait(false);
+                                await TcpProbeCachedAsync(host, port, cancellationToken).ConfigureAwait(false);
                 mills.Add(new
                 {
                     millNo = ep.MillNo,
@@ -452,7 +472,7 @@ public sealed class SettingsController : ControllerBase
                 var host = (ep.Host ?? string.Empty).Trim();
                 var port = ep.Port > 0 ? ep.Port : 502;
                 var reachable = !string.IsNullOrEmpty(host) &&
-                                await TcpProbeAsync(host, port, cancellationToken).ConfigureAwait(false);
+                                await TcpProbeCachedAsync(host, port, cancellationToken).ConfigureAwait(false);
                 mills.Add(new
                 {
                     millNo = ep.MillNo,
@@ -603,6 +623,19 @@ public sealed class SettingsController : ControllerBase
 
     private static string FormatLineRunningAddress(PlcHandshakeOptions options) =>
         $"DB{options.LineRunningDbNumber}.DBX{options.LineRunningByteOffset}.{options.LineRunningBit}";
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (bool Ok, DateTime ExpiresUtc)> TcpProbeCache = new();
+
+    private static async Task<bool> TcpProbeCachedAsync(string host, int port, CancellationToken cancellationToken)
+    {
+        var key = $"{host}:{port}";
+        if (TcpProbeCache.TryGetValue(key, out var cached) && cached.ExpiresUtc > DateTime.UtcNow)
+            return cached.Ok;
+
+        var ok = await TcpProbeAsync(host, port, cancellationToken).ConfigureAwait(false);
+        TcpProbeCache[key] = (ok, DateTime.UtcNow.AddSeconds(15));
+        return ok;
+    }
 
     private static async Task<bool> TcpProbeAsync(string host, int port, CancellationToken cancellationToken)
     {

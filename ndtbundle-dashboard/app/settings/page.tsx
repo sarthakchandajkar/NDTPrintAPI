@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   type FormationChartEntryRow,
@@ -17,6 +17,9 @@ import {
 } from "@/lib/settingsAuth";
 
 type Tab = "formation" | "plc" | "printers";
+
+/** Auto-refresh interval for PLC tab (live snapshot only — see api.settingsPlc live mode). */
+const PLC_STATUS_POLL_MS = 10_000;
 
 function statusBadgeClass(status?: string): string {
   if (status === "Ready") return "bg-green-100 text-green-800";
@@ -161,7 +164,7 @@ function MillHooterVerificationPanel({ mill }: { mill: SettingsPlcMill }) {
       </div>
       <p className="px-5 pb-4 text-xs text-gray-500">
         After <strong>Test PO change</strong>, MW56 should reset to 0 and MW58 should update for the new running PO&apos;s
-        pipe size. Values refresh every 2s while this tab is open.
+        pipe size. Values refresh every {PLC_STATUS_POLL_MS / 1000}s while this tab is open (live handshake snapshot).
       </p>
     </section>
   );
@@ -184,7 +187,7 @@ export default function SettingsPage() {
   const [poChangeTestingMill, setPoChangeTestingMill] = useState<number | null>(null);
   const [poChangeTestResult, setPoChangeTestResult] = useState<SettingsPoChangeTestResult | null>(null);
   const [plcConnectionBusyMill, setPlcConnectionBusyMill] = useState<number | null>(null);
-  const [plcPollTick, setPlcPollTick] = useState(0);
+  const plcPollInFlight = useRef(false);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -202,7 +205,7 @@ export default function SettingsPage() {
     void refreshStatus();
   }, [refreshStatus]);
 
-  const loadTabData = useCallback(async () => {
+  const loadTabData = useCallback(async (options?: { plcLive?: boolean }) => {
     const t = getSettingsToken();
     if (!t) return;
     setLoading(true);
@@ -213,7 +216,7 @@ export default function SettingsPage() {
         setFormationRows(Array.isArray(r.entries) ? r.entries : []);
         setFormationSource(typeof r.sourcePath === "string" ? r.sourcePath : null);
       } else if (tab === "plc") {
-        setPlc(await api.settingsPlc(t));
+        setPlc(await api.settingsPlc(t, { live: options?.plcLive }));
       } else {
         const r = await api.settingsPrinters(t);
         const mills = Array.isArray(r.mills) ? r.mills : [];
@@ -236,20 +239,33 @@ export default function SettingsPage() {
 
   useEffect(() => {
     if (!authenticated || tab !== "plc") return;
-    const id = setInterval(() => {
-      setPlcPollTick((t) => t + 1);
-    }, 2000);
-    return () => clearInterval(id);
-  }, [authenticated, tab]);
 
-  useEffect(() => {
-    if (!authenticated || tab !== "plc" || plcPollTick === 0) return;
-    const t = getSettingsToken();
-    if (!t) return;
-    void api.settingsPlc(t).then(setPlc).catch(() => {
-      /* keep last snapshot on transient errors */
-    });
-  }, [authenticated, tab, plcPollTick]);
+    const pollLive = async () => {
+      if (document.visibilityState === "hidden" || plcPollInFlight.current) return;
+      const t = getSettingsToken();
+      if (!t) return;
+      plcPollInFlight.current = true;
+      try {
+        const data = await api.settingsPlc(t, { live: true });
+        setPlc(data);
+      } catch {
+        /* keep last snapshot on transient errors */
+      } finally {
+        plcPollInFlight.current = false;
+      }
+    };
+
+    void pollLive();
+    const id = window.setInterval(() => void pollLive(), PLC_STATUS_POLL_MS);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") void pollLive();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [authenticated, tab]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -536,7 +552,7 @@ export default function SettingsPage() {
               {plc?.lastPlcError ? ` — ${plc.lastPlcError}` : ""}
             </p>
             <p className="text-gray-500 text-xs">
-              Checked: {formatUtc(plc?.lastPlcCheckUtc)} · auto-refresh every 2s
+              Checked: {formatUtc(plc?.lastPlcCheckUtc)} · auto-refresh every {PLC_STATUS_POLL_MS / 1000}s (live snapshot)
             </p>
             <p className="text-gray-600 text-xs pt-1">
               Use <strong>Disconnect PLC</strong> to release the S7 connection for one mill (e.g. Simatic Manager Go
@@ -763,10 +779,10 @@ export default function SettingsPage() {
           </div>
           <button
             type="button"
-            onClick={loadTabData}
+            onClick={() => void loadTabData()}
             className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
           >
-            Refresh PLC status
+            Refresh PLC status (full check)
           </button>
         </div>
       ) : (
