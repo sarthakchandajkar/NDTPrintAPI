@@ -151,7 +151,18 @@ public sealed class SettingsController : ControllerBase
 
         try
         {
-            return await GetPlcDiagnosticsCoreAsync(loadToken, liveOnly: live).ConfigureAwait(false);
+            if (live)
+                return await GetPlcDiagnosticsCoreAsync(loadToken, liveOnly: true).ConfigureAwait(false);
+
+            await FullPlcDiagnosticsGate.WaitAsync(loadToken).ConfigureAwait(false);
+            try
+            {
+                return await GetPlcDiagnosticsCoreAsync(loadToken, liveOnly: false).ConfigureAwait(false);
+            }
+            finally
+            {
+                FullPlcDiagnosticsGate.Release();
+            }
         }
         catch (Exception ex)
         {
@@ -625,6 +636,9 @@ public sealed class SettingsController : ControllerBase
         $"DB{options.LineRunningDbNumber}.DBX{options.LineRunningByteOffset}.{options.LineRunningBit}";
 
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (bool Ok, DateTime ExpiresUtc)> TcpProbeCache = new();
+
+    /// <summary>Only one full PLC diagnostics request at a time (TCP probes + MES hooter resolve).</summary>
+    private static readonly SemaphoreSlim FullPlcDiagnosticsGate = new(1, 1);
 
     private static async Task<bool> TcpProbeCachedAsync(string host, int port, CancellationToken cancellationToken)
     {

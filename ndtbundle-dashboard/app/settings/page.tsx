@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   type FormationChartEntryRow,
+  type PlcLiveResponse,
   type SettingsPlcDiagnostics,
   type SettingsPlcMill,
   type SettingsPoChangeTestResult,
@@ -18,8 +19,68 @@ import {
 
 type Tab = "formation" | "plc" | "printers";
 
-/** Auto-refresh interval for PLC tab (live snapshot only — see api.settingsPlc live mode). */
-const PLC_STATUS_POLL_MS = 10_000;
+/** Auto-refresh interval — uses GET /api/Status/plc-live (in-memory snapshot, no TCP/MES). */
+const PLC_STATUS_POLL_MS = 30_000;
+
+/** Merge lightweight plc-live counts into settings PLC diagnostics (keeps addresses / MES rows from last full load). */
+function mergePlcLiveIntoSettings(
+  base: SettingsPlcDiagnostics | null,
+  live: PlcLiveResponse
+): SettingsPlcDiagnostics | null {
+  if (!base) return base;
+  const liveMills = live.mills ?? [];
+  if (liveMills.length === 0) return base;
+
+  const liveByMill = new Map(liveMills.map((m) => [m.millNo, m]));
+  const updatedMills = (base.mills ?? []).map((m) => {
+    const lv = m.millNo != null ? liveByMill.get(m.millNo) : undefined;
+    if (!lv) return m;
+    const linkEnabled = lv.plcConnectionEnabled ?? m.plcConnectionEnabled;
+    const connected = !!lv.connected;
+    return {
+      ...m,
+      plcConnectionEnabled: linkEnabled,
+      handshakeConnected: connected,
+      reachable: connected,
+      lineRunning: lv.lineRunning ?? m.lineRunning,
+      accumulatedValue: lv.accumulatedValue ?? m.accumulatedValue,
+      thresholdValue: lv.thresholdValue ?? m.thresholdValue,
+      hooterActive: lv.hooterActive ?? m.hooterActive,
+      okCount: lv.okCount ?? m.okCount,
+      nokCount: lv.nokCount ?? m.nokCount,
+      ndtCount: lv.ndtCount ?? m.ndtCount,
+      poId: lv.poId ?? m.poId,
+      triggerActive: lv.poEndActive ?? m.triggerActive,
+      handshakeState: lv.handshakeState ?? m.handshakeState,
+      lastError: lv.lastError ?? m.lastError,
+      countsUpdatedUtc: lv.lastUpdateUtc ?? m.countsUpdatedUtc,
+    };
+  });
+
+  const activeMills = liveMills.filter((m) => m.plcConnectionEnabled !== false);
+  const allConnected =
+    activeMills.length > 0 && activeMills.every((m) => m.connected);
+
+  let latestUtc = base.lastPlcCheckUtc;
+  for (const m of liveMills) {
+    const u = m.lastUpdateUtc ?? m.timestamp;
+    if (u && (!latestUtc || u > latestUtc)) latestUtc = u;
+  }
+
+  const poEndByMill = { ...(base.poEndByMill ?? {}) };
+  for (const m of liveMills) {
+    if (m.millNo != null && m.poEndActive != null)
+      poEndByMill[String(m.millNo)] = m.poEndActive;
+  }
+
+  return {
+    ...base,
+    mills: updatedMills,
+    lastReadOk: allConnected,
+    lastPlcCheckUtc: latestUtc,
+    poEndByMill,
+  };
+}
 
 function statusBadgeClass(status?: string): string {
   if (status === "Ready") return "bg-green-100 text-green-800";
@@ -164,7 +225,9 @@ function MillHooterVerificationPanel({ mill }: { mill: SettingsPlcMill }) {
       </div>
       <p className="px-5 pb-4 text-xs text-gray-500">
         After <strong>Test PO change</strong>, MW56 should reset to 0 and MW58 should update for the new running PO&apos;s
-        pipe size. Values refresh every {PLC_STATUS_POLL_MS / 1000}s while this tab is open (live handshake snapshot).
+        pipe size. Live PLC values refresh every {PLC_STATUS_POLL_MS / 1000}s via{" "}
+        <code className="bg-white/70 px-1 rounded">/api/Status/plc-live</code> (no TCP probes). Use{" "}
+        <strong>Refresh PLC status (full check)</strong> for MES hooter comparison and reachability tests.
       </p>
     </section>
   );
@@ -205,7 +268,7 @@ export default function SettingsPage() {
     void refreshStatus();
   }, [refreshStatus]);
 
-  const loadTabData = useCallback(async (options?: { plcLive?: boolean }) => {
+  const loadTabData = useCallback(async (options?: { plcFull?: boolean }) => {
     const t = getSettingsToken();
     if (!t) return;
     setLoading(true);
@@ -216,7 +279,7 @@ export default function SettingsPage() {
         setFormationRows(Array.isArray(r.entries) ? r.entries : []);
         setFormationSource(typeof r.sourcePath === "string" ? r.sourcePath : null);
       } else if (tab === "plc") {
-        setPlc(await api.settingsPlc(t, { live: options?.plcLive }));
+        setPlc(await api.settingsPlc(t, { live: !options?.plcFull }));
       } else {
         const r = await api.settingsPrinters(t);
         const mills = Array.isArray(r.mills) ? r.mills : [];
@@ -238,16 +301,14 @@ export default function SettingsPage() {
   }, [authenticated, loadTabData]);
 
   useEffect(() => {
-    if (!authenticated || tab !== "plc") return;
+    if (!authenticated || tab !== "plc" || plc === null) return;
 
     const pollLive = async () => {
       if (document.visibilityState === "hidden" || plcPollInFlight.current) return;
-      const t = getSettingsToken();
-      if (!t) return;
       plcPollInFlight.current = true;
       try {
-        const data = await api.settingsPlc(t, { live: true });
-        setPlc(data);
+        const live = await api.plcLive();
+        setPlc((prev) => mergePlcLiveIntoSettings(prev, live));
       } catch {
         /* keep last snapshot on transient errors */
       } finally {
@@ -255,7 +316,6 @@ export default function SettingsPage() {
       }
     };
 
-    void pollLive();
     const id = window.setInterval(() => void pollLive(), PLC_STATUS_POLL_MS);
     const onVisibility = () => {
       if (document.visibilityState === "visible") void pollLive();
@@ -265,7 +325,7 @@ export default function SettingsPage() {
       window.clearInterval(id);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [authenticated, tab]);
+  }, [authenticated, tab, plc === null]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -309,7 +369,7 @@ export default function SettingsPage() {
       } else {
         setError(result.message ?? `Mill-${millNo} PO change test failed.`);
       }
-      await loadTabData();
+      await loadTabData({ plcFull: true });
     } catch (e) {
       setError(e instanceof Error ? e.message : "PO change test failed");
     } finally {
@@ -552,7 +612,8 @@ export default function SettingsPage() {
               {plc?.lastPlcError ? ` — ${plc.lastPlcError}` : ""}
             </p>
             <p className="text-gray-500 text-xs">
-              Checked: {formatUtc(plc?.lastPlcCheckUtc)} · auto-refresh every {PLC_STATUS_POLL_MS / 1000}s (live snapshot)
+              Checked: {formatUtc(plc?.lastPlcCheckUtc)} · live values every {PLC_STATUS_POLL_MS / 1000}s (
+              <code className="text-xs bg-gray-100 px-1 rounded">/api/Status/plc-live</code>)
             </p>
             <p className="text-gray-600 text-xs pt-1">
               Use <strong>Disconnect PLC</strong> to release the S7 connection for one mill (e.g. Simatic Manager Go
@@ -779,7 +840,7 @@ export default function SettingsPage() {
           </div>
           <button
             type="button"
-            onClick={() => void loadTabData()}
+            onClick={() => void loadTabData({ plcFull: true })}
             className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
           >
             Refresh PLC status (full check)

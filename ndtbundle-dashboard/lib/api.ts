@@ -187,6 +187,8 @@ export interface PlcLiveMillPayload {
   millNo?: number;
   ipAddress?: string;
   connected?: boolean;
+  /** When false, S7 handshake is manually disconnected. */
+  plcConnectionEnabled?: boolean;
   status?: string;
   okCount?: number | null;
   nokCount?: number | null;
