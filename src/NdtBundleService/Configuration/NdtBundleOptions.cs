@@ -122,6 +122,13 @@ public class NdtBundleOptions
     /// </summary>
     public bool WaitForWipBundleAfterPoEnd { get; set; } = true;
 
+    /// <summary>
+    /// Mills for which <c>SlitMonitoringWorker</c> creates NDT Input Slit output CSVs, updates bundle state, and prints tags.
+    /// Empty or null = all mills 1–4. Example: <c>[1]</c> for Mill-1-only commissioning.
+    /// Input inbox files for other mills are acknowledged without writing NDT output.
+    /// </summary>
+    public int[]? InputSlitProcessMills { get; set; }
+
     /// <summary>TM FG bundle folder (<c>FG_{mill}_{po}_….csv</c>) for Pipe Grade → Slit Grade. When empty, uses <see cref="MillSlitLiveOptions.WipBundleFolder"/>.</summary>
     public string FgBundleFolder { get; set; } = @"Z:\To SAP\TM\Bundle";
 

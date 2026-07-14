@@ -99,6 +99,10 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 outputFolder);
         }
 
+        _logger.LogInformation(
+            "NDT Input Slit processing limited to mill(s): {Mills}.",
+            FormatInputSlitProcessMills(_optionsMonitor.CurrentValue));
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -305,6 +309,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
                 var sourceRowNumber = 2; // CSV header is row 1
                 var anyRowBundled = false;
+                var anyEligibleMillRow = false;
                 foreach (var row in rows)
                 {
                     if (row.Record is null)
@@ -316,6 +321,17 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     }
 
                     var record = row.Record;
+                    if (!IsMillAllowedForNdtInputSlit(o, record.MillNo))
+                    {
+                        _logger.LogDebug(
+                            "Mill {Mill}: NDT Input Slit processing disabled (InputSlitProcessMills); skipping slit row in {File}.",
+                            record.MillNo,
+                            Path.GetFileName(fileFull));
+                        sourceRowNumber++;
+                        continue;
+                    }
+
+                    anyEligibleMillRow = true;
                     var runningPoFromWip = await _wipRunningPo
                         .TryGetRunningPoForMillAsync(record.MillNo, cancellationToken)
                         .ConfigureAwait(false);
@@ -465,9 +481,20 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 string? outputPath = null;
                 if (!anyRowBundled)
                 {
-                    _logger.LogInformation(
-                        "Skipping NDT Input Slit output for {File}; no slit rows were bundled. File will be retried on next poll.",
-                        Path.GetFileName(fileFull));
+                    if (!anyEligibleMillRow)
+                    {
+                        _logger.LogInformation(
+                            "Skipping NDT Input Slit output for {File}; no rows for configured mills ({Mills}).",
+                            Path.GetFileName(fileFull),
+                            FormatInputSlitProcessMills(o));
+                        _inputSlitLastHandledWriteUtc[fileFull] = File.GetLastWriteTimeUtc(fileFull);
+                    }
+                    else
+                    {
+                        _logger.LogInformation(
+                            "Skipping NDT Input Slit output for {File}; no slit rows were bundled. File will be retried on next poll.",
+                            Path.GetFileName(fileFull));
+                    }
                 }
                 else if (!string.IsNullOrWhiteSpace(outputFolder))
                 {
@@ -644,6 +671,29 @@ public sealed class SlitMonitoringWorker : BackgroundService
         }
 
         return (headerLine, rows, ndtIndex, poIndex);
+    }
+
+    /// <summary>
+    /// Empty/null <see cref="NdtBundleOptions.InputSlitProcessMills"/> = all mills 1–4.
+    /// </summary>
+    internal static bool IsMillAllowedForNdtInputSlit(NdtBundleOptions options, int millNo)
+    {
+        if (millNo is < 1 or > 4)
+            return false;
+
+        var mills = options.InputSlitProcessMills;
+        if (mills is null || mills.Length == 0)
+            return true;
+
+        return mills.Contains(millNo);
+    }
+
+    private static string FormatInputSlitProcessMills(NdtBundleOptions options)
+    {
+        var mills = options.InputSlitProcessMills;
+        if (mills is null || mills.Length == 0)
+            return "1-4";
+        return string.Join(",", mills);
     }
 
     private static int GetMillNo(string[] cols, int index)
