@@ -656,7 +656,7 @@ ORDER BY PrintedAt DESC;";
                 plcTotal = reader.GetInt32(1);
             }
 
-            var discrepancy = slitSum != plcTotal;
+            var discrepancy = PlcCsvReconSemantics.Evaluate(bundleNo, plcTotal, slitSum).CountDiscrepancy;
             const string updateSql = @"
 UPDATE dbo.NDT_Bundle
 SET Awaiting_Csv_Recon = 0,
@@ -683,11 +683,12 @@ WHERE Bundle_No = @BundleNo;";
                     slitSum);
             }
 
+            var applied = PlcCsvReconSemantics.Evaluate(bundleNo, plcTotal, slitSum);
             return new PlcCsvReconResult
             {
-                BundleNo = bundleNo,
-                PlcTotal = plcTotal,
-                SlitSum = slitSum
+                BundleNo = applied.BundleNo,
+                PlcTotal = applied.PlcTotal,
+                SlitSum = applied.SlitSum
             };
         }
         catch (Exception ex)

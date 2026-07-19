@@ -1,26 +1,36 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
+using NdtBundleService.Services;
 using NdtBundleService.Services.PlcHandshake.S7;
 
 namespace NdtBundleService.Tests;
 
 internal static class TestEngineFactory
 {
-    public static NdtBundleService.Services.NdtBundleEngine Create(
-        NdtBundleService.Services.IFormationChartProvider formation,
-        NdtBundleService.Services.IPipeSizeProvider pipeSize,
-        NdtBundleService.Services.INdtBundleRuntimeStateStore runtime,
+    public static NdtBundleEngine Create(
+        IFormationChartProvider formation,
+        IPipeSizeProvider pipeSize,
+        INdtBundleRuntimeStateStore runtime,
         string closeTrigger = "File",
-        IS7ConnectionProviderRegistry? s7Registry = null)
+        IS7ConnectionProviderRegistry? s7Registry = null,
+        int plcCloseGraceSeconds = 60,
+        TimeProvider? timeProvider = null,
+        ILogger<NdtBundleEngine>? logger = null)
     {
-        var options = Options.Create(new NdtBundleOptions { CloseTrigger = closeTrigger });
-        return new NdtBundleService.Services.NdtBundleEngine(
+        var options = Options.Create(new NdtBundleOptions
+        {
+            CloseTrigger = closeTrigger,
+            PlcCloseGraceSeconds = plcCloseGraceSeconds
+        });
+        return new NdtBundleEngine(
             formation,
             pipeSize,
             runtime,
             options,
             s7Registry ?? new EmptyS7Registry(),
-            Microsoft.Extensions.Logging.Abstractions.NullLogger<NdtBundleService.Services.NdtBundleEngine>.Instance);
+            logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<NdtBundleEngine>.Instance,
+            timeProvider);
     }
 
     private sealed class EmptyS7Registry : IS7ConnectionProviderRegistry

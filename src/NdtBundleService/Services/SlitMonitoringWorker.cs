@@ -624,16 +624,15 @@ public sealed class SlitMonitoringWorker : BackgroundService
                                     cancellationToken)
                                 .ConfigureAwait(false);
 
-                            if (awaitingPlc is { } awaiting)
+                            if (PlcCsvReconAttach.TryAttach(
+                                    awaitingPlc,
+                                    bundleRecord,
+                                    slitSumByPoMill,
+                                    out var attachedBatchNo))
                             {
                                 // F-2: attach late CSV rows to the PLC-closed bundle; do not open a new sequence
                                 // or re-accumulate size counts toward a second close.
-                                ndtBatchNoFormatted = awaiting.BundleNo;
-                                var reconKey = (
-                                    InputSlitCsvParsing.NormalizePo(bundleRecord.PoNumber),
-                                    bundleRecord.MillNo);
-                                slitSumByPoMill.TryGetValue(reconKey, out var prevSum);
-                                slitSumByPoMill[reconKey] = prevSum + Math.Max(0, bundleRecord.NdtPipes);
+                                ndtBatchNoFormatted = attachedBatchNo;
                             }
                             else
                             {

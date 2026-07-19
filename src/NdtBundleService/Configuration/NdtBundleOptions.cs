@@ -173,6 +173,13 @@ public class NdtBundleOptions
     public bool ReprintOnCountMismatch { get; set; }
 
     /// <summary>
+    /// Under <c>CloseTrigger=PlcWithFileFallback</c> with a healthy S7 provider, if file-side size
+    /// accumulation reaches threshold and no PLC close clears it within this many seconds, execute
+    /// the file-driven close with a WRN (missed PLC / wrong slit-end heuristic safety-net). Default 60.
+    /// </summary>
+    public int PlcCloseGraceSeconds { get; set; } = 60;
+
+    /// <summary>
     /// When true (default), startup/periodic Input Slit reconciliation ingests folder files absent from
     /// <c>Input_Slit_Row</c> (within <see cref="BackfillLookbackHours"/>) instead of baseline-seeding them as processed.
     /// When false, or when SQL is disabled, the historical seed baseline is used.

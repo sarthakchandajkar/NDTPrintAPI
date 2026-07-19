@@ -19,6 +19,10 @@ public sealed class NdtBundleEngine : IBundleEngine
     private readonly IOptions<NdtBundleOptions> _options;
     private readonly IS7ConnectionProviderRegistry _s7Registry;
     private readonly ILogger<NdtBundleEngine> _logger;
+    private readonly TimeProvider _time;
+
+    /// <summary>UTC when file-side count first reached threshold while PLC path owned closes (grace clock).</summary>
+    private readonly Dictionary<string, DateTimeOffset> _plcCloseGraceStartedUtc = new(StringComparer.OrdinalIgnoreCase);
 
     public NdtBundleEngine(
         IFormationChartProvider formationChartProvider,
@@ -26,7 +30,8 @@ public sealed class NdtBundleEngine : IBundleEngine
         INdtBundleRuntimeStateStore runtimeState,
         IOptions<NdtBundleOptions> options,
         IS7ConnectionProviderRegistry s7Registry,
-        ILogger<NdtBundleEngine> logger)
+        ILogger<NdtBundleEngine> logger,
+        TimeProvider? timeProvider = null)
     {
         _formationChartProvider = formationChartProvider;
         _pipeSizeProvider = pipeSizeProvider;
@@ -34,6 +39,7 @@ public sealed class NdtBundleEngine : IBundleEngine
         _options = options;
         _s7Registry = s7Registry;
         _logger = logger;
+        _time = timeProvider ?? TimeProvider.System;
     }
 
     public async Task ProcessSlitRecordAsync(
@@ -75,14 +81,52 @@ public sealed class NdtBundleEngine : IBundleEngine
         var trigger = BundleCloseTriggerParser.Parse(_options.Value.CloseTrigger);
         var plcHealthy = _s7Registry.TryGet(record.MillNo)?.IsHealthy == true;
         var allowFileClose = BundleClosePolicy.AllowFileThresholdClose(trigger, plcHealthy);
+        var graceKey = GraceKey(record.PoNumber, record.MillNo, sizeKey);
+        var missedPlcClose = false;
+
+        if (currentSizeCount < sizeThreshold)
+        {
+            _plcCloseGraceStartedUtc.Remove(graceKey);
+        }
+        else if (!allowFileClose
+                 && trigger == BundleCloseTrigger.PlcWithFileFallback
+                 && plcHealthy)
+        {
+            var now = _time.GetUtcNow();
+            if (!_plcCloseGraceStartedUtc.TryGetValue(graceKey, out var started))
+            {
+                started = now;
+                _plcCloseGraceStartedUtc[graceKey] = started;
+            }
+
+            var graceSeconds = Math.Max(0, _options.Value.PlcCloseGraceSeconds);
+            if ((now - started).TotalSeconds >= graceSeconds)
+            {
+                allowFileClose = true;
+                missedPlcClose = true;
+            }
+        }
 
         // File-driven close is gated by CloseTrigger; when PLC path owns closes, still accumulate for hooter/recon.
         if (allowFileClose && currentSizeCount >= sizeThreshold && currentSizeCount > 0)
         {
             var totalForBatch = currentSizeCount;
             currentSizeCount = 0;
+            _plcCloseGraceStartedUtc.Remove(graceKey);
 
             var batchNo = _runtimeState.CloseBundle(record.PoNumber, record.MillNo, totalForBatch, sizeThreshold);
+            if (missedPlcClose)
+            {
+                _logger.LogWarning(
+                    "Missed PLC close for PO {PO} Mill {Mill} Size {Size}: file-side count {Count} ≥ threshold {Threshold} for {GraceSeconds}s with healthy S7; executing file-driven close (PlcCloseGraceSeconds safety-net).",
+                    record.PoNumber,
+                    record.MillNo,
+                    sizeKey,
+                    totalForBatch,
+                    sizeThreshold,
+                    Math.Max(0, _options.Value.PlcCloseGraceSeconds));
+            }
+
             _logger.LogInformation(
                 "Closing size-based bundle {BatchNo} for PO {PO} Mill {Mill} Size {Size} threshold={Threshold} total={Total} (includes slit overshoot)",
                 batchNo,
@@ -148,6 +192,7 @@ public sealed class NdtBundleEngine : IBundleEngine
         var sizeCounts = _runtimeState.GetSizeCounts(poNumber, millNo);
         sizeCounts[sizeKey] = 0;
         _runtimeState.SetSizeCounts(poNumber, millNo, sizeCounts);
+        ClearPlcCloseGrace(poNumber, millNo, sizeKey);
 
         var contextRecord = _runtimeState.GetLastRecord(poNumber, millNo) ?? CreateSyntheticRecord(poNumber, millNo);
         var batchNo = _runtimeState.CloseBundle(poNumber, millNo, plcCount, sizeThreshold);
@@ -240,6 +285,12 @@ public sealed class NdtBundleEngine : IBundleEngine
         _runtimeState.ClearRunningTotal(poNumber, millNo);
         await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    private void ClearPlcCloseGrace(string poNumber, int millNo, string sizeKey) =>
+        _plcCloseGraceStartedUtc.Remove(GraceKey(poNumber, millNo, sizeKey));
+
+    private static string GraceKey(string poNumber, int millNo, string sizeKey) =>
+        $"{InputSlitCsvParsing.NormalizePo(poNumber)}|{millNo}|{sizeKey}";
 
     private static InputSlitRecord CreateSyntheticRecord(string poNumber, int millNo)
     {
