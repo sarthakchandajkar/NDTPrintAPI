@@ -63,6 +63,7 @@ builder.Services.AddSingleton<FileBasedPoChangeQueue>();
 builder.Services.AddSingleton<IWipBundleReconciliationService, WipBundleReconciliationService>();
 builder.Services.AddSingleton<PlcPoEndQueue>();
 builder.Services.AddSingleton<IS7ConnectionProviderRegistry, S7ConnectionProviderRegistry>();
+builder.Services.AddSingleton<IPlcSlitEndBundleCloser, PlcSlitEndBundleCloser>();
 builder.Services.AddSingleton<IMillNdtCountReader, S7MillNdtCountReader>();
 builder.Services.AddSingleton<IMillSlitLiveNdtAccumulator, MillSlitLiveNdtAccumulator>();
 builder.Services.AddSingleton<IMillBundleStateLock, MillBundleStateLock>();

@@ -22,6 +22,7 @@ public sealed class PlcHandshakeWorker : BackgroundService
     private readonly IWipBundleRunningPoProvider _wipRunningPo;
     private readonly PlcPoEndQueue _plcPoEndQueue;
     private readonly IS7ConnectionProviderRegistry _s7Registry;
+    private readonly IPlcSlitEndBundleCloser _slitEndCloser;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<PlcHandshakeWorker> _logger;
 
@@ -39,6 +40,7 @@ public sealed class PlcHandshakeWorker : BackgroundService
         IWipBundleRunningPoProvider wipRunningPo,
         PlcPoEndQueue plcPoEndQueue,
         IS7ConnectionProviderRegistry s7Registry,
+        IPlcSlitEndBundleCloser slitEndCloser,
         ILoggerFactory loggerFactory,
         ILogger<PlcHandshakeWorker> logger)
     {
@@ -52,6 +54,7 @@ public sealed class PlcHandshakeWorker : BackgroundService
         _wipRunningPo = wipRunningPo;
         _plcPoEndQueue = plcPoEndQueue;
         _s7Registry = s7Registry;
+        _slitEndCloser = slitEndCloser;
         _loggerFactory = loggerFactory;
         _logger = logger;
     }
@@ -132,7 +135,8 @@ public sealed class PlcHandshakeWorker : BackgroundService
                 _hooterValues,
                 _wipRunningPo,
                 s7,
-                _loggerFactory.CreateLogger<PlcHandshakeService>());
+                _loggerFactory.CreateLogger<PlcHandshakeService>(),
+                _slitEndCloser);
 
             var millNo = mill.ResolveMillNo();
             if (millNo is >= 1 and <= 4)

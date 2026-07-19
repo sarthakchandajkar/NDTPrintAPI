@@ -92,6 +92,21 @@ public sealed class PlcHandshakeStatusRegistry
         }
     }
 
+    public bool TryGetMill(int millNo, out PlcHandshakeMillStatus? status)
+    {
+        lock (_sync)
+        {
+            if (_byMill.TryGetValue(millNo, out var st))
+            {
+                status = st;
+                return true;
+            }
+        }
+
+        status = null;
+        return false;
+    }
+
     public IReadOnlyDictionary<int, bool> GetPoEndByMill()
     {
         lock (_sync)

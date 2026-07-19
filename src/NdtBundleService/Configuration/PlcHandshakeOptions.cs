@@ -46,6 +46,20 @@ public sealed class PlcHandshakeOptions
     /// <summary>Byte offset of Slit ID INT (DBW10).</summary>
     public int SlitIdByteOffset { get; set; } = 10;
 
+    /// <summary>
+    /// Optional merker byte for slit-end signal (PLC→MES). When &lt; 0, slit-end uses NDT count reset edge.
+    /// // TODO(FOX): confirm slit-end signal address
+    /// </summary>
+    public int SlitEndTriggerByte { get; set; } = -1;
+
+    /// <summary>Bit within <see cref="SlitEndTriggerByte"/>. Used only when <see cref="SlitEndTriggerByte"/> ≥ 0.</summary>
+    public int SlitEndTriggerBit { get; set; }
+
+    /// <summary>
+    /// NDT count DB for live close (default 251). Config-driven; mirrors MillSlitLive.S7.DbNumber.
+    /// </summary>
+    public int NdtCountDb { get; set; } = 251;
+
     /// <summary>When true, read line-running bit from each mill PLC for dashboard SCADA lamp.</summary>
     public bool ReadLineRunning { get; set; } = true;
 

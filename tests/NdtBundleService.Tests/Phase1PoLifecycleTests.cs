@@ -108,11 +108,7 @@ public sealed class Phase1PoLifecycleTests
 
         var lifecycle = new PoLifecycleService(Monitor(CreatePlcOptions()));
         var wip = new RecordingWipProvider("1000060163");
-        var engine = new NdtBundleEngine(
-            new FormationStub(10),
-            new PipeSizeStub(),
-            runtime,
-            NullLogger<NdtBundleEngine>.Instance);
+        var engine = TestEngineFactory.Create(new FormationStub(10), new PipeSizeStub(), runtime);
         var closed = new List<int>();
         var output = new CapturingOutputWriter(closed);
         var workflow = CreateWorkflow(engine, output, runtime, wip, lifecycle, CreatePlcOptions(flushMode: "AfterDrain"));
@@ -136,11 +132,7 @@ public sealed class Phase1PoLifecycleTests
         var opts = CreateFileMillOptions();
         var lifecycle = new PoLifecycleService(Monitor(opts));
         var wip = new RecordingWipProvider("1000060163");
-        var engine = new NdtBundleEngine(
-            new FormationStub(10),
-            new PipeSizeStub(),
-            runtime,
-            NullLogger<NdtBundleEngine>.Instance);
+        var engine = TestEngineFactory.Create(new FormationStub(10), new PipeSizeStub(), runtime);
         var closed = new List<int>();
         var workflow = CreateWorkflow(engine, new CapturingOutputWriter(closed), runtime, wip, lifecycle, opts);
 
@@ -169,11 +161,7 @@ public sealed class Phase1PoLifecycleTests
 
         var lifecycle = new PoLifecycleService(Monitor(opts));
         var wip = new RecordingWipProvider("1000060163");
-        var engine = new NdtBundleEngine(
-            new FormationStub(20),
-            new PipeSizeStub(),
-            runtime,
-            NullLogger<NdtBundleEngine>.Instance);
+        var engine = TestEngineFactory.Create(new FormationStub(20), new PipeSizeStub(), runtime);
         var closed = new List<(int Batch, int Pcs)>();
         var output = new CapturingOutputWriter(pcs => { }, closed);
         var workflow = CreateWorkflow(engine, output, runtime, wip, lifecycle, opts, threshold: 20);
@@ -230,11 +218,7 @@ public sealed class Phase1PoLifecycleTests
 
         var lifecycle = new PoLifecycleService(Monitor(opts));
         var wip = new RecordingWipProvider("1000060163");
-        var engine = new NdtBundleEngine(
-            new FormationStub(10),
-            new PipeSizeStub(),
-            runtime,
-            NullLogger<NdtBundleEngine>.Instance);
+        var engine = TestEngineFactory.Create(new FormationStub(10), new PipeSizeStub(), runtime);
         var closed = new List<(int Batch, int Pcs)>();
         var output = new CapturingOutputWriter(_ => { }, closed);
         var workflow = CreateWorkflow(engine, output, runtime, wip, lifecycle, opts);
@@ -284,11 +268,7 @@ public sealed class Phase1PoLifecycleTests
         Assert.False(lifecycle.TryMarkDraining(4, "PO-FILE", DateTime.UtcNow.AddHours(-3)));
 
         var closed = new List<(int, int)>();
-        var engine = new NdtBundleEngine(
-            new FormationStub(10),
-            new PipeSizeStub(),
-            runtime,
-            NullLogger<NdtBundleEngine>.Instance);
+        var engine = TestEngineFactory.Create(new FormationStub(10), new PipeSizeStub(), runtime);
         var workflow = CreateWorkflow(
             engine,
             new CapturingOutputWriter(_ => { }, closed),

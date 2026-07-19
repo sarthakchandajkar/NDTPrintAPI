@@ -27,6 +27,7 @@ public sealed class PlcHandshakeService
     private readonly IMillHooterPlcValuesService? _hooterValues;
     private readonly IWipBundleRunningPoProvider _wipRunningPo;
     private readonly IS7ConnectionProvider _s7;
+    private readonly IPlcSlitEndBundleCloser? _slitEndCloser;
     private readonly PlcHandshakeEdgeTracker _edge;
     private readonly ILogger<PlcHandshakeService> _logger;
 
@@ -61,7 +62,8 @@ public sealed class PlcHandshakeService
         IMillHooterPlcValuesService? hooterValues,
         IWipBundleRunningPoProvider wipRunningPo,
         IS7ConnectionProvider s7,
-        ILogger<PlcHandshakeService> logger)
+        ILogger<PlcHandshakeService> logger,
+        IPlcSlitEndBundleCloser? slitEndCloser = null)
     {
         _mill = mill;
         _options = options;
@@ -74,6 +76,7 @@ public sealed class PlcHandshakeService
         _hooterValues = hooterValues;
         _wipRunningPo = wipRunningPo;
         _s7 = s7;
+        _slitEndCloser = slitEndCloser;
         _edge = new PlcHandshakeEdgeTracker(options);
         _logger = logger;
         _plcConnectionEnabled = mill.PlcHandshakeEnabled;
@@ -301,7 +304,20 @@ public sealed class PlcHandshakeService
             s.LastError = null;
         });
 
-        TryUpdateDb251Counts(millNo);
+        var liveNdt = TryUpdateDb251Counts(millNo);
+
+        if (_slitEndCloser is not null)
+        {
+            try
+            {
+                await _slitEndCloser.TryCloseOnSlitEndAsync(millNo, _mill, _s7, liveNdt, stoppingToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "{MillName}: PLC slit-end close attempt failed.", _mill.Name);
+            }
+        }
 
         // Handshake (ack + PO-change edge) before slow hooter/MES resolve so Mill-1 polls stay timely.
         if (_ackAwaitingTriggerClear)
@@ -636,14 +652,14 @@ public sealed class PlcHandshakeService
     private void WriteMerkerBit(int byteOffset, int bit, bool value) =>
         _s7.Write(ops => ops.Write(DataType.Memory, 0, byteOffset, value, bit));
 
-    private void TryUpdateDb251Counts(int millNo)
+    private int TryUpdateDb251Counts(int millNo)
     {
         try
         {
             // Each ReadDbInt is a separate gate entry (no nested provider calls).
             var ok = ReadDbInt(_options.OkCountByteOffset);
             var nok = ReadDbInt(_options.NokCountByteOffset);
-            var ndtRaw = ReadDbInt(_options.NdtCountByteOffset);
+            var ndtRaw = ReadNdtCountInt();
             var poId = ReadDbInt(_options.PoIdByteOffset);
             var slitId = ReadDbInt(_options.SlitIdByteOffset);
 
@@ -665,6 +681,7 @@ public sealed class PlcHandshakeService
                 s.SlitId = slitId;
                 s.CountsUpdatedUtc = DateTimeOffset.UtcNow;
             });
+            return ndtRaw;
         }
         catch (Exception ex)
         {
@@ -673,13 +690,20 @@ public sealed class PlcHandshakeService
                 "{MillName}: DB{Db} count read failed.",
                 _mill.Name,
                 _options.CountsDbNumber);
+            return 0;
         }
     }
 
     private int ReadDbInt(int byteOffset) =>
+        ReadDbInt(_options.CountsDbNumber, byteOffset);
+
+    private int ReadNdtCountInt() =>
+        ReadDbInt(_options.NdtCountDb > 0 ? _options.NdtCountDb : _options.CountsDbNumber, _options.NdtCountByteOffset);
+
+    private int ReadDbInt(int dbNumber, int byteOffset) =>
         _s7.Read(ops =>
         {
-            var raw = ops.Read(DataType.DataBlock, _options.CountsDbNumber, byteOffset, VarType.Int, 1);
+            var raw = ops.Read(DataType.DataBlock, dbNumber, byteOffset, VarType.Int, 1);
             if (raw is null)
                 return 0;
             var v = Convert.ToInt32(raw);
