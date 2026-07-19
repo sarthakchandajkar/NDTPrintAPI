@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using NdtBundleService.Configuration;
 using NdtBundleService.Services.PlcHandshake.PlcPoEnd;
+using NdtBundleService.Services.PlcHandshake.S7;
 using S7.Net;
 using S7.Net.Types;
 
@@ -11,6 +12,7 @@ namespace NdtBundleService.Services.PlcHandshake;
 /// trigger rising edge (FALSE→TRUE) → handle PO change → ack TRUE → wait trigger FALSE → ack FALSE.
 /// Uses rising-edge detection (same as plc-server) so a held or quickly re-pulsed M-bit does not
 /// repeat the PO-end workflow until trigger has been false for several poll cycles.
+/// All S7 I/O goes through the shared <see cref="IS7ConnectionProvider"/> for this mill.
 /// </summary>
 public sealed class PlcHandshakeService
 {
@@ -24,19 +26,10 @@ public sealed class PlcHandshakeService
     private readonly IActivePoPerMillService _activePoPerMill;
     private readonly IMillHooterPlcValuesService? _hooterValues;
     private readonly IWipBundleRunningPoProvider _wipRunningPo;
+    private readonly IS7ConnectionProvider _s7;
+    private readonly PlcHandshakeEdgeTracker _edge;
     private readonly ILogger<PlcHandshakeService> _logger;
 
-    private readonly object _plcLock = new();
-    private Plc? _plc;
-    private short _connectedSlot;
-    private int _reconnectDelayMs;
-
-    private bool _primed;
-    private bool _loggedStartupTriggerWait;
-    private bool _startupRecoveryAttempted;
-    private bool _prevTriggerActive;
-    private bool _poChangePulseHandled;
-    private int _consecutiveTriggerFalsePolls;
     private bool _handshakeInProgress;
     private bool _ackAwaitingTriggerClear;
     private System.DateTime _ackClearDeadlineUtc;
@@ -67,6 +60,7 @@ public sealed class PlcHandshakeService
         IActivePoPerMillService activePoPerMill,
         IMillHooterPlcValuesService? hooterValues,
         IWipBundleRunningPoProvider wipRunningPo,
+        IS7ConnectionProvider s7,
         ILogger<PlcHandshakeService> logger)
     {
         _mill = mill;
@@ -79,6 +73,8 @@ public sealed class PlcHandshakeService
         _activePoPerMill = activePoPerMill;
         _hooterValues = hooterValues;
         _wipRunningPo = wipRunningPo;
+        _s7 = s7;
+        _edge = new PlcHandshakeEdgeTracker(options);
         _logger = logger;
         _plcConnectionEnabled = mill.PlcHandshakeEnabled;
 
@@ -114,8 +110,9 @@ public sealed class PlcHandshakeService
         if (!enabled)
         {
             DisconnectPlc();
-            ResetTriggerEdgeState(reprime: true);
-            _reconnectDelayMs = Math.Max(250, _options.InitialReconnectDelayMs);
+            _edge.ResetTriggerEdgeState(reprime: true);
+            _ackAwaitingTriggerClear = false;
+            _s7.ResetReconnectBackoff();
             UpdateStatus(millNo, s =>
             {
                 s.PlcConnectionEnabled = false;
@@ -165,11 +162,7 @@ public sealed class PlcHandshakeService
         };
     }
 
-    private bool IsPlcConnected()
-    {
-        lock (_plcLock)
-            return _plc is not null && _plc.IsConnected;
-    }
+    private bool IsPlcConnected() => _s7.IsConnected;
 
     public async Task RunAsync(CancellationToken stoppingToken)
     {
@@ -212,7 +205,7 @@ public sealed class PlcHandshakeService
                 h.PasEnableBit);
         }
 
-        _reconnectDelayMs = Math.Max(250, _options.InitialReconnectDelayMs);
+        _s7.ResetReconnectBackoff();
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -237,156 +230,7 @@ public sealed class PlcHandshakeService
                     continue;
                 }
 
-                if (IsS7PoEndHandshakeDisabled())
-                {
-                    UpdateStatus(millNo, s =>
-                    {
-                        s.PlcConnectionEnabled = true;
-                        s.Connected = true;
-                        s.LastError = null;
-                    });
-
-                    TryUpdateDb251Counts(millNo);
-                    await TryUpdateMillSignalsAsync(millNo, stoppingToken).ConfigureAwait(false);
-
-                    _connectionHealth.RecordModbusPoll(true, _statusRegistry.AllConnected());
-                    SetState(millNo, "Telemetry");
-                    _primed = true;
-                    await PollDelayAsync(stoppingToken).ConfigureAwait(false);
-                    continue;
-                }
-
-                var trigger = ReadMerkerBit(_mill.TriggerByte, _mill.TriggerBit);
-                var ack = ReadMerkerBit(_mill.AckByte, _mill.AckBit);
-
-                UpdateStatus(millNo, s =>
-                {
-                    s.PlcConnectionEnabled = true;
-                    s.Connected = true;
-                    s.TriggerActive = trigger;
-                    s.AckActive = ack;
-                    s.LastError = null;
-                });
-
-                TryUpdateDb251Counts(millNo);
-
-                // Handshake (ack + PO-change edge) before slow hooter/MES resolve so Mill-1 polls stay timely.
-                if (_ackAwaitingTriggerClear)
-                {
-                    TryCompleteMesAckSequence(millNo, trigger);
-                    if (!_ackAwaitingTriggerClear)
-                        RefreshTriggerAndAck(millNo, out trigger, out ack);
-                }
-
-                if (!_primed)
-                {
-                    if (!trigger)
-                    {
-                        ResetStuckAckIfNeeded(millNo, ack);
-                        ArmAfterTriggerClear(isStartup: true);
-                        SetState(millNo, "Idle");
-                        _logger.LogDebug(
-                            "{MillName}: handshake primed (trigger {Trigger} is false).",
-                            _mill.Name,
-                            _mill.TriggerAddress);
-                    }
-                    else if (_options.RecoverLatchedTriggerAtStartup && !_startupRecoveryAttempted)
-                    {
-                        if (IsS7PoEndHandshakeDisabled())
-                        {
-                            _startupRecoveryAttempted = true;
-                            _loggedStartupTriggerWait = false;
-                            _prevTriggerActive = trigger;
-                            _poChangePulseHandled = true;
-                            ArmAfterTriggerClear(isStartup: false);
-                            SetState(millNo, NonPlcPoEndIdleState());
-                            _logger.LogInformation(
-                                "{MillName}: latched trigger {Trigger} at startup ignored — PoEndSource={PoEndSource}.",
-                                _mill.Name,
-                                _mill.TriggerAddress,
-                                MillPoEndSourceResolver.ToConfigValue(_mill.ResolvePoEndSource(_bundleOptions)));
-                        }
-                        else
-                        {
-                            await RunStartupRecoveryAsync(millNo, stoppingToken).ConfigureAwait(false);
-                            trigger = ReadMerkerBit(_mill.TriggerByte, _mill.TriggerBit);
-                        }
-                    }
-                    else
-                    {
-                        SetState(millNo, "WaitingTriggerClear (startup)");
-                        if (!_loggedStartupTriggerWait)
-                        {
-                            _loggedStartupTriggerWait = true;
-                            _logger.LogInformation(
-                                "{MillName}: trigger {Trigger} already set at startup; waiting for PLC to clear before arming.",
-                                _mill.Name,
-                                _mill.TriggerAddress);
-                        }
-                        else
-                        {
-                            _logger.LogDebug(
-                                "{MillName}: trigger {Trigger} still set; waiting for PLC to clear before arming.",
-                                _mill.Name,
-                                _mill.TriggerAddress);
-                        }
-                    }
-
-                    _prevTriggerActive = trigger;
-                    await TryUpdateMillSignalsAsync(
-                            millNo,
-                            stoppingToken,
-                            deferHooterResolve: ShouldDeferHooterResolve())
-                        .ConfigureAwait(false);
-                    _connectionHealth.RecordModbusPoll(true, _statusRegistry.AllConnected());
-                    await PollDelayAsync(stoppingToken).ConfigureAwait(false);
-                    continue;
-                }
-
-                var risingEdge = TryDetectPoChangeRisingEdge(trigger);
-                var rearmedBeforePoll = IsRearmedForNextPoChange();
-                UpdateTriggerEdgeTracking(trigger);
-
-                if (risingEdge &&
-                    !_handshakeInProgress &&
-                    !_settingsTestInProgress)
-                {
-                    _poChangePulseHandled = true;
-                    if (IsS7PoEndHandshakeDisabled())
-                    {
-                        SetState(millNo, NonPlcPoEndIdleState());
-                        _logger.LogInformation(
-                            "{MillName}: PLC PO-change trigger {Trigger} ignored — PoEndSource={PoEndSource}.",
-                            _mill.Name,
-                            _mill.TriggerAddress,
-                            MillPoEndSourceResolver.ToConfigValue(_mill.ResolvePoEndSource(_bundleOptions)));
-                    }
-                    else
-                    {
-                        await RunHandshakeAsync(millNo, stoppingToken).ConfigureAwait(false);
-                        RefreshTriggerAndAck(millNo, out trigger, out ack);
-                    }
-                }
-                else if (!_handshakeInProgress && !_settingsTestInProgress)
-                {
-                    if (_ackAwaitingTriggerClear)
-                        SetState(millNo, "WaitingTriggerClear");
-                    else if (trigger && _poChangePulseHandled)
-                        SetState(millNo, "Idle (pulse handled, waiting for trigger clear)");
-                    else if (trigger && !_prevTriggerActive && !rearmedBeforePoll)
-                        SetState(millNo, "Idle (re-arming after last handshake)");
-                    else
-                        SetState(millNo, "Idle");
-                }
-
-                _prevTriggerActive = trigger;
-
-                await TryUpdateMillSignalsAsync(
-                        millNo,
-                        stoppingToken,
-                        deferHooterResolve: ShouldDeferHooterResolve())
-                    .ConfigureAwait(false);
-                _connectionHealth.RecordModbusPoll(true, _statusRegistry.AllConnected());
+                await ProcessConnectedPollAsync(millNo, stoppingToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -397,7 +241,8 @@ public sealed class PlcHandshakeService
                 _logger.LogWarning(ex, "{MillName}: handshake poll error; reconnecting.", _mill.Name);
                 MarkDisconnected(millNo, ex.Message);
                 DisconnectPlc();
-                ResetTriggerEdgeState(reprime: true);
+                _edge.ResetTriggerEdgeState(reprime: true);
+                _ackAwaitingTriggerClear = false;
                 await DelayReconnectAsync(stoppingToken).ConfigureAwait(false);
                 continue;
             }
@@ -412,6 +257,168 @@ public sealed class PlcHandshakeService
             s.HandshakeState = "Stopped";
         });
         _logger.LogInformation("PlcHandshakeService stopped for {MillName}.", _mill.Name);
+    }
+
+    /// <summary>
+    /// One connected poll iteration without reconnect/delay. Used by sequence pin tests
+    /// (T11 handshake contract) and by <see cref="RunAsync"/>.
+    /// </summary>
+    internal Task ExecuteHandshakePollForTestsAsync(CancellationToken cancellationToken)
+    {
+        var millNo = _mill.ResolveMillNo();
+        return ProcessConnectedPollAsync(millNo, cancellationToken);
+    }
+
+    private async Task ProcessConnectedPollAsync(int millNo, CancellationToken stoppingToken)
+    {
+        if (IsS7PoEndHandshakeDisabled())
+        {
+            UpdateStatus(millNo, s =>
+            {
+                s.PlcConnectionEnabled = true;
+                s.Connected = true;
+                s.LastError = null;
+            });
+
+            TryUpdateDb251Counts(millNo);
+            await TryUpdateMillSignalsAsync(millNo, stoppingToken).ConfigureAwait(false);
+
+            _connectionHealth.RecordModbusPoll(true, _statusRegistry.AllConnected());
+            SetState(millNo, "Telemetry");
+            _edge.MarkPrimedForTelemetry();
+            return;
+        }
+
+        var trigger = ReadMerkerBit(_mill.TriggerByte, _mill.TriggerBit);
+        var ack = ReadMerkerBit(_mill.AckByte, _mill.AckBit);
+
+        UpdateStatus(millNo, s =>
+        {
+            s.PlcConnectionEnabled = true;
+            s.Connected = true;
+            s.TriggerActive = trigger;
+            s.AckActive = ack;
+            s.LastError = null;
+        });
+
+        TryUpdateDb251Counts(millNo);
+
+        // Handshake (ack + PO-change edge) before slow hooter/MES resolve so Mill-1 polls stay timely.
+        if (_ackAwaitingTriggerClear)
+        {
+            TryCompleteMesAckSequence(millNo, trigger);
+            if (!_ackAwaitingTriggerClear)
+                RefreshTriggerAndAck(millNo, out trigger, out ack);
+        }
+
+        if (!_edge.Primed)
+        {
+            if (!trigger)
+            {
+                ResetStuckAckIfNeeded(millNo, ack);
+                _edge.ArmAfterTriggerClear(isStartup: true);
+                SetState(millNo, "Idle");
+                _logger.LogDebug(
+                    "{MillName}: handshake primed (trigger {Trigger} is false).",
+                    _mill.Name,
+                    _mill.TriggerAddress);
+            }
+            else if (_options.RecoverLatchedTriggerAtStartup && !_edge.StartupRecoveryAttempted)
+            {
+                if (IsS7PoEndHandshakeDisabled())
+                {
+                    _edge.StartupRecoveryAttempted = true;
+                    _edge.LoggedStartupTriggerWait = false;
+                    _edge.SetPrevTriggerActive(trigger);
+                    _edge.MarkPulseHandled();
+                    _edge.ArmAfterTriggerClear(isStartup: false);
+                    SetState(millNo, NonPlcPoEndIdleState());
+                    _logger.LogInformation(
+                        "{MillName}: latched trigger {Trigger} at startup ignored — PoEndSource={PoEndSource}.",
+                        _mill.Name,
+                        _mill.TriggerAddress,
+                        MillPoEndSourceResolver.ToConfigValue(_mill.ResolvePoEndSource(_bundleOptions)));
+                }
+                else
+                {
+                    await RunStartupRecoveryAsync(millNo, stoppingToken).ConfigureAwait(false);
+                    trigger = ReadMerkerBit(_mill.TriggerByte, _mill.TriggerBit);
+                }
+            }
+            else
+            {
+                SetState(millNo, "WaitingTriggerClear (startup)");
+                if (!_edge.LoggedStartupTriggerWait)
+                {
+                    _edge.LoggedStartupTriggerWait = true;
+                    _logger.LogInformation(
+                        "{MillName}: trigger {Trigger} already set at startup; waiting for PLC to clear before arming.",
+                        _mill.Name,
+                        _mill.TriggerAddress);
+                }
+                else
+                {
+                    _logger.LogDebug(
+                        "{MillName}: trigger {Trigger} still set; waiting for PLC to clear before arming.",
+                        _mill.Name,
+                        _mill.TriggerAddress);
+                }
+            }
+
+            _edge.SetPrevTriggerActive(trigger);
+            await TryUpdateMillSignalsAsync(
+                    millNo,
+                    stoppingToken,
+                    deferHooterResolve: ShouldDeferHooterResolve())
+                .ConfigureAwait(false);
+            _connectionHealth.RecordModbusPoll(true, _statusRegistry.AllConnected());
+            return;
+        }
+
+        var risingEdge = _edge.TryDetectPoChangeRisingEdge(trigger);
+        var rearmedBeforePoll = _edge.IsRearmedForNextPoChange();
+        _edge.UpdateTriggerEdgeTracking(trigger);
+
+        if (risingEdge &&
+            !_handshakeInProgress &&
+            !_settingsTestInProgress)
+        {
+            _edge.MarkPulseHandled();
+            if (IsS7PoEndHandshakeDisabled())
+            {
+                SetState(millNo, NonPlcPoEndIdleState());
+                _logger.LogInformation(
+                    "{MillName}: PLC PO-change trigger {Trigger} ignored — PoEndSource={PoEndSource}.",
+                    _mill.Name,
+                    _mill.TriggerAddress,
+                    MillPoEndSourceResolver.ToConfigValue(_mill.ResolvePoEndSource(_bundleOptions)));
+            }
+            else
+            {
+                await RunHandshakeAsync(millNo, stoppingToken).ConfigureAwait(false);
+                RefreshTriggerAndAck(millNo, out trigger, out ack);
+            }
+        }
+        else if (!_handshakeInProgress && !_settingsTestInProgress)
+        {
+            if (_ackAwaitingTriggerClear)
+                SetState(millNo, "WaitingTriggerClear");
+            else if (trigger && _edge.PoChangePulseHandled)
+                SetState(millNo, "Idle (pulse handled, waiting for trigger clear)");
+            else if (trigger && !_edge.PrevTriggerActive && !rearmedBeforePoll)
+                SetState(millNo, "Idle (re-arming after last handshake)");
+            else
+                SetState(millNo, "Idle");
+        }
+
+        _edge.SetPrevTriggerActive(trigger);
+
+        await TryUpdateMillSignalsAsync(
+                millNo,
+                stoppingToken,
+                deferHooterResolve: ShouldDeferHooterResolve())
+            .ConfigureAwait(false);
+        _connectionHealth.RecordModbusPoll(true, _statusRegistry.AllConnected());
     }
 
     private async Task RunHandshakeAsync(int millNo, CancellationToken stoppingToken, bool startupRecovery = false)
@@ -432,10 +439,7 @@ public sealed class PlcHandshakeService
     /// </summary>
     private async Task RunStartupRecoveryAsync(int millNo, CancellationToken stoppingToken)
     {
-        _startupRecoveryAttempted = true;
-        _loggedStartupTriggerWait = false;
-        _prevTriggerActive = true;
-        _poChangePulseHandled = true;
+        _edge.BeginStartupRecovery();
 
         _logger.LogInformation(
             _options.RunPoEndWorkflowOnStartupRecovery
@@ -457,7 +461,7 @@ public sealed class PlcHandshakeService
 
         if (!triggerAfter)
         {
-            ArmAfterTriggerClear(isStartup: false);
+            _edge.ArmAfterTriggerClear(isStartup: false);
             SetState(millNo, "Idle");
             _logger.LogInformation(
                 "{MillName}: startup recovery complete; handshake armed for next PO change.",
@@ -614,158 +618,29 @@ public sealed class PlcHandshakeService
         SetState(millNo, "Idle");
     }
 
-    private void UpdateTriggerEdgeTracking(bool trigger)
-    {
-        if (!trigger)
+    private bool ShouldDeferHooterResolve() =>
+        PlcHandshakeHooterDeferral.ShouldDeferHooterResolve(_ackAwaitingTriggerClear, _handshakeInProgress);
+
+    private async Task<bool> EnsureConnectedAsync(CancellationToken cancellationToken) =>
+        await _s7.EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
+
+    private void DisconnectPlc() => _s7.Disconnect();
+
+    private bool ReadMerkerBit(int byteOffset, int bit) =>
+        _s7.Read(ops =>
         {
-            _poChangePulseHandled = false;
-            _consecutiveTriggerFalsePolls++;
-        }
-        else
-        {
-            _consecutiveTriggerFalsePolls = 0;
-        }
-    }
-
-    private bool TryDetectPoChangeRisingEdge(bool trigger) =>
-        trigger &&
-        !_prevTriggerActive &&
-        !_poChangePulseHandled &&
-        IsRearmedForNextPoChange();
-
-    private bool IsRearmedForNextPoChange()
-    {
-        var required = Math.Max(1, _options.MinimumTriggerFalsePollsBeforeRearm);
-        return _consecutiveTriggerFalsePolls >= required;
-    }
-
-    private void ArmAfterTriggerClear(bool isStartup)
-    {
-        _primed = true;
-        _loggedStartupTriggerWait = false;
-        _prevTriggerActive = false;
-        _poChangePulseHandled = false;
-        _consecutiveTriggerFalsePolls = isStartup ? 1 : Math.Max(1, _options.MinimumTriggerFalsePollsBeforeRearm);
-    }
-
-    private void ResetTriggerEdgeState(bool reprime)
-    {
-        _primed = !reprime;
-        if (reprime)
-        {
-            _loggedStartupTriggerWait = false;
-            _startupRecoveryAttempted = false;
-        }
-
-        _prevTriggerActive = false;
-        _poChangePulseHandled = false;
-        _consecutiveTriggerFalsePolls = 0;
-        _ackAwaitingTriggerClear = false;
-    }
-
-    private async Task<bool> EnsureConnectedAsync(CancellationToken cancellationToken)
-    {
-        lock (_plcLock)
-        {
-            if (_plc is not null && _plc.IsConnected)
-                return true;
-        }
-
-        DisconnectPlc();
-
-        foreach (var slot in ResolveSlots())
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var cpu = ParseCpu(_mill.CpuType);
-            var plc = new Plc(cpu, _mill.IpAddress.Trim(), _mill.Rack, slot);
-            try
-            {
-                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                timeoutCts.CancelAfter(Math.Clamp(_mill.ConnectTimeoutMs, 500, 60_000));
-                await Task.Run(() => plc.Open(), timeoutCts.Token).ConfigureAwait(false);
-
-                lock (_plcLock)
-                {
-                    _plc = plc;
-                    _connectedSlot = slot;
-                }
-
-                _reconnectDelayMs = Math.Max(250, _options.InitialReconnectDelayMs);
-                _logger.LogInformation(
-                    "{MillName}: S7 connected to {Host} rack {Rack} slot {Slot}.",
-                    _mill.Name,
-                    _mill.IpAddress,
-                    _mill.Rack,
-                    slot);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug(
-                    ex,
-                    "{MillName}: S7 connect failed at slot {Slot}.",
-                    _mill.Name,
-                    slot);
-                try
-                {
-                    plc.Close();
-                }
-                catch
-                {
-                    /* ignore */
-                }
-            }
-        }
-
-        return false;
-    }
-
-    private void DisconnectPlc()
-    {
-        lock (_plcLock)
-        {
-            if (_plc is null)
-                return;
-            try
-            {
-                _plc.Close();
-            }
-            catch
-            {
-                /* ignore */
-            }
-
-            _plc = null;
-        }
-    }
-
-    private bool ReadMerkerBit(int byteOffset, int bit)
-    {
-        lock (_plcLock)
-        {
-            if (_plc is null || !_plc.IsConnected)
-                throw new InvalidOperationException("PLC not connected.");
-
-            var value = _plc.Read(DataType.Memory, 0, byteOffset, VarType.Bit, 1, (byte)bit);
+            var value = ops.Read(DataType.Memory, 0, byteOffset, VarType.Bit, 1, (byte)bit);
             return value is true;
-        }
-    }
+        });
 
-    private void WriteMerkerBit(int byteOffset, int bit, bool value)
-    {
-        lock (_plcLock)
-        {
-            if (_plc is null || !_plc.IsConnected)
-                throw new InvalidOperationException("PLC not connected.");
-
-            _plc.Write(DataType.Memory, 0, byteOffset, value, bit);
-        }
-    }
+    private void WriteMerkerBit(int byteOffset, int bit, bool value) =>
+        _s7.Write(ops => ops.Write(DataType.Memory, 0, byteOffset, value, bit));
 
     private void TryUpdateDb251Counts(int millNo)
     {
         try
         {
+            // Each ReadDbInt is a separate gate entry (no nested provider calls).
             var ok = ReadDbInt(_options.OkCountByteOffset);
             var nok = ReadDbInt(_options.NokCountByteOffset);
             var ndtRaw = ReadDbInt(_options.NdtCountByteOffset);
@@ -801,22 +676,15 @@ public sealed class PlcHandshakeService
         }
     }
 
-    private int ReadDbInt(int byteOffset)
-    {
-        lock (_plcLock)
+    private int ReadDbInt(int byteOffset) =>
+        _s7.Read(ops =>
         {
-            if (_plc is null || !_plc.IsConnected)
-                throw new InvalidOperationException("PLC not connected.");
-
-            var raw = _plc.Read(DataType.DataBlock, _options.CountsDbNumber, byteOffset, VarType.Int, 1);
+            var raw = ops.Read(DataType.DataBlock, _options.CountsDbNumber, byteOffset, VarType.Int, 1);
             if (raw is null)
                 return 0;
             var v = Convert.ToInt32(raw);
             return v < 0 ? 0 : v;
-        }
-    }
-
-    private bool ShouldDeferHooterResolve() => _ackAwaitingTriggerClear || _handshakeInProgress;
+        });
 
     private void RefreshTriggerAndAck(int millNo, out bool trigger, out bool ack)
     {
@@ -890,7 +758,7 @@ public sealed class PlcHandshakeService
 
         try
         {
-            if (_plc is null || !_plc.IsConnected)
+            if (!_s7.IsConnected)
                 return;
 
             WriteMemoryInt(hooterCfg.AccumulatedWordOffset, 0);
@@ -996,13 +864,7 @@ public sealed class PlcHandshakeService
     private void WriteMemoryInt(int wordOffset, int value)
     {
         var clamped = Math.Clamp(value, 0, short.MaxValue);
-        lock (_plcLock)
-        {
-            if (_plc is null || !_plc.IsConnected)
-                throw new InvalidOperationException("PLC not connected.");
-
-            _plc.Write(DataType.Memory, 0, wordOffset, (short)clamped);
-        }
+        _s7.Write(ops => ops.Write(DataType.Memory, 0, wordOffset, (short)clamped));
     }
 
     /// <summary>
@@ -1140,60 +1002,25 @@ public sealed class PlcHandshakeService
             readyToPulse);
     }
 
-    private bool ReadDbBit(int dbNumber, int byteOffset, int bit)
-    {
-        lock (_plcLock)
+    private bool ReadDbBit(int dbNumber, int byteOffset, int bit) =>
+        _s7.Read(ops =>
         {
-            if (_plc is null || !_plc.IsConnected)
-                throw new InvalidOperationException("PLC not connected.");
-
-            var value = _plc.Read(DataType.DataBlock, dbNumber, byteOffset, VarType.Bit, 1, (byte)bit);
+            var value = ops.Read(DataType.DataBlock, dbNumber, byteOffset, VarType.Bit, 1, (byte)bit);
             return value is true;
-        }
-    }
+        });
 
-    private bool ReadOutputBit(int byteOffset, int bit)
-    {
-        lock (_plcLock)
+    private bool ReadOutputBit(int byteOffset, int bit) =>
+        _s7.Read(ops =>
         {
-            if (_plc is null || !_plc.IsConnected)
-                throw new InvalidOperationException("PLC not connected.");
-
-            var value = _plc.Read(DataType.Output, 0, byteOffset, VarType.Bit, 1, (byte)bit);
+            var value = ops.Read(DataType.Output, 0, byteOffset, VarType.Bit, 1, (byte)bit);
             return value is true;
-        }
-    }
+        });
 
-    private void WriteOutputBit(int byteOffset, int bit, bool value)
-    {
-        lock (_plcLock)
-        {
-            if (_plc is null || !_plc.IsConnected)
-                throw new InvalidOperationException("PLC not connected.");
+    private void WriteOutputBit(int byteOffset, int bit, bool value) =>
+        _s7.Write(ops => ops.Write(DataType.Output, 0, byteOffset, value, bit));
 
-            _plc.Write(DataType.Output, 0, byteOffset, value, bit);
-        }
-    }
-
-    private IEnumerable<short> ResolveSlots()
-    {
-        yield return _mill.Slot;
-        foreach (var s in _mill.SlotFallback ?? new List<short>())
-        {
-            if (s != _mill.Slot)
-                yield return s;
-        }
-
-        if (_mill.Slot != 1 && !(_mill.SlotFallback?.Contains((short)1) ?? false))
-            yield return 1;
-    }
-
-    private int ResolvePollIntervalMs()
-    {
-        if (_mill.PollIntervalMs > 0)
-            return _mill.PollIntervalMs;
-        return Math.Max(100, _options.PollIntervalMs);
-    }
+    private int ResolvePollIntervalMs() =>
+        PlcHandshakePollTiming.ResolvePollIntervalMs(_mill, _options);
 
     private Task PollDelayAsync(CancellationToken cancellationToken) =>
         Task.Delay(ResolvePollIntervalMs(), cancellationToken);
@@ -1204,13 +1031,13 @@ public sealed class PlcHandshakeService
         MarkDisconnected(millNo, "S7 connection failed; retrying.");
         _connectionHealth.RecordModbusPoll(true, false, "One or more handshake mills unreachable.");
 
+        var reconnectDelayMs = _s7.TakeReconnectDelayMs();
         _logger.LogWarning(
             "{MillName}: reconnect in {Delay}ms.",
             _mill.Name,
-            _reconnectDelayMs);
+            reconnectDelayMs);
 
-        await Task.Delay(_reconnectDelayMs, cancellationToken).ConfigureAwait(false);
-        _reconnectDelayMs = Math.Min(_reconnectDelayMs * 2, Math.Max(1000, _options.MaxReconnectDelayMs));
+        await Task.Delay(reconnectDelayMs, cancellationToken).ConfigureAwait(false);
     }
 
     private void MarkDisconnected(int millNo, string? error)
@@ -1226,15 +1053,6 @@ public sealed class PlcHandshakeService
 
     private void UpdateStatus(int millNo, Action<PlcHandshakeMillStatus> apply) =>
         _statusRegistry.UpdateMill(millNo, apply);
-
-    private static CpuType ParseCpu(string? raw) =>
-        raw?.Trim().ToUpperInvariant() switch
-        {
-            "S71200" => CpuType.S71200,
-            "S71500" => CpuType.S71500,
-            "S7400" => CpuType.S7400,
-            _ => CpuType.S7300
-        };
 
     /// <summary>
     /// Settings test: read trigger, run PO end workflow, pulse ack on the mill's existing S7 connection.

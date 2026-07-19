@@ -7,6 +7,7 @@ using NdtBundleService.Configuration;
 using NdtBundleService.Services;
 using NdtBundleService.Services.PlcHandshake;
 using NdtBundleService.Services.PlcHandshake.PlcPoEnd;
+using NdtBundleService.Services.PlcHandshake.S7;
 using NdtBundleService.Services.FileBasedPoChange;
 using NdtBundleService.Services.TcpOpenComm;
 using NdtBundleService.Services.PoLifecycle;
@@ -61,6 +62,7 @@ builder.Services.AddSingleton<IWipBundleRunningPoProvider, WipBundleRunningPoPro
 builder.Services.AddSingleton<FileBasedPoChangeQueue>();
 builder.Services.AddSingleton<IWipBundleReconciliationService, WipBundleReconciliationService>();
 builder.Services.AddSingleton<PlcPoEndQueue>();
+builder.Services.AddSingleton<IS7ConnectionProviderRegistry, S7ConnectionProviderRegistry>();
 builder.Services.AddSingleton<IMillNdtCountReader, S7MillNdtCountReader>();
 builder.Services.AddSingleton<IMillSlitLiveNdtAccumulator, MillSlitLiveNdtAccumulator>();
 builder.Services.AddSingleton<IMillBundleStateLock, MillBundleStateLock>();
