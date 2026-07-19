@@ -46,6 +46,20 @@ public sealed class PlcHandshakeOptions
     /// <summary>Byte offset of Slit ID INT (DBW10).</summary>
     public int SlitIdByteOffset { get; set; } = 10;
 
+    /// <summary>
+    /// Optional merker byte for slit-end signal (PLC→MES). When &lt; 0, slit-end uses NDT count reset edge.
+    /// // TODO(FOX): confirm slit-end signal address
+    /// </summary>
+    public int SlitEndTriggerByte { get; set; } = -1;
+
+    /// <summary>Bit within <see cref="SlitEndTriggerByte"/>. Used only when <see cref="SlitEndTriggerByte"/> ≥ 0.</summary>
+    public int SlitEndTriggerBit { get; set; }
+
+    /// <summary>
+    /// NDT count DB for live close (default 251). Config-driven; mirrors MillSlitLive.S7.DbNumber.
+    /// </summary>
+    public int NdtCountDb { get; set; } = 251;
+
     /// <summary>When true, read line-running bit from each mill PLC for dashboard SCADA lamp.</summary>
     public bool ReadLineRunning { get; set; } = true;
 
@@ -73,6 +87,22 @@ public sealed class PlcHandshakeOptions
     /// Leave false when a latched trigger may be stale while the same PO is still running on the mill.
     /// </summary>
     public bool RunPoEndWorkflowOnStartupRecovery { get; set; }
+
+    /// <summary>
+    /// When true (default), persist <c>Handshake_Event</c> audit rows for each PO-change handshake.
+    /// </summary>
+    public bool HandshakeAuditEnabled { get; set; } = true;
+
+    /// <summary>
+    /// M40.6 (trigger) TRUE longer than this without a completed handshake → WRN + status alert. Default 30.
+    /// </summary>
+    public int StuckTriggerAlarmSeconds { get; set; } = 30;
+
+    /// <summary>Ack merker write attempts before ERR + alert. Default 3.</summary>
+    public int AckWriteRetryCount { get; set; } = 3;
+
+    /// <summary>Initial backoff (ms) between ack write retries; doubles each attempt. Default 100.</summary>
+    public int AckWriteRetryInitialBackoffMs { get; set; } = 100;
 
     public List<MillConfig> Mills { get; set; } = new();
 }

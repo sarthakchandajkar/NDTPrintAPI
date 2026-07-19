@@ -63,6 +63,40 @@ public interface INdtBundleRepository
     /// Returns rows updated; 0 when SQL disabled, column missing, or no matching rows.
     /// </summary>
     Task<int> MarkManualReviewAsync(string poNumber, int millNo, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// After a PLC-driven close/print, stamp <c>Close_Source='Plc'</c> and <c>Awaiting_Csv_Recon=1</c>
+    /// on the formatted bundle number. No-op when SQL disabled or columns missing.
+    /// </summary>
+    Task TrySetPlcCloseMetadataAsync(int engineBatchSequence, int millNo, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// When a PLC-closed bundle is awaiting CSV recon for this PO/mill, returns its formatted number,
+    /// engine sequence (last 5 digits), and PLC total. Null when none.
+    /// </summary>
+    Task<(string BundleNo, int EngineSequence, int PlcTotal)?> TryGetAwaitingPlcReconBatchAsync(
+        string poNumber,
+        int millNo,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// When a slit CSV sum is known for a PLC-closed bundle awaiting recon, clear awaiting flag and
+    /// set <c>Count_Discrepancy</c> when sums differ. Returns the recon result when a row was found.
+    /// </summary>
+    Task<PlcCsvReconResult?> TryReconcilePlcClosedBundleAsync(
+        string poNumber,
+        int millNo,
+        int slitSum,
+        CancellationToken cancellationToken);
+}
+
+/// <summary>Result of reconciling a late Input Slit sum against a PLC-closed bundle.</summary>
+public sealed class PlcCsvReconResult
+{
+    public string BundleNo { get; init; } = string.Empty;
+    public int PlcTotal { get; init; }
+    public int SlitSum { get; init; }
+    public bool CountDiscrepancy => SlitSum != PlcTotal;
 }
 
 public interface IPoPlanProvider
@@ -195,6 +229,18 @@ public interface IBundleEngine
         Func<InputSlitRecord, int, int, Task> onBundleClosedAsync,
         CancellationToken cancellationToken,
         Guid? correlationId = null);
+
+    /// <summary>
+    /// PLC slit-end close: allocate bundle from live PLC count, zero size accumulation, invoke print callback.
+    /// Sets close metadata via the callback path (<c>Close_Source=Plc</c>, <c>Awaiting_Csv_Recon=1</c>).
+    /// </summary>
+    Task CloseBundleFromPlcAsync(
+        string poNumber,
+        int millNo,
+        string? pipeSize,
+        int plcCount,
+        Func<InputSlitRecord, int, int, Task> onBundleClosedAsync,
+        CancellationToken cancellationToken);
 }
 
 public interface IPlcClient

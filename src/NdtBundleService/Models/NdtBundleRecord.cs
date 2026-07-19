@@ -19,4 +19,11 @@ public sealed class NdtBundleRecord
     public int RejectedPipes { get; init; }
     public string NdtShortLengthPipe { get; init; } = string.Empty;
     public string RejectedShortLengthPipe { get; init; } = string.Empty;
+
+    /// <summary><c>File</c> or <c>Plc</c>; null when column absent / legacy rows.</summary>
+    public string? CloseSource { get; init; }
+
+    public bool AwaitingCsvRecon { get; init; }
+
+    public bool CountDiscrepancy { get; init; }
 }

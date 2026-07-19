@@ -1,4 +1,6 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using NdtBundleService.Configuration;
 
 namespace NdtBundleService.Services.PlcHandshake;
 
@@ -16,7 +18,8 @@ public sealed record MillHooterResolvedValues(
 
 /// <summary>
 /// Resolves hooter PLC memory values: MW58 from formation chart (running PO pipe size),
-/// MW56 from bundle-engine size count (NDT pipes toward the next bundle for that size).
+/// MW56 from bundle-engine size count (NDT pipes toward the next bundle for that size)
+/// or live PLC NDT when <c>HooterCountSource=Plc</c>.
 /// </summary>
 public interface IMillHooterPlcValuesService
 {
@@ -29,6 +32,8 @@ public sealed class MillHooterPlcValuesService : IMillHooterPlcValuesService
     private readonly IPipeSizeProvider _pipeSizeProvider;
     private readonly IFormationChartProvider _formationChartProvider;
     private readonly INdtBundleRuntimeStateStore _runtimeState;
+    private readonly IOptions<NdtBundleOptions> _options;
+    private readonly PlcHandshakeStatusRegistry _handshakeStatus;
     private readonly ILogger<MillHooterPlcValuesService> _logger;
 
     public MillHooterPlcValuesService(
@@ -36,12 +41,16 @@ public sealed class MillHooterPlcValuesService : IMillHooterPlcValuesService
         IPipeSizeProvider pipeSizeProvider,
         IFormationChartProvider formationChartProvider,
         INdtBundleRuntimeStateStore runtimeState,
+        IOptions<NdtBundleOptions> options,
+        PlcHandshakeStatusRegistry handshakeStatus,
         ILogger<MillHooterPlcValuesService> logger)
     {
         _activePoPerMill = activePoPerMill;
         _pipeSizeProvider = pipeSizeProvider;
         _formationChartProvider = formationChartProvider;
         _runtimeState = runtimeState;
+        _options = options;
+        _handshakeStatus = handshakeStatus;
         _logger = logger;
     }
 
@@ -89,6 +98,14 @@ public sealed class MillHooterPlcValuesService : IMillHooterPlcValuesService
 
         var sizeCounts = _runtimeState.GetSizeCounts(poNorm, millNo);
         sizeCounts.TryGetValue(sizeKey, out var accumulated);
+
+        // HooterCountSource=Plc uses live registry NDT when available (fed each handshake poll).
+        if (HooterCountSourceParser.Parse(_options.Value.HooterCountSource) == HooterCountSource.Plc &&
+            _handshakeStatus.TryGetMill(millNo, out var st) &&
+            st is not null)
+        {
+            accumulated = Math.Max(0, st.NdtCount ?? 0);
+        }
 
         return new MillHooterResolvedValues(poNorm, pipeSize, threshold, Math.Max(0, accumulated));
     }

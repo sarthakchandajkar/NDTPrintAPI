@@ -537,6 +537,183 @@ WHERE Mill_No = @MillNo
         }
     }
 
+    public async Task TrySetPlcCloseMetadataAsync(int engineBatchSequence, int millNo, CancellationToken cancellationToken)
+    {
+        if (!UseDatabase || engineBatchSequence <= 0 || millNo is < 1 or > 4)
+            return;
+
+        var yy = (DateTime.Now.Year % 100).ToString("D2", System.Globalization.CultureInfo.InvariantCulture);
+        var bundleNo = "12" + yy + millNo.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                       engineBatchSequence.ToString("D5", System.Globalization.CultureInfo.InvariantCulture);
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            const string sql = @"
+UPDATE dbo.NDT_Bundle
+SET Close_Source = N'Plc',
+    Awaiting_Csv_Recon = 1
+WHERE Bundle_No = @BundleNo;";
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@BundleNo", bundleNo);
+            var updated = await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            if (updated > 0)
+            {
+                _logger.LogInformation(
+                    "Set Close_Source=Plc Awaiting_Csv_Recon=1 on bundle {BundleNo}.",
+                    bundleNo);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Failed to set PLC close metadata for {BundleNo} (run docs/NDT_Bundle_Alter_CloseSource.sql if columns are missing).",
+                bundleNo);
+        }
+    }
+
+    public async Task<(string BundleNo, int EngineSequence, int PlcTotal)?> TryGetAwaitingPlcReconBatchAsync(
+        string poNumber,
+        int millNo,
+        CancellationToken cancellationToken)
+    {
+        if (!UseDatabase || millNo is < 1 or > 4)
+            return null;
+
+        var normalized = InputSlitCsvParsing.NormalizePo(poNumber);
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            const string findSql = @"
+SELECT TOP 1 Bundle_No, Total_NDT_Pcs
+FROM dbo.NDT_Bundle
+WHERE Mill_No = @MillNo
+  AND Awaiting_Csv_Recon = 1
+  AND Close_Source = N'Plc'
+  AND (PO_Number = @Po OR PO_Number = @PoNormalized)
+ORDER BY PrintedAt DESC;";
+            await using var find = new Microsoft.Data.SqlClient.SqlCommand(findSql, conn);
+            find.Parameters.AddWithValue("@MillNo", millNo);
+            find.Parameters.AddWithValue("@Po", poNumber.Trim());
+            find.Parameters.AddWithValue("@PoNormalized", normalized);
+            await using var reader = await find.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                return null;
+
+            var bundleNo = reader.GetString(0);
+            var plcTotal = reader.GetInt32(1);
+            if (!TryParseEngineSequenceFromBundleNo(bundleNo, out var seq))
+                return null;
+            return (bundleNo, seq, plcTotal);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(
+                ex,
+                "TryGetAwaitingPlcReconBatch failed for PO {PO} Mill {Mill} (columns may be missing).",
+                normalized,
+                millNo);
+            return null;
+        }
+    }
+
+    public async Task<PlcCsvReconResult?> TryReconcilePlcClosedBundleAsync(
+        string poNumber,
+        int millNo,
+        int slitSum,
+        CancellationToken cancellationToken)
+    {
+        if (!UseDatabase || slitSum < 0 || millNo is < 1 or > 4)
+            return null;
+
+        var normalized = InputSlitCsvParsing.NormalizePo(poNumber);
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            const string findSql = @"
+SELECT TOP 1 Bundle_No, Total_NDT_Pcs
+FROM dbo.NDT_Bundle
+WHERE Mill_No = @MillNo
+  AND Awaiting_Csv_Recon = 1
+  AND Close_Source = N'Plc'
+  AND (PO_Number = @Po OR PO_Number = @PoNormalized)
+ORDER BY PrintedAt DESC;";
+            string? bundleNo;
+            int plcTotal;
+            await using (var find = new Microsoft.Data.SqlClient.SqlCommand(findSql, conn))
+            {
+                find.Parameters.AddWithValue("@MillNo", millNo);
+                find.Parameters.AddWithValue("@Po", poNumber.Trim());
+                find.Parameters.AddWithValue("@PoNormalized", normalized);
+                await using var reader = await find.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                    return null;
+                bundleNo = reader.GetString(0);
+                plcTotal = reader.GetInt32(1);
+            }
+
+            var discrepancy = PlcCsvReconSemantics.Evaluate(bundleNo, plcTotal, slitSum).CountDiscrepancy;
+            const string updateSql = @"
+UPDATE dbo.NDT_Bundle
+SET Awaiting_Csv_Recon = 0,
+    Count_Discrepancy = @Discrepancy
+WHERE Bundle_No = @BundleNo;";
+            await using var upd = new Microsoft.Data.SqlClient.SqlCommand(updateSql, conn);
+            upd.Parameters.AddWithValue("@BundleNo", bundleNo);
+            upd.Parameters.AddWithValue("@Discrepancy", discrepancy ? 1 : 0);
+            await upd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+            if (discrepancy)
+            {
+                _logger.LogWarning(
+                    "PLC vs CSV count discrepancy for bundle {BundleNo}: plc={PlcTotal} slitSum={SlitSum}.",
+                    bundleNo,
+                    plcTotal,
+                    slitSum);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "PLC closed bundle {BundleNo} reconciled with slit sum {SlitSum}.",
+                    bundleNo,
+                    slitSum);
+            }
+
+            var applied = PlcCsvReconSemantics.Evaluate(bundleNo, plcTotal, slitSum);
+            return new PlcCsvReconResult
+            {
+                BundleNo = applied.BundleNo,
+                PlcTotal = applied.PlcTotal,
+                SlitSum = applied.SlitSum
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "PLC CSV recon failed for PO {PO} Mill {Mill} (run docs/NDT_Bundle_Alter_CloseSource.sql if columns are missing).",
+                normalized,
+                millNo);
+            return null;
+        }
+    }
+
+    private static bool TryParseEngineSequenceFromBundleNo(string bundleNo, out int sequence)
+    {
+        sequence = 0;
+        if (string.IsNullOrWhiteSpace(bundleNo) || bundleNo.Length < 5)
+            return false;
+        return int.TryParse(
+            bundleNo.AsSpan(bundleNo.Length - 5),
+            System.Globalization.NumberStyles.None,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out sequence);
+    }
+
     private async Task<NdtBundleRecord> ApplyFormedBundleTotalAsync(NdtBundleRecord record, string batchNo, CancellationToken cancellationToken)
     {
         var formedTotal = await TryReadBundleSummaryTotalAsync(batchNo, cancellationToken).ConfigureAwait(false);

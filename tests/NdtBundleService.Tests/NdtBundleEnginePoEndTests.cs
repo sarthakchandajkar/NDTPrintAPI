@@ -13,7 +13,7 @@ public sealed class NdtBundleEnginePoEndTests
         var formation = new FormationChartProviderStub(new Dictionary<string, int> { ["Default"] = 20 });
         var pipeSize = new PipeSizeProviderStub(new Dictionary<string, string>());
         var runtime = new InMemoryRuntimeStateStore();
-        var engine = new NdtBundleEngine(formation, pipeSize, runtime, NullLogger<NdtBundleEngine>.Instance);
+        var engine = TestEngineFactory.Create(formation, pipeSize, runtime);
 
         await runtime.EnsureInitializedAsync(CancellationToken.None);
         runtime.ApplySlitContribution("PO-100", 1, ndtPipes: 12, threshold: 20, out _, out _);
@@ -40,7 +40,7 @@ public sealed class NdtBundleEnginePoEndTests
         var formation = new FormationChartProviderStub(new Dictionary<string, int> { ["Default"] = 20 });
         var pipeSize = new PipeSizeProviderStub(new Dictionary<string, string>());
         var runtime = new InMemoryRuntimeStateStore();
-        var engine = new NdtBundleEngine(formation, pipeSize, runtime, NullLogger<NdtBundleEngine>.Instance);
+        var engine = TestEngineFactory.Create(formation, pipeSize, runtime);
 
         await runtime.EnsureInitializedAsync(CancellationToken.None);
         runtime.ApplySlitContribution("PO-100", 1, ndtPipes: 12, threshold: 20, out _, out _);
@@ -63,7 +63,7 @@ public sealed class NdtBundleEnginePoEndTests
         var formation = new FormationChartProviderStub(new Dictionary<string, int> { ["6"] = 20 });
         var pipeSize = new PipeSizeProviderStub(new Dictionary<string, string> { ["PO-200"] = "6" });
         var runtime = new InMemoryRuntimeStateStore();
-        var engine = new NdtBundleEngine(formation, pipeSize, runtime, NullLogger<NdtBundleEngine>.Instance);
+        var engine = TestEngineFactory.Create(formation, pipeSize, runtime);
 
         await runtime.EnsureInitializedAsync(CancellationToken.None);
         runtime.SetSizeCounts("PO-200", 2, new Dictionary<string, int> { ["6"] = 15 });

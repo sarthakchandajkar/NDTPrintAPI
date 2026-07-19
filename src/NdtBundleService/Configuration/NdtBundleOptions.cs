@@ -156,6 +156,30 @@ public class NdtBundleOptions
     public int PoLifecycleSweepIntervalSeconds { get; set; } = 30;
 
     /// <summary>
+    /// Bundle close/print trigger: <c>File</c>, <c>Plc</c>, or <c>PlcWithFileFallback</c> (default).
+    /// When S7 is unhealthy, <c>PlcWithFileFallback</c> uses the file path unchanged.
+    /// </summary>
+    public string CloseTrigger { get; set; } = "PlcWithFileFallback";
+
+    /// <summary>
+    /// Hooter MW56 source: <c>App</c> (runtime size counts, default) or <c>Plc</c> (live DB251 NDT).
+    /// </summary>
+    public string HooterCountSource { get; set; } = "App";
+
+    /// <summary>
+    /// When true, a CSV vs PLC count mismatch after recon may trigger a corrected reprint.
+    /// Default false until validated.
+    /// </summary>
+    public bool ReprintOnCountMismatch { get; set; }
+
+    /// <summary>
+    /// Under <c>CloseTrigger=PlcWithFileFallback</c> with a healthy S7 provider, if file-side size
+    /// accumulation reaches threshold and no PLC close clears it within this many seconds, execute
+    /// the file-driven close with a WRN (missed PLC / wrong slit-end heuristic safety-net). Default 60.
+    /// </summary>
+    public int PlcCloseGraceSeconds { get; set; } = 60;
+
+    /// <summary>
     /// When true (default), startup/periodic Input Slit reconciliation ingests folder files absent from
     /// <c>Input_Slit_Row</c> (within <see cref="BackfillLookbackHours"/>) instead of baseline-seeding them as processed.
     /// When false, or when SQL is disabled, the historical seed baseline is used.

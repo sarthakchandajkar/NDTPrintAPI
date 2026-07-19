@@ -205,6 +205,16 @@ public sealed class WipBundleReconciliationTests : IDisposable
         public Task<int> MarkManualReviewAsync(string poNumber, int millNo, CancellationToken cancellationToken) =>
             Task.FromResult(0);
 
+        public Task TrySetPlcCloseMetadataAsync(int engineBatchSequence, int millNo, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
+        public Task<(string BundleNo, int EngineSequence, int PlcTotal)?> TryGetAwaitingPlcReconBatchAsync(
+            string poNumber, int millNo, CancellationToken cancellationToken) =>
+            Task.FromResult<(string BundleNo, int EngineSequence, int PlcTotal)?>(null);
+
+        public Task<PlcCsvReconResult?> TryReconcilePlcClosedBundleAsync(string poNumber, int millNo, int slitSum, CancellationToken cancellationToken) =>
+            Task.FromResult<PlcCsvReconResult?>(null);
+
         public Task<NdtBundleRecord?> GetLatestPrintedBundleForMillAsync(int millNo, CancellationToken cancellationToken) =>
             Task.FromResult<NdtBundleRecord?>(null);
 
