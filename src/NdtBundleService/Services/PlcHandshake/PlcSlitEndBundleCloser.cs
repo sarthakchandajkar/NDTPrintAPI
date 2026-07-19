@@ -8,16 +8,18 @@ namespace NdtBundleService.Services.PlcHandshake;
 
 /// <summary>
 /// Detects slit-end and closes bundles from live PLC NDT count when <c>CloseTrigger</c> allows.
-/// Slit-end address is config-driven; FOX must confirm the signal.
+/// Default: Slit ID change (DB251.DBW10, same value shown on Mills PLC). Optional merker override via config.
 /// </summary>
 public interface IPlcSlitEndBundleCloser
 {
     /// <param name="liveNdtCount">Current DB251 NDT INT from this poll.</param>
+    /// <param name="liveSlitId">Current DB251 Slit ID INT (DBW10) from this poll.</param>
     Task TryCloseOnSlitEndAsync(
         int millNo,
         MillConfig mill,
         IS7ConnectionProvider s7,
         int liveNdtCount,
+        int liveSlitId,
         CancellationToken cancellationToken);
 }
 
@@ -34,6 +36,8 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
     private readonly ILogger<PlcSlitEndBundleCloser> _logger;
 
     private readonly Dictionary<int, int> _prevNdtByMill = new();
+    private readonly Dictionary<int, int> _prevSlitIdByMill = new();
+    private readonly HashSet<int> _slitIdPrimedByMill = new();
     private readonly Dictionary<int, bool> _prevSlitEndBitByMill = new();
     private readonly HashSet<int> _closedThisSlitByMill = new();
 
@@ -64,6 +68,7 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
         MillConfig mill,
         IS7ConnectionProvider s7,
         int liveNdtCount,
+        int liveSlitId,
         CancellationToken cancellationToken)
     {
         var bundleOpts = _options.Value;
@@ -72,7 +77,7 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
         if (!BundleClosePolicy.AllowPlcClose(trigger, s7.IsHealthy))
             return;
 
-        if (!TryDetectSlitEnd(millNo, handshake, s7, liveNdtCount, out var edgeReason, out var plcCountForClose))
+        if (!TryDetectSlitEnd(millNo, handshake, s7, liveNdtCount, liveSlitId, out var edgeReason, out var plcCountForClose))
             return;
 
         if (_closedThisSlitByMill.Contains(millNo))
@@ -142,18 +147,22 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
         }
     }
 
-    private bool TryDetectSlitEnd(
+    /// <summary>
+    /// Detects slit end. Prefer optional merker rising edge when configured;
+    /// otherwise Slit ID (DB251.DBW10) change means the previous slit finished.
+    /// </summary>
+    internal bool TryDetectSlitEnd(
         int millNo,
         PlcHandshakeOptions handshake,
         IS7ConnectionProvider s7,
         int liveNdtCount,
+        int liveSlitId,
         out string reason,
         out int plcCountForClose)
     {
         reason = "";
         plcCountForClose = liveNdtCount;
 
-        // TODO(FOX): confirm slit-end signal — candidate merker bit or count latch/reset / slit-register rollover.
         if (handshake.SlitEndTriggerByte >= 0)
         {
             var bit = Math.Clamp(handshake.SlitEndTriggerBit, 0, 7);
@@ -178,17 +187,30 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
             return false;
         }
 
-        // Default placeholder until FOX confirms: NDT count reset edge after a non-zero count.
+        // Default: Mills PLC Slit ID (DB251.DBW10) changed → previous slit finished.
+        // Use the NDT count from the previous poll (before the PLC resets/rolls to the new slit).
+        _prevSlitIdByMill.TryGetValue(millNo, out var prevSlitId);
         _prevNdtByMill.TryGetValue(millNo, out var prevNdt);
-        _prevNdtByMill[millNo] = liveNdtCount;
-        if (prevNdt > 0 && liveNdtCount < prevNdt)
+
+        if (!_slitIdPrimedByMill.Contains(millNo))
+        {
+            _prevSlitIdByMill[millNo] = liveSlitId;
+            _prevNdtByMill[millNo] = liveNdtCount;
+            _slitIdPrimedByMill.Add(millNo);
+            return false;
+        }
+
+        if (liveSlitId != prevSlitId)
         {
             _closedThisSlitByMill.Remove(millNo);
-            reason = $"NDT count reset edge ({prevNdt}→{liveNdtCount})";
+            reason = $"Slit ID change ({prevSlitId}→{liveSlitId})";
             plcCountForClose = prevNdt;
+            _prevSlitIdByMill[millNo] = liveSlitId;
+            _prevNdtByMill[millNo] = liveNdtCount;
             return true;
         }
 
+        _prevNdtByMill[millNo] = liveNdtCount;
         return false;
     }
 }

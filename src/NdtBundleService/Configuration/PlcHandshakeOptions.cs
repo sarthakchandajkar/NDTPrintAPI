@@ -47,8 +47,9 @@ public sealed class PlcHandshakeOptions
     public int SlitIdByteOffset { get; set; } = 10;
 
     /// <summary>
-    /// Optional merker byte for slit-end signal (PLC→MES). When &lt; 0, slit-end uses NDT count reset edge.
-    /// // TODO(FOX): confirm slit-end signal address
+    /// Optional merker byte for slit-end signal (PLC→MES). When &lt; 0 (default), slit-end is detected from
+    /// Slit ID change on DB251 (<see cref="SlitIdByteOffset"/> / DBW10 — same value shown on Mills PLC).
+    /// When ≥ 0, a rising edge on this merker bit is used instead.
     /// </summary>
     public int SlitEndTriggerByte { get; set; } = -1;
 

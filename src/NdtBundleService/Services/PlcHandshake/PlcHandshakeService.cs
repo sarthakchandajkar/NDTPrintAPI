@@ -290,7 +290,9 @@ public sealed class PlcHandshakeService
                 s.LastError = null;
             });
 
-            TryUpdateDb251Counts(millNo);
+            var telemetryCounts = TryUpdateDb251Counts(millNo);
+            await TryCloseOnSlitEndSafeAsync(millNo, telemetryCounts.Ndt, telemetryCounts.SlitId, stoppingToken)
+                .ConfigureAwait(false);
             await TryUpdateMillSignalsAsync(millNo, stoppingToken).ConfigureAwait(false);
 
             _connectionHealth.RecordModbusPoll(true, _statusRegistry.AllConnected());
@@ -311,20 +313,9 @@ public sealed class PlcHandshakeService
             s.LastError = null;
         });
 
-        var liveNdt = TryUpdateDb251Counts(millNo);
-
-        if (_slitEndCloser is not null)
-        {
-            try
-            {
-                await _slitEndCloser.TryCloseOnSlitEndAsync(millNo, _mill, _s7, liveNdt, stoppingToken)
-                    .ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug(ex, "{MillName}: PLC slit-end close attempt failed.", _mill.Name);
-            }
-        }
+        var liveCounts = TryUpdateDb251Counts(millNo);
+        await TryCloseOnSlitEndSafeAsync(millNo, liveCounts.Ndt, liveCounts.SlitId, stoppingToken)
+            .ConfigureAwait(false);
 
         // Handshake (ack + PO-change edge) before slow hooter/MES resolve so Mill-1 polls stay timely.
         if (_ackAwaitingTriggerClear)
@@ -817,6 +808,26 @@ public sealed class PlcHandshakeService
             _audit.CorrelationId);
     }
 
+    private async Task TryCloseOnSlitEndSafeAsync(
+        int millNo,
+        int liveNdt,
+        int liveSlitId,
+        CancellationToken stoppingToken)
+    {
+        if (_slitEndCloser is null)
+            return;
+
+        try
+        {
+            await _slitEndCloser.TryCloseOnSlitEndAsync(millNo, _mill, _s7, liveNdt, liveSlitId, stoppingToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "{MillName}: PLC slit-end close attempt failed.", _mill.Name);
+        }
+    }
+
     private sealed class NullHandshakeEventRepository : IHandshakeEventRepository
     {
         public static readonly NullHandshakeEventRepository Instance = new();
@@ -824,7 +835,7 @@ public sealed class PlcHandshakeService
             Task.CompletedTask;
     }
 
-    private int TryUpdateDb251Counts(int millNo)
+    private (int Ndt, int SlitId) TryUpdateDb251Counts(int millNo)
     {
         try
         {
@@ -853,7 +864,7 @@ public sealed class PlcHandshakeService
                 s.SlitId = slitId;
                 s.CountsUpdatedUtc = DateTimeOffset.UtcNow;
             });
-            return ndtRaw;
+            return (ndtRaw, slitId);
         }
         catch (Exception ex)
         {
@@ -862,7 +873,7 @@ public sealed class PlcHandshakeService
                 "{MillName}: DB{Db} count read failed.",
                 _mill.Name,
                 _options.CountsDbNumber);
-            return 0;
+            return (0, 0);
         }
     }
 
