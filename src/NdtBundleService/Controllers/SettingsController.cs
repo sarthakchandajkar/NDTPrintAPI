@@ -25,6 +25,8 @@ public sealed class SettingsController : ControllerBase
     private readonly PlcHandshakeStatusRegistry _handshakeStatus;
     private readonly PlcHandshakeCoordinator _handshakeCoordinator;
     private readonly IMillHooterPlcValuesService _hooterValues;
+    private readonly INetworkPrinterSender _networkPrinterSender;
+    private readonly IZplGenerationToggle _zplToggle;
     private readonly NdtBundleOptions _options;
     private readonly ILogger<SettingsController> _logger;
 
@@ -38,6 +40,8 @@ public sealed class SettingsController : ControllerBase
         PlcHandshakeStatusRegistry handshakeStatus,
         PlcHandshakeCoordinator handshakeCoordinator,
         IMillHooterPlcValuesService hooterValues,
+        INetworkPrinterSender networkPrinterSender,
+        IZplGenerationToggle zplToggle,
         IOptions<NdtBundleOptions> options,
         ILogger<SettingsController> logger)
     {
@@ -50,6 +54,8 @@ public sealed class SettingsController : ControllerBase
         _handshakeStatus = handshakeStatus;
         _handshakeCoordinator = handshakeCoordinator;
         _hooterValues = hooterValues;
+        _networkPrinterSender = networkPrinterSender;
+        _zplToggle = zplToggle;
         _options = options.Value;
         _logger = logger;
     }
@@ -607,6 +613,106 @@ public sealed class SettingsController : ControllerBase
             status = reachable ? "Ready" : "Unreachable",
             reachable
         });
+    }
+
+    /// <summary>
+    /// Sends a dummy ZPL label to the configured mill printer (TCP 9100) so operators can verify print path,
+    /// not just TCP reachability. Requires Settings → Save first for the mill IP in use.
+    /// </summary>
+    [HttpPost("printers/test-print")]
+    public async Task<IActionResult> TestPrintPrinter(
+        [FromBody] TestMillPrinterRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!TryAuthorize(out var denied))
+            return denied!;
+
+        if (request?.MillNo is < 1 or > 4)
+            return BadRequest(new { Message = "millNo must be 1–4." });
+
+        if (!_zplToggle.IsEnabled)
+        {
+            return BadRequest(new
+            {
+                Message =
+                    "NDT tag ZPL and network print are disabled (NdtBundle:EnableNdtTagZplAndPrint / runtime toggle). " +
+                    "Enable printing, then try again."
+            });
+        }
+
+        var resolved = _millPrinters.ResolveForMill(request.MillNo);
+        if (!resolved.Configured)
+        {
+            return BadRequest(new
+            {
+                Message =
+                    $"Mill {request.MillNo} has no printer IP configured. Enter an address, click Save printers, then try Print test tag.",
+                millNo = request.MillNo,
+                status = "NotConfigured",
+                success = false
+            });
+        }
+
+        var bundleNo = $"TEST-M{request.MillNo}";
+        _logger.LogInformation(
+            "Settings test-print: sending dummy ZPL to Mill {Mill} printer {Address}:{Port}.",
+            request.MillNo,
+            resolved.Address,
+            resolved.Port);
+
+        try
+        {
+            var zplBytes = ZplDummyLabelBuilder.BuildDummyLabelZpl(
+                bundleNo: bundleNo,
+                specification: "SETTINGS-TEST",
+                pipeType: "TEST",
+                pipeSize: "1.5",
+                pipeLen: "6",
+                pcsPerBundle: 1,
+                slitNo: $"M{request.MillNo}");
+
+            var sendResult = await _networkPrinterSender
+                .SendAsync(resolved.Address, resolved.Port, zplBytes, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (sendResult.Success)
+            {
+                return Ok(new
+                {
+                    success = true,
+                    millNo = request.MillNo,
+                    address = resolved.Address,
+                    port = resolved.Port,
+                    status = "Printed",
+                    message =
+                        $"Dummy ZPL tag sent to Mill {request.MillNo} printer {resolved.Address}:{resolved.Port}. " +
+                        "The physical label should print now."
+                });
+            }
+
+            return StatusCode(500, new
+            {
+                success = false,
+                millNo = request.MillNo,
+                address = resolved.Address,
+                port = resolved.Port,
+                status = "SendFailed",
+                message =
+                    $"Failed to send ZPL to {resolved.Address}:{resolved.Port}. " +
+                    "Check printer power, network, firewall, and that the device accepts ZPL on port 9100.",
+                detail = sendResult.ErrorDetail ?? string.Empty
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Settings test-print failed for Mill {Mill}.", request.MillNo);
+            return StatusCode(500, new
+            {
+                success = false,
+                millNo = request.MillNo,
+                message = "Print failed: " + ex.Message
+            });
+        }
     }
 
     private bool TryAuthorize(out IActionResult? denied)

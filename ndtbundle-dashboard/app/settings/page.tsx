@@ -250,6 +250,7 @@ export default function SettingsPage() {
   const [poChangeTestingMill, setPoChangeTestingMill] = useState<number | null>(null);
   const [poChangeTestResult, setPoChangeTestResult] = useState<SettingsPoChangeTestResult | null>(null);
   const [plcConnectionBusyMill, setPlcConnectionBusyMill] = useState<number | null>(null);
+  const [printerTestPrintMill, setPrinterTestPrintMill] = useState<number | null>(null);
   const plcPollInFlight = useRef(false);
 
   const refreshStatus = useCallback(async () => {
@@ -439,12 +440,36 @@ export default function SettingsPage() {
     const t = getSettingsToken();
     if (!t) return;
     setMessage(null);
+    setError(null);
     try {
       const r = await api.settingsTestPrinter(t, millNo);
       setMessage(`Mill ${millNo}: ${r.status ?? "—"} (${r.address ?? ""}:${r.port ?? 9100})`);
       await loadTabData();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Test failed");
+    }
+  };
+
+  const testPrintPrinter = async (millNo: number) => {
+    const t = getSettingsToken();
+    if (!t) return;
+    setPrinterTestPrintMill(millNo);
+    setMessage(null);
+    setError(null);
+    try {
+      const r = await api.settingsTestPrintPrinter(t, millNo);
+      if (r.success === false) {
+        setError(r.message ?? `Mill ${millNo}: test print failed.`);
+      } else {
+        setMessage(
+          r.message ??
+            `Mill ${millNo}: dummy tag sent to ${r.address ?? "?"}:${r.port ?? 9100}.`
+        );
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Test print failed");
+    } finally {
+      setPrinterTestPrintMill(null);
     }
   };
 
@@ -850,7 +875,9 @@ export default function SettingsPage() {
         <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
           <p className="px-5 py-3 text-sm text-gray-600 border-b border-gray-100">
             One network printer per mill (TCP port 9100). Mill 1 falls back to legacy{" "}
-            <code className="text-xs bg-gray-100 px-1">NdtTagPrinterAddress</code> when empty.
+            <code className="text-xs bg-gray-100 px-1">NdtTagPrinterAddress</code> when empty.{" "}
+            <strong>Test</strong> checks TCP reachability; <strong>Print test tag</strong> sends a dummy ZPL
+            label (save the IP first).
           </p>
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
@@ -904,13 +931,24 @@ export default function SettingsPage() {
                       </span>
                     </td>
                     <td className="px-4 py-2">
-                      <button
-                        type="button"
-                        onClick={() => p.millNo && testPrinter(p.millNo)}
-                        className="text-primary-600 hover:text-primary-800 text-sm font-medium"
-                      >
-                        Test
-                      </button>
+                      <div className="flex flex-wrap gap-2 items-center">
+                        <button
+                          type="button"
+                          disabled={printerTestPrintMill !== null}
+                          onClick={() => p.millNo && testPrinter(p.millNo)}
+                          className="text-primary-600 hover:text-primary-800 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Test
+                        </button>
+                        <button
+                          type="button"
+                          disabled={printerTestPrintMill !== null}
+                          onClick={() => p.millNo && void testPrintPrinter(p.millNo)}
+                          className="px-2 py-1 text-xs font-medium rounded-md border border-primary-300 text-primary-800 bg-primary-50 hover:bg-primary-100 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                        >
+                          {printerTestPrintMill === p.millNo ? "Printing…" : "Print test tag"}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}

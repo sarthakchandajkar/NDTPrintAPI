@@ -20,26 +20,60 @@ export function getApiBase(): string {
 
 export async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
   const base = getBaseUrl();
-  const res = await fetch(`${base.replace(/\/$/, "")}${path}`, {
-    ...options,
-    headers: { "Content-Type": "application/json", ...options?.headers },
-  });
+  const url = `${base.replace(/\/$/, "")}${path}`;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...options,
+      headers: { "Content-Type": "application/json", ...options?.headers },
+    });
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    throw new Error(
+      `Cannot reach API at ${url || path} (${reason}). Is NdtBundleService running on port 5000?`
+    );
+  }
+
+  const text = await res.text();
   if (!res.ok) {
-    const text = await res.text();
+    if (!text.trim()) {
+      throw new Error(
+        `API ${res.status} from ${path}: empty response. Is NdtBundleService running on port 5000?`
+      );
+    }
     try {
-      const json = JSON.parse(text) as { message?: string; Message?: string; error?: string; Error?: string; detail?: string; Detail?: string };
+      const json = JSON.parse(text) as {
+        message?: string;
+        Message?: string;
+        error?: string;
+        Error?: string;
+        detail?: string;
+        Detail?: string;
+      };
       const msg = json.message ?? json.Message ?? `API ${res.status}`;
       const err = json.error ?? json.Error;
       const detail = json.detail ?? json.Detail;
       const parts = [msg, err, detail].filter(Boolean);
       throw new Error(parts.join(" — "));
     } catch (e) {
-      if (e instanceof Error && e.message !== text && !e.message.startsWith("API "))
-        throw e;
+      if (e instanceof Error && e.message !== text && !e.message.startsWith("API ")) throw e;
       throw new Error(`API ${res.status}: ${text}`);
     }
   }
-  return res.json() as Promise<T>;
+
+  if (!text.trim()) {
+    throw new Error(
+      `API ${path} returned an empty body. Is NdtBundleService running and reachable via Next rewrite to port 5000?`
+    );
+  }
+
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(
+      `API ${path} returned non-JSON (starts with: ${text.slice(0, 80).replace(/\s+/g, " ")}).`
+    );
+  }
 }
 
 export interface WipInfo {
@@ -566,4 +600,16 @@ export const api = {
       token,
       { method: "POST", body: JSON.stringify({ millNo }) }
     ),
+  settingsTestPrintPrinter: (token: string, millNo: number) =>
+    fetchSettingsApi<{
+      success?: boolean;
+      status?: string;
+      message?: string;
+      address?: string;
+      port?: number;
+      millNo?: number;
+    }>("/api/Settings/printers/test-print", token, {
+      method: "POST",
+      body: JSON.stringify({ millNo }),
+    }),
 };
