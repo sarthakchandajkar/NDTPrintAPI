@@ -88,5 +88,21 @@ public sealed class PlcHandshakeOptions
     /// </summary>
     public bool RunPoEndWorkflowOnStartupRecovery { get; set; }
 
+    /// <summary>
+    /// When true (default), persist <c>Handshake_Event</c> audit rows for each PO-change handshake.
+    /// </summary>
+    public bool HandshakeAuditEnabled { get; set; } = true;
+
+    /// <summary>
+    /// M40.6 (trigger) TRUE longer than this without a completed handshake → WRN + status alert. Default 30.
+    /// </summary>
+    public int StuckTriggerAlarmSeconds { get; set; } = 30;
+
+    /// <summary>Ack merker write attempts before ERR + alert. Default 3.</summary>
+    public int AckWriteRetryCount { get; set; } = 3;
+
+    /// <summary>Initial backoff (ms) between ack write retries; doubles each attempt. Default 100.</summary>
+    public int AckWriteRetryInitialBackoffMs { get; set; } = 100;
+
     public List<MillConfig> Mills { get; set; } = new();
 }

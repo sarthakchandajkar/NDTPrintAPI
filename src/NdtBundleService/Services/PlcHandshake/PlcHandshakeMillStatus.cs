@@ -61,6 +61,12 @@ public sealed class PlcHandshakeMillStatus
     /// <summary>Q6.7 hooter output is currently ON (software pulse).</summary>
     public bool HooterActive { get; set; }
 
+    /// <summary>F-6.3: trigger latched beyond StuckTriggerAlarmSeconds without completed handshake.</summary>
+    public bool StuckTriggerAlarm { get; set; }
+
+    /// <summary>F-6.3: ack merker write failed after retries.</summary>
+    public bool AckWriteFailedAlarm { get; set; }
+
     public PlcHandshakeLastPoEnd? LastPoEnd { get; set; }
 }
 
@@ -168,6 +174,8 @@ public sealed class PlcHandshakeStatusRegistry
             AccumulatedValue = m.AccumulatedValue,
             ThresholdValue = m.ThresholdValue,
             HooterActive = m.HooterActive,
+            StuckTriggerAlarm = m.StuckTriggerAlarm,
+            AckWriteFailedAlarm = m.AckWriteFailedAlarm,
             LastPoEnd = m.LastPoEnd is null
                 ? null
                 : new PlcHandshakeLastPoEnd

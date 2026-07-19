@@ -37,6 +37,9 @@ internal sealed class ScriptedS7ConnectionProvider : IS7ConnectionProvider
     public void SetDb251Int(int byteOffset, int value) => _db251[byteOffset] = value;
     public void ClearOperations() => Operations.Clear();
 
+    /// <summary>Next N Write calls throw (for ack-retry pin tests).</summary>
+    public int FailNextWrites { get; set; }
+
     public Task<bool> EnsureConnectedAsync(CancellationToken cancellationToken)
     {
         IsConnected = true;
@@ -54,7 +57,15 @@ internal sealed class ScriptedS7ConnectionProvider : IS7ConnectionProvider
     public void Write(Action<IS7PlcOperations> operation)
     {
         lock (_gate)
+        {
+            if (FailNextWrites > 0)
+            {
+                FailNextWrites--;
+                throw new InvalidOperationException("scripted S7 write failure");
+            }
+
             operation(new RecordingOps(this));
+        }
     }
 
     public Task<T> ReadAsync<T>(Func<IS7PlcOperations, T> operation, CancellationToken cancellationToken = default) =>

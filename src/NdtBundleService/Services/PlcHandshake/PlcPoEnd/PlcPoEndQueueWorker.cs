@@ -142,8 +142,17 @@ public sealed class PlcPoEndQueueWorker : BackgroundService
                 po,
                 request.CorrelationId);
 
-            await _poEndWorkflow.ExecuteAsync(po, request.MillNo, advancePlan, cancellationToken, request.CorrelationId)
+            var result = await _poEndWorkflow.ExecuteAsync(po, request.MillNo, advancePlan, cancellationToken, request.CorrelationId)
                 .ConfigureAwait(false);
+
+            _logger.LogInformation(
+                "PO end count compare: PlcNdt={PlcNdt} FlushedNdt={FlushedNdt} Deferred={Deferred} Mill {MillNo} PO {PO} CorrelationId {CorrelationId}",
+                request.NdtCountFinal,
+                result.TotalNdtPcsClosed,
+                result.FlushDeferred,
+                request.MillNo,
+                po,
+                request.CorrelationId);
 
             _statusRegistry.UpdateMill(request.MillNo, s => s.LastPoChangeUtc = DateTimeOffset.UtcNow);
             await _coordinator.NotifyPoEndWorkflowCompletedAsync(request.MillNo, cancellationToken).ConfigureAwait(false);

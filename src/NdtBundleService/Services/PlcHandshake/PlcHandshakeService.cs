@@ -28,6 +28,7 @@ public sealed class PlcHandshakeService
     private readonly IWipBundleRunningPoProvider _wipRunningPo;
     private readonly IS7ConnectionProvider _s7;
     private readonly IPlcSlitEndBundleCloser? _slitEndCloser;
+    private readonly IHandshakeEventRepository _handshakeEvents;
     private readonly PlcHandshakeEdgeTracker _edge;
     private readonly ILogger<PlcHandshakeService> _logger;
 
@@ -38,6 +39,8 @@ public sealed class PlcHandshakeService
     private bool _settingsTestInProgress;
     private bool _suppressNdtUntilPoChange;
     private int _poIdWhenSuppressed;
+    private HandshakeAuditSession? _audit;
+    private bool _auditStartupRecovery;
 
     private bool _hooterPulseActive;
     private DateTimeOffset _hooterResetUtc;
@@ -63,7 +66,8 @@ public sealed class PlcHandshakeService
         IWipBundleRunningPoProvider wipRunningPo,
         IS7ConnectionProvider s7,
         ILogger<PlcHandshakeService> logger,
-        IPlcSlitEndBundleCloser? slitEndCloser = null)
+        IPlcSlitEndBundleCloser? slitEndCloser = null,
+        IHandshakeEventRepository? handshakeEvents = null)
     {
         _mill = mill;
         _options = options;
@@ -77,6 +81,7 @@ public sealed class PlcHandshakeService
         _wipRunningPo = wipRunningPo;
         _s7 = s7;
         _slitEndCloser = slitEndCloser;
+        _handshakeEvents = handshakeEvents ?? NullHandshakeEventRepository.Instance;
         _edge = new PlcHandshakeEdgeTracker(options);
         _logger = logger;
         _plcConnectionEnabled = mill.PlcHandshakeEnabled;
@@ -246,6 +251,8 @@ public sealed class PlcHandshakeService
                 DisconnectPlc();
                 _edge.ResetTriggerEdgeState(reprime: true);
                 _ackAwaitingTriggerClear = false;
+                _audit = null;
+                _auditStartupRecovery = false;
                 await DelayReconnectAsync(stoppingToken).ConfigureAwait(false);
                 continue;
             }
@@ -326,6 +333,8 @@ public sealed class PlcHandshakeService
             if (!_ackAwaitingTriggerClear)
                 RefreshTriggerAndAck(millNo, out trigger, out ack);
         }
+
+        TryRaiseStuckTriggerAlarm(millNo, trigger);
 
         if (!_edge.Primed)
         {
@@ -541,7 +550,7 @@ public sealed class PlcHandshakeService
             try
             {
                 poIdVal = ReadDbInt(_options.PoIdByteOffset);
-                ndtFinal = ReadDbInt(_options.NdtCountByteOffset);
+                ndtFinal = ReadNdtCountInt();
             }
             catch (Exception ex)
             {
@@ -559,7 +568,11 @@ public sealed class PlcHandshakeService
                     TimestampUtc = detectedAt
                 };
                 s.NdtCount = 0;
+                s.AckWriteFailedAlarm = false;
+                s.StuckTriggerAlarm = false;
             });
+
+            BeginHandshakeAudit(millNo, correlationId, detectedAt, poIdVal, ndtFinal, startupRecovery);
 
             PlcPoEndEdgeProcessor.ProcessDecoupledEdge(
                 new PlcPoEndEdgeProcessor.EdgeProcessInput(
@@ -577,6 +590,7 @@ public sealed class PlcHandshakeService
         }
         else
         {
+            BeginHandshakeAudit(millNo, correlationId, detectedAt, poIdVal: 0, ndtFinal: 0, startupRecovery);
             BeginMesAckSequence(millNo);
         }
 
@@ -586,8 +600,34 @@ public sealed class PlcHandshakeService
     private void BeginMesAckSequence(int millNo)
     {
         SetState(millNo, "AckSent");
-        WriteMerkerBit(_mill.AckByte, _mill.AckBit, true);
-        UpdateStatus(millNo, s => s.AckActive = true);
+        if (!TryWriteMerkerBitWithRetry(_mill.AckByte, _mill.AckBit, value: true, out var err))
+        {
+            _logger.LogError(
+                "{MillName}: ack write TRUE failed after {Retries} attempts — {Error}. CorrelationId {CorrelationId}",
+                _mill.Name,
+                Math.Max(1, _options.AckWriteRetryCount),
+                err,
+                _audit?.CorrelationId);
+            UpdateStatus(millNo, s =>
+            {
+                s.AckWriteFailedAlarm = true;
+                s.LastError = $"Ack write TRUE failed: {err}";
+            });
+            FinalizeAudit(HandshakeOutcome.AckWriteFailed, err);
+            return;
+        }
+
+        UpdateStatus(millNo, s =>
+        {
+            s.AckActive = true;
+            s.AckWriteFailedAlarm = false;
+        });
+        if (_audit is not null)
+        {
+            _audit.AckAtUtc = DateTimeOffset.UtcNow;
+            PersistAudit();
+        }
+
         _ackAwaitingTriggerClear = true;
         _ackClearDeadlineUtc = System.DateTime.UtcNow.AddMilliseconds(Math.Max(1000, _mill.TriggerClearTimeoutMs));
         SetState(millNo, "WaitingTriggerClear");
@@ -601,7 +641,8 @@ public sealed class PlcHandshakeService
         if (trigger && System.DateTime.UtcNow < _ackClearDeadlineUtc)
             return;
 
-        if (trigger)
+        var forceDrop = trigger;
+        if (forceDrop)
         {
             _logger.LogWarning(
                 "{MillName}: trigger {Trigger} still TRUE after {Timeout}ms; resetting ack anyway.",
@@ -615,22 +656,52 @@ public sealed class PlcHandshakeService
                 "{MillName}: trigger {Trigger} cleared by PLC.",
                 _mill.Name,
                 _mill.TriggerAddress);
+            if (_audit is not null)
+                _audit.ClearedAtUtc = DateTimeOffset.UtcNow;
         }
 
         SetState(millNo, "AckReset");
-        WriteMerkerBit(_mill.AckByte, _mill.AckBit, false);
+        if (!TryWriteMerkerBitWithRetry(_mill.AckByte, _mill.AckBit, value: false, out var err))
+        {
+            _logger.LogError(
+                "{MillName}: ack write FALSE failed after {Retries} attempts — {Error}. CorrelationId {CorrelationId}",
+                _mill.Name,
+                Math.Max(1, _options.AckWriteRetryCount),
+                err,
+                _audit?.CorrelationId);
+            UpdateStatus(millNo, s =>
+            {
+                s.AckWriteFailedAlarm = true;
+                s.LastError = $"Ack write FALSE failed: {err}";
+            });
+            FinalizeAudit(HandshakeOutcome.AckWriteFailed, err);
+            // Leave _ackAwaitingTriggerClear so next poll retries drop.
+            return;
+        }
+
         _ackAwaitingTriggerClear = false;
         UpdateStatus(millNo, s =>
         {
             s.AckActive = false;
             s.TriggerActive = trigger;
+            s.StuckTriggerAlarm = false;
+            s.AckWriteFailedAlarm = false;
         });
+
+        if (_audit is not null)
+            _audit.AckDroppedAtUtc = DateTimeOffset.UtcNow;
 
         _logger.LogInformation(
             "{MillName}: wrote ack {Ack}=FALSE — handshake complete.",
             _mill.Name,
             _mill.AckAddress);
 
+        var outcome = forceDrop
+            ? HandshakeOutcome.TriggerTimeoutForceAckDrop
+            : _auditStartupRecovery
+                ? HandshakeOutcome.StartupRecoveryCompleted
+                : HandshakeOutcome.Completed;
+        FinalizeAudit(outcome, error: null);
         SetState(millNo, "Idle");
     }
 
@@ -651,6 +722,107 @@ public sealed class PlcHandshakeService
 
     private void WriteMerkerBit(int byteOffset, int bit, bool value) =>
         _s7.Write(ops => ops.Write(DataType.Memory, 0, byteOffset, value, bit));
+
+    private bool TryWriteMerkerBitWithRetry(int byteOffset, int bit, bool value, out string? error)
+    {
+        error = null;
+        var retries = Math.Max(1, _options.AckWriteRetryCount);
+        var backoffMs = Math.Max(0, _options.AckWriteRetryInitialBackoffMs);
+        for (var attempt = 1; attempt <= retries; attempt++)
+        {
+            try
+            {
+                WriteMerkerBit(byteOffset, bit, value);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                if (attempt >= retries)
+                    break;
+                if (backoffMs > 0)
+                    Thread.Sleep(backoffMs * attempt);
+            }
+        }
+
+        return false;
+    }
+
+    private void BeginHandshakeAudit(
+        int millNo,
+        Guid correlationId,
+        DateTimeOffset edgeAt,
+        int poIdVal,
+        int ndtFinal,
+        bool startupRecovery)
+    {
+        if (!_options.HandshakeAuditEnabled)
+        {
+            _audit = null;
+            _auditStartupRecovery = false;
+            return;
+        }
+
+        _auditStartupRecovery = startupRecovery;
+        _audit = new HandshakeAuditSession
+        {
+            MillNo = millNo,
+            CorrelationId = correlationId,
+            EdgeAtUtc = edgeAt,
+            PlcPoId = poIdVal,
+            PlcNdtCount = ndtFinal,
+            Outcome = HandshakeOutcome.InProgress
+        };
+        PersistAudit();
+    }
+
+    private void PersistAudit()
+    {
+        if (_audit is null || !_options.HandshakeAuditEnabled)
+            return;
+        _ = _handshakeEvents.UpsertAsync(_audit.ToRecord());
+    }
+
+    private void FinalizeAudit(HandshakeOutcome outcome, string? error)
+    {
+        if (_audit is null)
+            return;
+        _audit.Outcome = outcome;
+        _audit.ErrorMessage = error;
+        PersistAudit();
+        _audit = null;
+        _auditStartupRecovery = false;
+    }
+
+    private void TryRaiseStuckTriggerAlarm(int millNo, bool trigger)
+    {
+        if (_audit is null || !trigger)
+            return;
+
+        var limit = Math.Max(0, _options.StuckTriggerAlarmSeconds);
+        if ((DateTimeOffset.UtcNow - _audit.EdgeAtUtc).TotalSeconds < limit)
+            return;
+        if (_audit.StuckTriggerLogged)
+            return;
+
+        _audit.StuckTriggerLogged = true;
+        _audit.Outcome = HandshakeOutcome.StuckTrigger;
+        PersistAudit();
+        UpdateStatus(millNo, s => s.StuckTriggerAlarm = true);
+        _logger.LogWarning(
+            "{MillName}: stuck trigger alarm — {Trigger} TRUE for >{Seconds}s without completed handshake. CorrelationId {CorrelationId}",
+            _mill.Name,
+            _mill.TriggerAddress,
+            limit,
+            _audit.CorrelationId);
+    }
+
+    private sealed class NullHandshakeEventRepository : IHandshakeEventRepository
+    {
+        public static readonly NullHandshakeEventRepository Instance = new();
+        public Task UpsertAsync(HandshakeEventRecord record, CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
+    }
 
     private int TryUpdateDb251Counts(int millNo)
     {
