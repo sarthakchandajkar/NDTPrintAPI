@@ -57,6 +57,12 @@ public interface INdtBundleRepository
 
     /// <summary>True when a printed bundle exists for the PO on the given mill.</summary>
     Task<bool> HasPrintedBundleForPoAsync(int millNo, string poNumber, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Sets <c>Manual_Review=1</c> on existing <c>NDT_Bundle</c> rows for the PO/mill (additive column).
+    /// Returns rows updated; 0 when SQL disabled, column missing, or no matching rows.
+    /// </summary>
+    Task<int> MarkManualReviewAsync(string poNumber, int millNo, CancellationToken cancellationToken);
 }
 
 public interface IPoPlanProvider
@@ -223,6 +229,9 @@ public sealed class PoEndWorkflowResult
     public int TotalNdtPcsClosed { get; init; }
     public bool WaitingForNewWip { get; init; }
     public bool AdvancedPoPlanFile { get; init; }
+
+    /// <summary>True when Plc <c>AfterDrain</c> deferred the partial flush to the drain window.</summary>
+    public bool FlushDeferred { get; init; }
 }
 
 /// <summary>

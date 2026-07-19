@@ -34,7 +34,8 @@ BEGIN
         IsReprint                 BIT            NOT NULL CONSTRAINT DF_NDT_Bundle_IsReprint DEFAULT (0),
         Print_Status              NVARCHAR(20)   NOT NULL CONSTRAINT DF_NDT_Bundle_Print_Status DEFAULT ('Pending'),
         Print_Attempted_At        DATETIME2(2)   NULL,
-        Print_Error               NVARCHAR(500)  NULL
+        Print_Error               NVARCHAR(500)  NULL,
+        Manual_Review             BIT            NOT NULL CONSTRAINT DF_NDT_Bundle_Manual_Review DEFAULT (0)
     );
 
     CREATE UNIQUE INDEX UQ_NDT_Bundle_Bundle_No ON dbo.NDT_Bundle (Bundle_No);
@@ -60,11 +61,14 @@ BEGIN
         Rejected_Short_Length_Pipe NVARCHAR(50)  NULL,
         Source_File               NVARCHAR(500)  NULL,
         Source_Row_Number         INT            NULL,
-        ImportedAtUtc             DATETIME2(2)   NOT NULL CONSTRAINT DF_Input_Slit_ImportedAtUtc DEFAULT (SYSUTCDATETIME())
+        ImportedAtUtc             DATETIME2(2)   NOT NULL CONSTRAINT DF_Input_Slit_ImportedAtUtc DEFAULT (SYSUTCDATETIME()),
+        Source_LastWriteTimeUtc   DATETIME2(2)   NULL
     );
 
     CREATE INDEX IX_Input_Slit_Row_PO ON dbo.Input_Slit_Row (PO_Number);
     CREATE INDEX IX_Input_Slit_Row_Imported ON dbo.Input_Slit_Row (ImportedAtUtc);
+    CREATE INDEX IX_Input_Slit_Row_Source_File ON dbo.Input_Slit_Row (Source_File)
+        WHERE Source_File IS NOT NULL;
 END
 GO
 

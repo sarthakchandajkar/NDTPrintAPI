@@ -137,6 +137,8 @@ public sealed class CsvBundleOutputWriterPrintStatusTests
             Task.FromResult<NdtBundleRecord?>(null);
         public Task<bool> HasPrintedBundleForPoAsync(int millNo, string poNumber, CancellationToken cancellationToken) =>
             Task.FromResult(false);
+        public Task<int> MarkManualReviewAsync(string poNumber, int millNo, CancellationToken cancellationToken) =>
+            Task.FromResult(0);
         public Task<IReadOnlyList<NdtBundleRecord>> GetStuckPrintsAsync(TimeSpan olderThan, CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<NdtBundleRecord>>(Array.Empty<NdtBundleRecord>());
     }

@@ -123,6 +123,58 @@ public class NdtBundleOptions
     public bool WaitForWipBundleAfterPoEnd { get; set; } = true;
 
     /// <summary>
+    /// When true (default), mills with <c>PoEndSource=Plc</c> continue bundling Input Slit rows that carry a valid file PO
+    /// even while <see cref="WaitForWipBundleAfterPoEnd"/> is active. File mills keep the historical hard-stop.
+    /// </summary>
+    public bool BundleSlitRowsWithFilePoDuringWipWait { get; set; } = true;
+
+    /// <summary>
+    /// Per-file retry backoff steps in seconds for deferrable Input Slit outcomes on <c>PoEndSource=Plc</c> mills
+    /// (default 5 → 30 → 120). File mills keep immediate next-poll retry.
+    /// </summary>
+    public int[] FileRetryBackoffSeconds { get; set; } = [5, 30, 120];
+
+    /// <summary>
+    /// Partial-bundle flush at PO end for <c>PoEndSource=Plc</c> mills: <c>Immediate</c> or <c>AfterDrain</c> (default).
+    /// File mills always flush immediately (unchanged).
+    /// </summary>
+    public string PoEndFlushMode { get; set; } = "AfterDrain";
+
+    /// <summary>
+    /// Minutes to accept late slit rows for a Plc mill PO after PO end before the deferred flush / reopen sweep.
+    /// Default 120 (covers observed L2 lag up to ~73 min). Ignored for File mills.
+    /// </summary>
+    public int PoEndDrainMinutes { get; set; } = 120;
+
+    /// <summary>
+    /// When true (default), auto close-and-print open partials whose PO is <c>Closed</c> on <c>PoEndSource=Plc</c> mills.
+    /// Orphan sweep never runs for File mills.
+    /// </summary>
+    public bool AutoCloseOrphanBundles { get; set; } = true;
+
+    /// <summary>Seconds between drain-expiry and orphan-sweep passes. Minimum 5.</summary>
+    public int PoLifecycleSweepIntervalSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// When true (default), startup/periodic Input Slit reconciliation ingests folder files absent from
+    /// <c>Input_Slit_Row</c> (within <see cref="BackfillLookbackHours"/>) instead of baseline-seeding them as processed.
+    /// When false, or when SQL is disabled, the historical seed baseline is used.
+    /// </summary>
+    public bool BackfillReconciliationEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Hours of Input Slit inbox <c>LastWriteTimeUtc</c> to consider for F-5 backfill/reconcile. Default 48.
+    /// Combined with <see cref="MinSourceFileLastWriteUtc"/> (later cutoff wins).
+    /// </summary>
+    public int BackfillLookbackHours { get; set; } = 48;
+
+    /// <summary>
+    /// Minutes between Input Slit backfill reconciliation passes inside <c>SlitMonitoringWorker</c>. Default 30.
+    /// Minimum 1 when backfill is enabled.
+    /// </summary>
+    public int ReconcileIntervalMinutes { get; set; } = 30;
+
+    /// <summary>
     /// Mills for which <c>SlitMonitoringWorker</c> creates NDT Input Slit output CSVs, updates bundle state, and prints tags.
     /// Empty or null = all mills 1–4. Example: <c>[1]</c> for Mill-1-only commissioning.
     /// Input inbox files for other mills are acknowledged without writing NDT output.

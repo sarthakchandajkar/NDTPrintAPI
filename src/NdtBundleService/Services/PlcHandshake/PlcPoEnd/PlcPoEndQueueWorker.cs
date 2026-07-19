@@ -14,6 +14,7 @@ public sealed class PlcPoEndQueueWorker : BackgroundService
     private readonly PlcPoEndQueue _queue;
     private readonly IPoEndWorkflowService _poEndWorkflow;
     private readonly IActivePoPerMillService _activePoPerMill;
+    private readonly IWipBundleRunningPoProvider _wipRunningPo;
     private readonly PlcHandshakeCoordinator _coordinator;
     private readonly PlcHandshakeStatusRegistry _statusRegistry;
     private readonly IOptions<NdtBundleOptions> _options;
@@ -23,6 +24,7 @@ public sealed class PlcPoEndQueueWorker : BackgroundService
         PlcPoEndQueue queue,
         IPoEndWorkflowService poEndWorkflow,
         IActivePoPerMillService activePoPerMill,
+        IWipBundleRunningPoProvider wipRunningPo,
         PlcHandshakeCoordinator coordinator,
         PlcHandshakeStatusRegistry statusRegistry,
         IOptions<NdtBundleOptions> options,
@@ -31,6 +33,7 @@ public sealed class PlcPoEndQueueWorker : BackgroundService
         _queue = queue;
         _poEndWorkflow = poEndWorkflow;
         _activePoPerMill = activePoPerMill;
+        _wipRunningPo = wipRunningPo;
         _coordinator = coordinator;
         _statusRegistry = statusRegistry;
         _options = options;
@@ -54,7 +57,7 @@ public sealed class PlcPoEndQueueWorker : BackgroundService
         {
             if (!handshake.Enabled)
             {
-                _logger.LogInformation("PlcHandshake is disabled; PlcPoEndQueueWorker will not process PO end events.");
+                _logger.LogInformation("PlcHandshake is disabled; PlcPoEndQueueWorker will not process PLC PO end events.");
                 return;
             }
 
@@ -118,6 +121,7 @@ public sealed class PlcPoEndQueueWorker : BackgroundService
                 request.NdtCountFinal,
                 request.CorrelationId);
 
+            // F-6.1: resolve while RunningPo is still set — before NotifyPoEndForMill clears it in the workflow.
             var po = await ResolvePoNumberAsync(request, cancellationToken).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(po))
             {
@@ -152,7 +156,11 @@ public sealed class PlcPoEndQueueWorker : BackgroundService
         }
     }
 
-    private async Task<string> ResolvePoNumberAsync(PlcPoEndRequest request, CancellationToken cancellationToken)
+    /// <summary>
+    /// Resolves the ended SAP PO. Order: plausible PLC PO_Id → mill running PO (WIP state) → latest Input Slit CSV.
+    /// Running-PO lookup must run before <see cref="IWipBundleRunningPoProvider.NotifyPoEndForMill"/>.
+    /// </summary>
+    internal async Task<string> ResolvePoNumberAsync(PlcPoEndRequest request, CancellationToken cancellationToken)
     {
         var plcCfg = _options.Value.PlcPoEnd ?? new PlcPoEndOptions();
 
@@ -170,7 +178,7 @@ public sealed class PlcPoEndQueueWorker : BackgroundService
         if (request.PoId is not 0)
         {
             _logger.LogInformation(
-                "Mill {MillNo}: PLC PO_Id {PoId} is not a plausible SAP PO (range {Min}–{Max}, min {Digits} digits); resolving from Input Slit CSV. CorrelationId {CorrelationId}.",
+                "Mill {MillNo}: PLC PO_Id {PoId} is not a plausible SAP PO (range {Min}–{Max}, min {Digits} digits); resolving from running PO / Input Slit CSV. CorrelationId {CorrelationId}.",
                 request.MillNo,
                 request.PoId,
                 plcCfg.MinValidPoId,
@@ -179,8 +187,40 @@ public sealed class PlcPoEndQueueWorker : BackgroundService
                 request.CorrelationId);
         }
 
+        var runningPo = await _wipRunningPo.TryGetRunningPoForMillAsync(request.MillNo, cancellationToken).ConfigureAwait(false);
+        runningPo = string.IsNullOrWhiteSpace(runningPo) ? null : InputSlitCsvParsing.NormalizePo(runningPo);
+
+        string? slitPo = null;
         var poByMill = await _activePoPerMill.GetLatestPoByMillAsync(cancellationToken).ConfigureAwait(false);
-        if (poByMill.TryGetValue(request.MillNo, out var slitPo) && !string.IsNullOrWhiteSpace(slitPo))
+        if (poByMill.TryGetValue(request.MillNo, out var fromSlit) && !string.IsNullOrWhiteSpace(fromSlit))
+            slitPo = InputSlitCsvParsing.NormalizePo(fromSlit);
+
+        if (!string.IsNullOrWhiteSpace(runningPo))
+        {
+            if (!string.IsNullOrWhiteSpace(slitPo) && !InputSlitCsvParsing.PoEquals(runningPo, slitPo))
+            {
+                _logger.LogWarning(
+                    "Mill {MillNo}: running PO {RunningPo} differs from latest Input Slit CSV PO {SlitPo} (PLC PO_Id {PoId}); using running PO. CorrelationId {CorrelationId}.",
+                    request.MillNo,
+                    runningPo,
+                    slitPo,
+                    request.PoId,
+                    request.CorrelationId);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Mill {MillNo}: PO resolved from running PO state as {PO} (PLC PO_Id {PoId}), CorrelationId {CorrelationId}.",
+                    request.MillNo,
+                    runningPo,
+                    request.PoId,
+                    request.CorrelationId);
+            }
+
+            return runningPo;
+        }
+
+        if (!string.IsNullOrWhiteSpace(slitPo))
         {
             _logger.LogInformation(
                 "Mill {MillNo}: PO resolved from latest Input Slit CSV as {PO} (PLC PO_Id {PoId}), CorrelationId {CorrelationId}.",
@@ -188,7 +228,7 @@ public sealed class PlcPoEndQueueWorker : BackgroundService
                 slitPo,
                 request.PoId,
                 request.CorrelationId);
-            return InputSlitCsvParsing.NormalizePo(slitPo);
+            return slitPo;
         }
 
         return string.Empty;

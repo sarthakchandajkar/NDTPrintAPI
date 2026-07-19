@@ -493,6 +493,50 @@ WHERE Mill_No = @MillNo
         }
     }
 
+    public async Task<int> MarkManualReviewAsync(string poNumber, int millNo, CancellationToken cancellationToken)
+    {
+        if (millNo is < 1 or > 4 || string.IsNullOrWhiteSpace(poNumber) || !UseDatabase)
+            return 0;
+
+        var normalized = InputSlitCsvParsing.NormalizePo(poNumber);
+        var requested = poNumber.Trim();
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            const string sql = @"
+UPDATE dbo.NDT_Bundle
+SET Manual_Review = 1
+WHERE Mill_No = @MillNo
+  AND (PO_Number = @Po OR PO_Number = @PoNormalized);";
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@MillNo", millNo);
+            cmd.Parameters.AddWithValue("@Po", requested);
+            cmd.Parameters.AddWithValue("@PoNormalized", normalized);
+            var updated = await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            if (updated > 0)
+            {
+                _logger.LogWarning(
+                    "Marked Manual_Review=1 on {Count} NDT_Bundle row(s) for PO {PO} Mill {Mill}.",
+                    updated,
+                    normalized,
+                    millNo);
+            }
+
+            return updated;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Failed to mark Manual_Review for PO {PO} Mill {Mill} (run docs/NDT_Bundle_Alter_ManualReview.sql if column is missing).",
+                normalized,
+                millNo);
+            return 0;
+        }
+    }
+
     private async Task<NdtBundleRecord> ApplyFormedBundleTotalAsync(NdtBundleRecord record, string batchNo, CancellationToken cancellationToken)
     {
         var formedTotal = await TryReadBundleSummaryTotalAsync(batchNo, cancellationToken).ConfigureAwait(false);

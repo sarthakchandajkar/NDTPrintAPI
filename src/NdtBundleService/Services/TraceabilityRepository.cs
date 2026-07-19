@@ -9,7 +9,20 @@ namespace NdtBundleService.Services;
 
 public interface ITraceabilityRepository
 {
-    Task RecordInputSlitRowsAsync(string sourceFile, IReadOnlyList<(InputSlitRecord Record, int SourceRowNumber)> rows, CancellationToken cancellationToken);
+    Task RecordInputSlitRowsAsync(
+        string sourceFile,
+        IReadOnlyList<(InputSlitRecord Record, int SourceRowNumber)> rows,
+        CancellationToken cancellationToken,
+        DateTime? sourceLastWriteTimeUtc = null);
+
+    /// <summary>
+    /// True when <c>Input_Slit_Row</c> already has this source path at a version that covers
+    /// <paramref name="fileLastWriteTimeUtc"/> (NULL stored write = legacy, any version).
+    /// </summary>
+    Task<bool> IsInputSlitFileVersionImportedAsync(
+        string sourceFileFullPath,
+        DateTime fileLastWriteTimeUtc,
+        CancellationToken cancellationToken);
     Task RecordOutputSlitRowsAsync(string sourceFile, IReadOnlyList<(InputSlitRecord Record, string NdtBatchNo, int SourceRowNumber)> rows, CancellationToken cancellationToken);
     Task RecordManualStationRunAsync(
         string poNumber,
@@ -139,7 +152,8 @@ public sealed class TraceabilityRepository : ITraceabilityRepository
     public async Task RecordInputSlitRowsAsync(
         string sourceFile,
         IReadOnlyList<(InputSlitRecord Record, int SourceRowNumber)> rows,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        DateTime? sourceLastWriteTimeUtc = null)
     {
         if (!Enabled || rows.Count == 0)
         {
@@ -157,12 +171,20 @@ public sealed class TraceabilityRepository : ITraceabilityRepository
             await using var conn = SqlTraceabilityConnection.Create(Opt);
             await OpenConnectionAsync(conn, "Input_Slit_Row insert", cancellationToken).ConfigureAwait(false);
 
-            const string sql = @"
+            // Prefer insert with Source_LastWriteTimeUtc; fall back if column not yet migrated.
+            const string sqlWithLw = @"
+INSERT INTO dbo.Input_Slit_Row
+    (PO_Number, Slit_No, NDT_Pipes, Rejected_P, Slit_Start_Time, Slit_Finish_Time, Mill_No, NDT_Short_Length_Pipe, Rejected_Short_Length_Pipe, Source_File, Source_Row_Number, Source_LastWriteTimeUtc)
+VALUES
+    (@PoNumber, @SlitNo, @NdtPipes, @RejectedP, @StartTime, @FinishTime, @MillNo, @NdtShort, @RejShort, @SourceFile, @SourceRowNumber, @SourceLastWrite);";
+
+            const string sqlLegacy = @"
 INSERT INTO dbo.Input_Slit_Row
     (PO_Number, Slit_No, NDT_Pipes, Rejected_P, Slit_Start_Time, Slit_Finish_Time, Mill_No, NDT_Short_Length_Pipe, Rejected_Short_Length_Pipe, Source_File, Source_Row_Number)
 VALUES
     (@PoNumber, @SlitNo, @NdtPipes, @RejectedP, @StartTime, @FinishTime, @MillNo, @NdtShort, @RejShort, @SourceFile, @SourceRowNumber);";
 
+            var useLegacyInsert = false;
             foreach (var (r, rowNo) in rows)
             {
                 if (string.IsNullOrWhiteSpace(r.PoNumber))
@@ -170,7 +192,35 @@ VALUES
 
                 try
                 {
-                    await using var cmd = new SqlCommand(sql, conn);
+                    await using var cmd = new SqlCommand(useLegacyInsert ? sqlLegacy : sqlWithLw, conn);
+                    cmd.Parameters.AddWithValue("@PoNumber", InputSlitCsvParsing.NormalizePo(r.PoNumber));
+                    cmd.Parameters.AddWithValue("@SlitNo", (object?)NullIfEmpty(r.SlitNo) ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@NdtPipes", r.NdtPipes);
+                    cmd.Parameters.AddWithValue("@RejectedP", r.RejectedPipes);
+                    cmd.Parameters.AddWithValue("@StartTime", (object?)r.SlitStartTime ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@FinishTime", (object?)r.SlitFinishTime ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@MillNo", r.MillNo == 0 ? (object)DBNull.Value : r.MillNo);
+                    cmd.Parameters.AddWithValue("@NdtShort", (object?)NullIfEmpty(r.NdtShortLengthPipe) ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@RejShort", (object?)NullIfEmpty(r.RejectedShortLengthPipe) ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@SourceFile", (object?)NullIfEmpty(sourceFile) ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@SourceRowNumber", rowNo);
+                    if (!useLegacyInsert)
+                    {
+                        cmd.Parameters.AddWithValue(
+                            "@SourceLastWrite",
+                            sourceLastWriteTimeUtc.HasValue ? sourceLastWriteTimeUtc.Value : DBNull.Value);
+                    }
+
+                    await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                    inserted++;
+                }
+                catch (SqlException ex) when (!useLegacyInsert && IsMissingSourceLastWriteColumn(ex))
+                {
+                    _logger.LogWarning(
+                        "Input_Slit_Row.Source_LastWriteTimeUtc missing — falling back to legacy insert. Run docs/Input_Slit_Row_Alter_SourceLastWrite.sql.");
+                    useLegacyInsert = true;
+                    // Retry this row with legacy SQL
+                    await using var cmd = new SqlCommand(sqlLegacy, conn);
                     cmd.Parameters.AddWithValue("@PoNumber", InputSlitCsvParsing.NormalizePo(r.PoNumber));
                     cmd.Parameters.AddWithValue("@SlitNo", (object?)NullIfEmpty(r.SlitNo) ?? DBNull.Value);
                     cmd.Parameters.AddWithValue("@NdtPipes", r.NdtPipes);
@@ -214,6 +264,90 @@ VALUES
             _writeTracker.RecordFailure("Input_Slit_Row", ex.Message, sourceFile);
             _logger.LogError(ex, "Failed to record Input_Slit_Row for file {File} in JazeeraMES_Prod.", sourceFile);
         }
+    }
+
+    public async Task<bool> IsInputSlitFileVersionImportedAsync(
+        string sourceFileFullPath,
+        DateTime fileLastWriteTimeUtc,
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled || string.IsNullOrWhiteSpace(sourceFileFullPath))
+            return false;
+
+        var full = Path.GetFullPath(sourceFileFullPath);
+        var baseName = Path.GetFileName(full);
+        if (string.IsNullOrEmpty(baseName))
+            return false;
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await OpenConnectionAsync(conn, "Input_Slit_Row version check", cancellationToken).ConfigureAwait(false);
+
+            var esc = SqlLikeEscape(baseName);
+            var likeWin = "%\\" + esc;
+            var likeUnix = "%/" + esc;
+
+            // Prefer version-aware check; fall back to path-only when column missing.
+            const string sqlVersioned = @"
+SELECT CASE
+         WHEN EXISTS (
+             SELECT 1
+             FROM dbo.Input_Slit_Row
+             WHERE (Source_File = @FullPath OR Source_File LIKE @LikeWin OR Source_File LIKE @LikeUnix)
+               AND (Source_LastWriteTimeUtc IS NULL OR Source_LastWriteTimeUtc >= @FileLw)
+         ) THEN 1 ELSE 0
+       END;";
+
+            try
+            {
+                await using var cmd = new SqlCommand(sqlVersioned, conn);
+                cmd.Parameters.AddWithValue("@FullPath", full);
+                cmd.Parameters.AddWithValue("@LikeWin", likeWin);
+                cmd.Parameters.AddWithValue("@LikeUnix", likeUnix);
+                cmd.Parameters.AddWithValue("@FileLw", fileLastWriteTimeUtc);
+                var scalar = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+                return scalar is int i && i == 1
+                       || scalar is long l && l == 1
+                       || (scalar is not null && Convert.ToInt32(scalar, CultureInfo.InvariantCulture) == 1);
+            }
+            catch (SqlException ex) when (IsMissingSourceLastWriteColumn(ex))
+            {
+                const string sqlPathOnly = @"
+SELECT TOP 1 1
+FROM dbo.Input_Slit_Row
+WHERE Source_File = @FullPath
+   OR Source_File LIKE @LikeWin
+   OR Source_File LIKE @LikeUnix;";
+                await using var cmd = new SqlCommand(sqlPathOnly, conn);
+                cmd.Parameters.AddWithValue("@FullPath", full);
+                cmd.Parameters.AddWithValue("@LikeWin", likeWin);
+                cmd.Parameters.AddWithValue("@LikeUnix", likeUnix);
+                var scalar = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+                return scalar is not null;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Input_Slit_Row version check failed for {File}; treating as not imported.",
+                sourceFileFullPath);
+            return false;
+        }
+    }
+
+    private static bool IsMissingSourceLastWriteColumn(SqlException ex)
+    {
+        // 207 = invalid column name
+        foreach (SqlError err in ex.Errors)
+        {
+            if (err.Number == 207
+                && err.Message.Contains("Source_LastWriteTimeUtc", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return ex.Message.Contains("Source_LastWriteTimeUtc", StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task RecordOutputSlitRowsAsync(

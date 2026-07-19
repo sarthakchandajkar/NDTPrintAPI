@@ -4,14 +4,16 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Models;
+using NdtBundleService.Services.PoLifecycle;
 
 namespace NdtBundleService.Services;
 
 /// <summary>
 /// Background service that periodically scans the Input Slit CSV folder,
 /// feeds records into the bundle engine, and reacts to PO-end signals.
-/// At startup, each CSV already in the inbox is recorded with its current LastWriteTimeUtc so we do not backlog-generate outputs.
-/// When the same path is written again (newer LastWriteTimeUtc), it is processed. Brand-new paths are processed when they appear.
+/// When <see cref="NdtBundleOptions.BackfillReconciliationEnabled"/> is true (and SQL is on),
+/// startup/periodic reconcile ingests inbox files absent from <c>Input_Slit_Row</c> within the lookback window.
+/// When disabled or SQL is off, pre-existing files are baseline-seeded (historical behavior).
 /// Inbox files may have no extension (SAP) or <c>.csv</c>; only reads them—never moves or deletes source files in <see cref="NdtBundleOptions.InputSlitFolder"/>.
 /// </summary>
 public sealed class SlitMonitoringWorker : BackgroundService
@@ -30,11 +32,20 @@ public sealed class SlitMonitoringWorker : BackgroundService
     private readonly IPoPlanWipEnrichmentProvider _poPlanWipEnrichment;
     private readonly IPipeSizeProvider _pipeSizeProvider;
     private readonly IMillBundleStateLock _millBundleStateLock;
+    private readonly IPoLifecycleService _poLifecycle;
     private readonly ILogger<SlitMonitoringWorker> _logger;
 
     // Per input path: last LastWriteTimeUtc we treated as fully handled (seed baseline or successful run).
     // Same path with a newer timestamp (SAP overwrite / same-name export) is processed again; unchanged files are skipped.
     private readonly Dictionary<string, DateTime> _inputSlitLastHandledWriteUtc = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Paths queued by F-5 reconcile that must apply the F-5.2 double-print / Manual_Review guard.</summary>
+    private readonly HashSet<string> _backfillCandidatePaths = new(StringComparer.OrdinalIgnoreCase);
+
+    private DateTime _lastBackfillReconcileUtc = DateTime.MinValue;
+
+    /// <summary>Plc-mill deferral backoff so one gated/deferred file does not HOL-block the inbox every poll.</summary>
+    private readonly InputSlitFileRetryTracker _fileRetryTracker = new();
 
     public SlitMonitoringWorker(
         IOptionsMonitor<NdtBundleOptions> optionsMonitor,
@@ -51,6 +62,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         IPoPlanWipEnrichmentProvider poPlanWipEnrichment,
         IPipeSizeProvider pipeSizeProvider,
         IMillBundleStateLock millBundleStateLock,
+        IPoLifecycleService poLifecycle,
         ILogger<SlitMonitoringWorker> logger)
     {
         _optionsMonitor = optionsMonitor;
@@ -67,6 +79,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         _poPlanWipEnrichment = poPlanWipEnrichment;
         _pipeSizeProvider = pipeSizeProvider;
         _millBundleStateLock = millBundleStateLock;
+        _poLifecycle = poLifecycle;
         _logger = logger;
     }
 
@@ -83,7 +96,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
         await _runtimeState.EnsureInitializedAsync(stoppingToken).ConfigureAwait(false);
 
-        SeedPreExistingInputSlitCsvsAsProcessed();
+        await InitializeInputSlitBaselineAsync(stoppingToken).ConfigureAwait(false);
 
         var outputFolder = (_optionsMonitor.CurrentValue.OutputBundleFolder ?? string.Empty).Trim();
         if (string.IsNullOrEmpty(outputFolder))
@@ -108,6 +121,9 @@ public sealed class SlitMonitoringWorker : BackgroundService
             try
             {
                 await ProcessNewSlitFilesAsync(stoppingToken).ConfigureAwait(false);
+
+                if (ShouldRunPeriodicBackfillReconcile(_optionsMonitor.CurrentValue))
+                    await ReconcileInputSlitInboxAsync(stoppingToken).ConfigureAwait(false);
 
                 if (!IsPlcHandshakeEnabled())
                     await _plcPoEndPollHandler.PollAsync(stoppingToken).ConfigureAwait(false);
@@ -154,6 +170,109 @@ public sealed class SlitMonitoringWorker : BackgroundService
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// F-5: reconcile against <c>Input_Slit_Row</c> when enabled+SQL; otherwise historical baseline seed.
+    /// </summary>
+    private async Task InitializeInputSlitBaselineAsync(CancellationToken cancellationToken)
+    {
+        var o = _optionsMonitor.CurrentValue;
+        if (!o.BackfillReconciliationEnabled || !SqlTraceabilityConnection.IsSqlEnabled(o))
+        {
+            if (o.BackfillReconciliationEnabled && !SqlTraceabilityConnection.IsSqlEnabled(o))
+            {
+                _logger.LogWarning(
+                    "BackfillReconciliationEnabled=true but SQL is disabled; falling back to legacy Input Slit seed baseline.");
+            }
+
+            SeedPreExistingInputSlitCsvsAsProcessed();
+            return;
+        }
+
+        await ReconcileInputSlitInboxAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private bool ShouldRunPeriodicBackfillReconcile(NdtBundleOptions o)
+    {
+        if (!o.BackfillReconciliationEnabled || !SqlTraceabilityConnection.IsSqlEnabled(o))
+            return false;
+
+        var minutes = Math.Max(1, o.ReconcileIntervalMinutes);
+        return DateTime.UtcNow - _lastBackfillReconcileUtc >= TimeSpan.FromMinutes(minutes);
+    }
+
+    /// <summary>
+    /// Enumerate inbox within lookback; mark already-imported versions handled; queue absent versions for ingest (F-5).
+    /// </summary>
+    internal async Task ReconcileInputSlitInboxAsync(CancellationToken cancellationToken)
+    {
+        var o = _optionsMonitor.CurrentValue;
+        var folder = (o.InputSlitFolder ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+            return;
+
+        var lookbackHours = Math.Max(1, o.BackfillLookbackHours);
+        var lookbackCutoff = DateTime.UtcNow.AddHours(-lookbackHours);
+        var minUtc = SourceFileEligibility.ParseMinUtc(o);
+        DateTime? effectiveMin = lookbackCutoff;
+        if (minUtc.HasValue && minUtc.Value > effectiveMin.Value)
+            effectiveMin = minUtc;
+
+        var scanned = 0;
+        var alreadyImported = 0;
+        var queued = 0;
+        var outsideLookback = 0;
+
+        foreach (var path in InputSlitInboxEnumeration.EnumerateFiles(folder))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            scanned++;
+            var full = Path.GetFullPath(path);
+            DateTime lwUtc;
+            try
+            {
+                lwUtc = File.GetLastWriteTimeUtc(full);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Input Slit reconcile: could not read LastWriteTimeUtc for {File}", full);
+                continue;
+            }
+
+            if (!SourceFileEligibility.IncludeFileUtc(lwUtc, effectiveMin))
+            {
+                _inputSlitLastHandledWriteUtc[full] = lwUtc;
+                _backfillCandidatePaths.Remove(full);
+                outsideLookback++;
+                continue;
+            }
+
+            var imported = await _traceability
+                .IsInputSlitFileVersionImportedAsync(full, lwUtc, cancellationToken)
+                .ConfigureAwait(false);
+            if (imported)
+            {
+                _inputSlitLastHandledWriteUtc[full] = lwUtc;
+                _backfillCandidatePaths.Remove(full);
+                alreadyImported++;
+                continue;
+            }
+
+            // Absent from SQL (or newer than stored write) → process via normal poll with F-5.2 guard.
+            _inputSlitLastHandledWriteUtc.Remove(full);
+            _backfillCandidatePaths.Add(full);
+            queued++;
+        }
+
+        _lastBackfillReconcileUtc = DateTime.UtcNow;
+        _logger.LogInformation(
+            "Input Slit reconcile: scanned {Scanned}, already imported {Imported}, queued for backfill {Queued}, outside lookback/min-write {Outside} (lookbackHours={Hours}).",
+            scanned,
+            alreadyImported,
+            queued,
+            outsideLookback,
+            lookbackHours);
     }
 
     /// <summary>
@@ -236,6 +355,9 @@ public sealed class SlitMonitoringWorker : BackgroundService
             if (_inputSlitLastHandledWriteUtc.TryGetValue(fileFull, out var lastHandledUtc) && lwUtc <= lastHandledUtc)
                 continue;
 
+            if (_fileRetryTracker.ShouldSkip(fileFull, DateTime.UtcNow))
+                continue;
+
             if (!SourceFileEligibility.IncludeFileUtc(lwUtc, minUtc))
             {
                 if (minUtc.HasValue)
@@ -307,9 +429,42 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     _pipeSizeProvider.TryGetCachedPipeSizes()
                     ?? await _pipeSizeProvider.GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
 
+                var isBackfill = _backfillCandidatePaths.Contains(fileFull);
+                var backfillCoverage = BackfillCoverageKind.None;
+                if (isBackfill)
+                {
+                    var eligibleForCoverage = rows
+                        .Select(r => r.Record)
+                        .Where(r => r is not null && IsMillAllowedForNdtInputSlit(o, r!.MillNo))
+                        .Cast<InputSlitRecord>()
+                        .ToList();
+                    backfillCoverage = InputSlitBackfillCoverage.Evaluate(fileFull, eligibleForCoverage, o, _logger);
+                    if (backfillCoverage == BackfillCoverageKind.None)
+                    {
+                        foreach (var er in eligibleForCoverage
+                                     .GroupBy(r => (Po: InputSlitCsvParsing.NormalizePo(r.PoNumber), r.MillNo)))
+                        {
+                            if (await _bundleRepository
+                                    .HasPrintedBundleForPoAsync(er.Key.MillNo, er.Key.Po, cancellationToken)
+                                    .ConfigureAwait(false))
+                            {
+                                backfillCoverage = BackfillCoverageKind.Ambiguous;
+                                break;
+                            }
+                        }
+                    }
+
+                    _logger.LogInformation(
+                        "Input Slit backfill {File}: coverage={Coverage}.",
+                        Path.GetFileName(fileFull),
+                        backfillCoverage);
+                }
+
                 var sourceRowNumber = 2; // CSV header is row 1
                 var anyRowBundled = false;
                 var anyEligibleMillRow = false;
+                var pendingOrphanClose = new HashSet<(string Po, int Mill)>();
+                var manualReviewFlagged = new HashSet<(string Po, int Mill)>();
                 foreach (var row in rows)
                 {
                     if (row.Record is null)
@@ -336,8 +491,15 @@ public sealed class SlitMonitoringWorker : BackgroundService
                         .TryGetRunningPoForMillAsync(record.MillNo, cancellationToken)
                         .ConfigureAwait(false);
                     var waitingForWip = _wipRunningPo.IsWaitingForNewWipAfterPoEnd(record.MillNo);
-
-                    if (waitingForWip && string.IsNullOrWhiteSpace(runningPoFromWip))
+                    var poEndSource = MillPoEndSourceResolver.ForMill(record.MillNo, o);
+                    // F-3: Plc mills with a valid slit-file PO continue bundling during WIP wait (config-gated).
+                    // File mills keep the historical hard-stop byte-for-byte.
+                    if (SlitWipBundlingGate.ShouldSkipBundling(
+                            waitingForWip,
+                            runningPoFromWip,
+                            record.PoNumber,
+                            poEndSource,
+                            o.BundleSlitRowsWithFilePoDuringWipWait))
                     {
                         _logger.LogInformation(
                             "Mill {Mill}: waiting for new WIP bundle file in TM Bundle folder after PO end; skipping bundling for slit row in {File}.",
@@ -387,6 +549,54 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     // so thresholds apply to whole-slit totals (e.g. 9 + 6 → one label for 15), not PLC step deltas.
                     var bundleNdtPipes = useLiveThisRow && plcNdt.HasValue ? record.NdtPipes : effectiveRecord.NdtPipes;
                     var bundleRecord = CloneRecordWithNdt(effectiveRecord, bundleNdtPipes);
+
+                    BackfillBundlingAction backfillAction = BackfillBundlingAction.NormalBundle;
+                    if (isBackfill)
+                    {
+                        var phase = _poLifecycle.GetPhase(bundleRecord.MillNo, bundleRecord.PoNumber);
+                        backfillAction = InputSlitBackfillPolicy.Decide(
+                            backfillCoverage,
+                            phase,
+                            poEndSource,
+                            o.AutoCloseOrphanBundles);
+                    }
+
+                    if (backfillAction is BackfillBundlingAction.TraceabilityOnly or BackfillBundlingAction.ManualReview)
+                    {
+                        if (backfillAction == BackfillBundlingAction.ManualReview)
+                        {
+                            var key = (InputSlitCsvParsing.NormalizePo(bundleRecord.PoNumber), bundleRecord.MillNo);
+                            if (manualReviewFlagged.Add(key))
+                            {
+                                _logger.LogWarning(
+                                    "Backfill Manual_Review: PO {PO} Mill {Mill} file {File} (coverage={Coverage}, no auto-print).",
+                                    key.Item1,
+                                    key.Item2,
+                                    Path.GetFileName(fileFull),
+                                    backfillCoverage);
+                                await _bundleRepository
+                                    .MarkManualReviewAsync(key.Item1, key.Item2, cancellationToken)
+                                    .ConfigureAwait(false);
+                            }
+                        }
+
+                        var rawTrace = row.RawLine;
+                        if (useLiveThisRow && plcNdt.HasValue && ndtColumnIndex >= 0)
+                            rawTrace = InputSlitCsvParsing.ReplaceFieldAtIndex(row.RawLine, ndtColumnIndex, effectiveNdt.ToString(CultureInfo.InvariantCulture));
+                        if (poColumnIndex >= 0
+                            && !string.IsNullOrWhiteSpace(effectivePo)
+                            && !InputSlitCsvParsing.PoEquals(record.PoNumber, effectivePo))
+                        {
+                            rawTrace = InputSlitCsvParsing.ReplaceFieldAtIndex(rawTrace, poColumnIndex, effectivePo);
+                        }
+
+                        outputLines.Add(rawTrace.TrimEnd() + ",");
+                        inputRowsForSql.Add((effectiveRecord, sourceRowNumber));
+                        // Still count as "bundled" for SQL/output write so Input_Slit_Row is recorded.
+                        anyRowBundled = true;
+                        sourceRowNumber++;
+                        continue;
+                    }
 
                     var (pipeType, pipeSize) = ResolvePipeInfoForPo(bundleRecord.PoNumber, wipByPo, pipeSizeByPo);
                     var omitBatch = NdtBatchNumberRules.ShouldOmitNdtBatchNumber(pipeType, pipeSize);
@@ -440,6 +650,13 @@ public sealed class SlitMonitoringWorker : BackgroundService
                                         },
                                         cancellationToken,
                                         pipeSize).ConfigureAwait(false);
+
+                                    if (backfillAction == BackfillBundlingAction.OrphanAutoClose)
+                                    {
+                                        pendingOrphanClose.Add((
+                                            InputSlitCsvParsing.NormalizePo(bundleRecord.PoNumber),
+                                            bundleRecord.MillNo));
+                                    }
                                 }
                                 catch (Exception ex)
                                 {
@@ -476,6 +693,38 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     sourceRowNumber++;
                 }
 
+                // F-5.2 / F-4.4: Closed-PO backfill with AutoClose — flush any reopeneds immediately.
+                foreach (var (po, mill) in pendingOrphanClose)
+                {
+                    var bundleLock = await _millBundleStateLock.AcquireAsync(mill, cancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        await _bundleEngine.HandlePoEndAsync(
+                            po,
+                            mill,
+                            async (contextRecord, batchNo, totalNdtPcs) =>
+                            {
+                                if (totalNdtPcs <= 0)
+                                    return;
+                                await _outputWriter
+                                    .WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken)
+                                    .ConfigureAwait(false);
+                                _logger.LogInformation(
+                                    "Backfill orphan auto-closed: PO {PO} Mill {Mill} Batch {Batch} NdtPcs {Pcs}.",
+                                    po,
+                                    mill,
+                                    FormatNdtBatchNo(batchNo, mill),
+                                    totalNdtPcs);
+                            },
+                            cancellationToken).ConfigureAwait(false);
+                        await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        bundleLock.Dispose();
+                    }
+                }
+
                 // Write one output file under OutputBundleFolder using the same name as the input inbox file.
                 var outputFolder = (o.OutputBundleFolder ?? string.Empty).Trim();
                 string? outputPath = null;
@@ -487,7 +736,24 @@ public sealed class SlitMonitoringWorker : BackgroundService
                             "Skipping NDT Input Slit output for {File}; no rows for configured mills ({Mills}).",
                             Path.GetFileName(fileFull),
                             FormatInputSlitProcessMills(o));
+                        _fileRetryTracker.Clear(fileFull);
                         _inputSlitLastHandledWriteUtc[fileFull] = File.GetLastWriteTimeUtc(fileFull);
+                        _backfillCandidatePaths.Remove(fileFull);
+                    }
+                    else if (ShouldApplyPlcFileRetryBackoff(o, rows))
+                    {
+                        var (delay, shouldLog, step) = _fileRetryTracker.Park(
+                            fileFull,
+                            DateTime.UtcNow,
+                            o.FileRetryBackoffSeconds);
+                        if (shouldLog)
+                        {
+                            _logger.LogInformation(
+                                "Skipping NDT Input Slit output for {File}; no slit rows were bundled. File parked with retry backoff step {Step} ({DelaySeconds}s).",
+                                Path.GetFileName(fileFull),
+                                step,
+                                (int)delay.TotalSeconds);
+                        }
                     }
                     else
                     {
@@ -501,15 +767,33 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     Directory.CreateDirectory(outputFolder);
                     var outputFileName = Path.GetFileName(fileFull);
                     outputPath = Path.Combine(outputFolder, outputFileName);
-                    await File.WriteAllLinesAsync(outputPath, outputLines, cancellationToken).ConfigureAwait(false);
-                    _logger.LogInformation("Wrote bundle CSV: {Path}", outputPath);
+                    if (isBackfill
+                        && backfillCoverage == BackfillCoverageKind.ExactMatch
+                        && File.Exists(outputPath))
+                    {
+                        _logger.LogInformation(
+                            "Backfill ExactMatch: leaving existing NDT Input Slit output unchanged: {Path}",
+                            outputPath);
+                    }
+                    else
+                    {
+                        await File.WriteAllLinesAsync(outputPath, outputLines, cancellationToken).ConfigureAwait(false);
+                        _logger.LogInformation("Wrote bundle CSV: {Path}", outputPath);
+                    }
                 }
 
                 // Best-effort SQL traceability; CSV flow should not fail if SQL is down.
                 if (anyRowBundled)
                 {
-                    await _traceability.RecordInputSlitRowsAsync(fileFull, inputRowsForSql, cancellationToken).ConfigureAwait(false);
-                    await _traceability.RecordOutputSlitRowsAsync(outputPath ?? fileFull, outputRowsForSql, cancellationToken).ConfigureAwait(false);
+                    await _traceability
+                        .RecordInputSlitRowsAsync(fileFull, inputRowsForSql, cancellationToken, lwUtc)
+                        .ConfigureAwait(false);
+                    if (outputRowsForSql.Count > 0)
+                    {
+                        await _traceability
+                            .RecordOutputSlitRowsAsync(outputPath ?? fileFull, outputRowsForSql, cancellationToken)
+                            .ConfigureAwait(false);
+                    }
 
                     foreach (var batchNo in outputRowsForSql
                                  .Select(r => r.NdtBatchNo)
@@ -535,13 +819,36 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 LogSqlWriteFailuresIfAny(fileFull);
 
                 if (anyRowBundled)
+                {
+                    _fileRetryTracker.Clear(fileFull);
                     _inputSlitLastHandledWriteUtc[fileFull] = File.GetLastWriteTimeUtc(fileFull);
+                    _backfillCandidatePaths.Remove(fileFull);
+                }
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to process Input Slit file {File}", fileFull);
             }
         }
+    }
+
+    /// <summary>
+    /// Backoff applies when any eligible row belongs to a <c>PoEndSource=Plc</c> mill.
+    /// File-mill-only deferrals keep immediate next-poll retry (unchanged).
+    /// </summary>
+    private static bool ShouldApplyPlcFileRetryBackoff(NdtBundleOptions o, IReadOnlyList<(string RawLine, InputSlitRecord? Record)> rows)
+    {
+        foreach (var row in rows)
+        {
+            if (row.Record is null)
+                continue;
+            if (!IsMillAllowedForNdtInputSlit(o, row.Record.MillNo))
+                continue;
+            if (MillPoEndSourceResolver.ForMill(row.Record.MillNo, o) == MillPoEndSource.Plc)
+                return true;
+        }
+
+        return false;
     }
 
     private void LogSqlWriteFailuresIfAny(string sourceFile)
