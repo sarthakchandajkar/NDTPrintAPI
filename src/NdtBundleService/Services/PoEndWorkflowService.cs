@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
+using NdtBundleService.Services.PlcHandshake;
 using NdtBundleService.Services.PoLifecycle;
 using Serilog.Context;
 
@@ -18,6 +19,9 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
     private readonly IWipBundleRunningPoProvider _wipRunningPo;
     private readonly IMillBundleStateLock _millBundleStateLock;
     private readonly IPoLifecycleService _poLifecycle;
+    private readonly IPipeSizeProvider _pipeSizeProvider;
+    private readonly INdtBundleRepository _bundleRepository;
+    private readonly PlcHandshakeStatusRegistry _handshakeStatus;
     private readonly IOptionsMonitor<NdtBundleOptions> _options;
     private readonly ILogger<PoEndWorkflowService> _logger;
 
@@ -30,6 +34,9 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
         IWipBundleRunningPoProvider wipRunningPo,
         IMillBundleStateLock millBundleStateLock,
         IPoLifecycleService poLifecycle,
+        IPipeSizeProvider pipeSizeProvider,
+        INdtBundleRepository bundleRepository,
+        PlcHandshakeStatusRegistry handshakeStatus,
         IOptionsMonitor<NdtBundleOptions> options,
         ILogger<PoEndWorkflowService> logger,
         ICurrentPoPlanService? currentPoPlanService = null)
@@ -42,20 +49,44 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
         _wipRunningPo = wipRunningPo;
         _millBundleStateLock = millBundleStateLock;
         _poLifecycle = poLifecycle;
+        _pipeSizeProvider = pipeSizeProvider;
+        _bundleRepository = bundleRepository;
+        _handshakeStatus = handshakeStatus;
         _options = options;
         _logger = logger;
         _currentPoPlanService = currentPoPlanService;
     }
 
-    public async Task<PoEndWorkflowResult> ExecuteAsync(string poNumber, int millNo, bool advancePoPlanFile, CancellationToken cancellationToken, Guid? correlationId = null)
+    public Task<PoEndWorkflowResult> ExecuteAsync(
+        string poNumber,
+        int millNo,
+        bool advancePoPlanFile,
+        CancellationToken cancellationToken,
+        Guid? correlationId = null) =>
+        ExecuteAsync(poNumber, millNo, advancePoPlanFile, cancellationToken, correlationId, plcNdtCountFinal: null);
+
+    public async Task<PoEndWorkflowResult> ExecuteAsync(
+        string poNumber,
+        int millNo,
+        bool advancePoPlanFile,
+        CancellationToken cancellationToken,
+        Guid? correlationId,
+        int? plcNdtCountFinal)
     {
         using (correlationId is { } id ? LogContext.PushProperty("CorrelationId", id) : null)
         {
-            return await ExecuteCoreAsync(poNumber, millNo, advancePoPlanFile, cancellationToken, correlationId).ConfigureAwait(false);
+            return await ExecuteCoreAsync(poNumber, millNo, advancePoPlanFile, cancellationToken, correlationId, plcNdtCountFinal)
+                .ConfigureAwait(false);
         }
     }
 
-    private async Task<PoEndWorkflowResult> ExecuteCoreAsync(string poNumber, int millNo, bool advancePoPlanFile, CancellationToken cancellationToken, Guid? correlationId)
+    private async Task<PoEndWorkflowResult> ExecuteCoreAsync(
+        string poNumber,
+        int millNo,
+        bool advancePoPlanFile,
+        CancellationToken cancellationToken,
+        Guid? correlationId,
+        int? plcNdtCountFinal)
     {
         if (string.IsNullOrWhiteSpace(poNumber))
             throw new ArgumentException("PoNumber is required.", nameof(poNumber));
@@ -96,6 +127,22 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
                     Math.Max(1, opts.PoEndDrainMinutes),
                     correlationId);
             }
+            else if (poEndSource == MillPoEndSource.Plc && flushMode == PoEndFlushMode.Immediate)
+            {
+                var (closed, pcs) = await FlushPlcImmediateRemainderAsync(
+                        po,
+                        millNo,
+                        plcNdtCountFinal,
+                        correlationId,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                bundlesClosed = closed;
+                totalNdtPcsClosed = pcs;
+
+                await _batchState.IncrementBatchOnPoEndAsync(po, millNo, cancellationToken).ConfigureAwait(false);
+                await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
+                _poLifecycle.TryMarkDraining(millNo, po, DateTime.UtcNow);
+            }
             else
             {
                 await FlushPartialsAsync(
@@ -112,10 +159,6 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
 
                 await _batchState.IncrementBatchOnPoEndAsync(po, millNo, cancellationToken).ConfigureAwait(false);
                 await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
-
-                // Plc Immediate: still enter Draining so late reopeneds are swept at drain expiry.
-                if (poEndSource == MillPoEndSource.Plc)
-                    _poLifecycle.TryMarkDraining(millNo, po, DateTime.UtcNow);
             }
 
             _liveNdtAccumulator.OnPoEndForMill(po, millNo);
@@ -139,6 +182,92 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
         {
             bundleLock.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Immediate PLC PO-end: print live remainder (sizeCounts / MW56 / DB251) without waiting for Input Slit.
+    /// </summary>
+    private async Task<(int BundlesClosed, int TotalPcs)> FlushPlcImmediateRemainderAsync(
+        string po,
+        int millNo,
+        int? plcNdtCountFinal,
+        Guid? correlationId,
+        CancellationToken cancellationToken)
+    {
+        await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
+
+        string? pipeSize = null;
+        try
+        {
+            pipeSize = await _pipeSizeProvider.TryGetPipeSizeForPoAsync(po, cancellationToken).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(pipeSize))
+            {
+                var byPo = await _pipeSizeProvider.GetPipeSizeByPoAsync(cancellationToken).ConfigureAwait(false);
+                byPo.TryGetValue(po, out pipeSize);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "PO end: pipe size lookup failed for PO {PO} Mill {Mill}.", po, millNo);
+        }
+
+        var remainder = PoEndRemainderResolver.Resolve(
+            po,
+            millNo,
+            pipeSize,
+            _runtimeState,
+            _handshakeStatus,
+            plcNdtCountFinal);
+
+        if (remainder <= 0)
+        {
+            _logger.LogInformation(
+                "PO end Immediate: no live remainder for PO {PO} Mill {Mill}; skipping tag print. CorrelationId {CorrelationId}",
+                po,
+                millNo,
+                correlationId);
+            return (0, 0);
+        }
+
+        _logger.LogInformation(
+            "PO end Immediate: printing live remainder {Pcs} for PO {PO} Mill {Mill} (size {Size}). CorrelationId {CorrelationId}",
+            remainder,
+            po,
+            millNo,
+            pipeSize ?? "—",
+            correlationId);
+
+        var bundlesClosed = 0;
+        var totalPcs = 0;
+
+        await _bundleEngine.CloseBundleFromPlcAsync(
+            po,
+            millNo,
+            pipeSize,
+            remainder,
+            async (contextRecord, batchNo, totalNdtPcs) =>
+            {
+                if (totalNdtPcs <= 0)
+                    return;
+
+                bundlesClosed++;
+                totalPcs += totalNdtPcs;
+                await _outputWriter.WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken, correlationId)
+                    .ConfigureAwait(false);
+                await _bundleRepository.TrySetPlcCloseMetadataAsync(batchNo, contextRecord.MillNo, cancellationToken)
+                    .ConfigureAwait(false);
+                _logger.LogInformation(
+                    "PO end bundle closed: PO {PO} Mill {Mill} Batch index {Batch} NdtPcs {Pcs} Close_Source=Plc CorrelationId {CorrelationId}",
+                    po,
+                    millNo,
+                    batchNo,
+                    totalNdtPcs,
+                    correlationId);
+            },
+            cancellationToken,
+            allowPartial: true).ConfigureAwait(false);
+
+        return (bundlesClosed, totalPcs);
     }
 
     /// <summary>

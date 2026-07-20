@@ -161,7 +161,8 @@ public sealed class NdtBundleEngine : IBundleEngine
         string? pipeSize,
         int plcCount,
         Func<InputSlitRecord, int, int, Task> onBundleClosedAsync,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool allowPartial = false)
     {
         if (plcCount <= 0)
             return;
@@ -180,7 +181,7 @@ public sealed class NdtBundleEngine : IBundleEngine
 
         var formation = await _formationChartProvider.GetFormationChartAsync(cancellationToken).ConfigureAwait(false);
         var sizeThreshold = FormationChartLookup.ResolveThreshold(formation, pipeSize);
-        if (plcCount < sizeThreshold)
+        if (!allowPartial && plcCount < sizeThreshold)
         {
             _logger.LogDebug(
                 "PLC close skipped for PO {PO} Mill {Mill}: plcCount={PlcCount} < threshold={Threshold}.",
@@ -210,7 +211,9 @@ public sealed class NdtBundleEngine : IBundleEngine
         await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation(
-            "Closing size-based bundle {BatchNo} for PO {PO} Mill {Mill} Size {Size} threshold={Threshold} total={Total} Close_Source=Plc",
+            allowPartial
+                ? "Closing PO-end remainder bundle {BatchNo} for PO {PO} Mill {Mill} Size {Size} threshold={Threshold} total={Total} Close_Source=Plc (partialAllowed)"
+                : "Closing size-based bundle {BatchNo} for PO {PO} Mill {Mill} Size {Size} threshold={Threshold} total={Total} Close_Source=Plc",
             batchNo,
             poNumber,
             millNo,

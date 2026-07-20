@@ -15,7 +15,7 @@ public static class PoEndFlushModeParser
     public static PoEndFlushMode Parse(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
-            return PoEndFlushMode.AfterDrain;
+            return PoEndFlushMode.Immediate;
 
         if (string.Equals(value, "Immediate", StringComparison.OrdinalIgnoreCase))
             return PoEndFlushMode.Immediate;
@@ -23,7 +23,7 @@ public static class PoEndFlushModeParser
         if (string.Equals(value, "AfterDrain", StringComparison.OrdinalIgnoreCase))
             return PoEndFlushMode.AfterDrain;
 
-        return PoEndFlushMode.AfterDrain;
+        return PoEndFlushMode.Immediate;
     }
 
     public static string ToConfigValue(PoEndFlushMode mode) => mode switch

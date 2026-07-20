@@ -8,7 +8,8 @@ using Xunit;
 namespace NdtBundleService.Tests;
 
 /// <summary>
-/// Locks the exact PLC I/O sequence for Mill-1 M40.6/M40.7 handshake (T11 contract).
+/// Locks the exact PLC I/O sequence for Mill-1 M40.6/M40.7 handshake
+/// (Network 80: rising edge of M40.7 clears M40.6; M40.5 is PLC edge memory).
 /// </summary>
 public sealed class PlcHandshakeSequencePinTests
 {
@@ -58,7 +59,7 @@ public sealed class PlcHandshakeSequencePinTests
         await service.ExecuteHandshakePollForTestsAsync(CancellationToken.None);
         s7.ClearOperations();
 
-        // Rising edge → ack TRUE (T11 start).
+        // Rising edge → ack TRUE (N80 starts; PLC clears M40.6 on rising edge of M40.7).
         s7.SetTrigger(true);
         await service.ExecuteHandshakePollForTestsAsync(CancellationToken.None);
 
@@ -83,7 +84,7 @@ public sealed class PlcHandshakeSequencePinTests
 
         s7.ClearOperations();
 
-        // PLC clears M40.6 (T11) → ack FALSE completes handshake.
+        // PLC clears M40.6 (N80 rising-edge of ack) → ack FALSE completes handshake.
         s7.SetTrigger(false);
         await service.ExecuteHandshakePollForTestsAsync(CancellationToken.None);
 

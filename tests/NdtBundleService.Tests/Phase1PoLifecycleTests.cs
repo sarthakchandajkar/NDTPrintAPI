@@ -311,6 +311,9 @@ public sealed class Phase1PoLifecycleTests
             wip,
             new MillBundleStateLock(),
             lifecycle,
+            new PipeSizeStub(),
+            new NoOpPlcCloseRepo(),
+            new PlcHandshakeStatusRegistry(),
             new TestOptionsMonitor<NdtBundleOptions>(opts),
             NullLogger<PoEndWorkflowService>.Instance);
     }
@@ -411,6 +414,51 @@ public sealed class Phase1PoLifecycleTests
     {
         public Task<PoEndWorkflowResult> ExecuteAsync(string poNumber, int millNo, bool advancePoPlanFile, CancellationToken cancellationToken, Guid? correlationId = null) =>
             Task.FromResult(new PoEndWorkflowResult { PoNumber = poNumber, MillNo = millNo });
+
+        public Task<PoEndWorkflowResult> ExecuteAsync(
+            string poNumber,
+            int millNo,
+            bool advancePoPlanFile,
+            CancellationToken cancellationToken,
+            Guid? correlationId,
+            int? plcNdtCountFinal) =>
+            ExecuteAsync(poNumber, millNo, advancePoPlanFile, cancellationToken, correlationId);
+    }
+
+    private sealed class NoOpPlcCloseRepo : INdtBundleRepository
+    {
+        public Task TrySetPlcCloseMetadataAsync(int engineBatchSequence, int millNo, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+        public Task RecordBundleAsync(NdtBundleRecord record, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task RecordBundlePendingPrintAsync(NdtBundleRecord record, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task UpdateBundlePrintStatusAsync(string bundleNo, string printStatus, string? printError, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<IReadOnlyList<NdtBundleRecord>> GetStuckPrintsAsync(TimeSpan olderThan, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<NdtBundleRecord>>(Array.Empty<NdtBundleRecord>());
+        public Task<IReadOnlyList<NdtBundleRecord>> GetBundlesAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<NdtBundleRecord>>(Array.Empty<NdtBundleRecord>());
+        public Task<NdtBundleRecord?> GetByBatchNoAsync(string batchNo, CancellationToken cancellationToken) =>
+            Task.FromResult<NdtBundleRecord?>(null);
+        public Task UpdateBundlePipesAsync(string batchNo, int newPipes, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<int> UpdateOutputCsvFilesForBundleAsync(string batchNo, int newPipes, CancellationToken cancellationToken) => Task.FromResult(0);
+        public Task<IReadOnlyList<(string SlitNo, int NdtPipes)>> GetSlitsForBatchAsync(string batchNo, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<(string SlitNo, int NdtPipes)>>(Array.Empty<(string, int)>());
+        public Task<int> UpdateOutputCsvFilesForSlitAsync(string batchNo, string slitNo, int newPipes, CancellationToken cancellationToken) => Task.FromResult(0);
+        public Task UpdateBundleTotalInDatabaseAsync(string batchNo, int newTotalPipes, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<bool> UpdateBundleSummaryCsvAsync(string batchNo, int newTotalPipes, CancellationToken cancellationToken) => Task.FromResult(false);
+        public Task<int> TrySyncBundleTotalFromSlitsAsync(string batchNo, bool forceFromSlits, CancellationToken cancellationToken) => Task.FromResult(0);
+        public Task<(int RowsRemoved, IReadOnlyList<RemovedSlitRowTraceRef> TraceRefs)> DeletePerSlitOutputRowsForBatchSlitsAsync(
+            string batchNo, IReadOnlyList<string> slitNos, CancellationToken cancellationToken) =>
+            Task.FromResult((0, (IReadOnlyList<RemovedSlitRowTraceRef>)Array.Empty<RemovedSlitRowTraceRef>()));
+        public Task<NdtBundleRecord?> GetLatestPrintedBundleForMillAsync(int millNo, CancellationToken cancellationToken) =>
+            Task.FromResult<NdtBundleRecord?>(null);
+        public Task<bool> HasPrintedBundleForPoAsync(int millNo, string poNumber, CancellationToken cancellationToken) => Task.FromResult(false);
+        public Task<int> MarkManualReviewAsync(string poNumber, int millNo, CancellationToken cancellationToken) => Task.FromResult(0);
+        public Task<(string BundleNo, int EngineSequence, int PlcTotal)?> TryGetAwaitingPlcReconBatchAsync(
+            string poNumber, int millNo, CancellationToken cancellationToken) =>
+            Task.FromResult<(string, int, int)?>(null);
+        public Task<PlcCsvReconResult?> TryReconcilePlcClosedBundleAsync(
+            string poNumber, int millNo, int slitSum, CancellationToken cancellationToken) =>
+            Task.FromResult<PlcCsvReconResult?>(null);
     }
 
     private sealed class CapturingOutputWriter : IBundleOutputWriter

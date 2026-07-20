@@ -231,8 +231,10 @@ public interface IBundleEngine
         Guid? correlationId = null);
 
     /// <summary>
-    /// PLC slit-end close: allocate bundle from live PLC count, zero size accumulation, invoke print callback.
-    /// Sets close metadata via the callback path (<c>Close_Source=Plc</c>, <c>Awaiting_Csv_Recon=1</c>).
+    /// PLC close: allocate bundle from live count, zero size accumulation, invoke print callback.
+    /// When <paramref name="allowPartial"/> is false (slit-end), skips if count &lt; formation-chart threshold.
+    /// When true (PO-end remainder), closes any count &gt; 0.
+    /// Caller stamps <c>Close_Source=Plc</c> / <c>Awaiting_Csv_Recon=1</c> after print.
     /// </summary>
     Task CloseBundleFromPlcAsync(
         string poNumber,
@@ -240,7 +242,8 @@ public interface IBundleEngine
         string? pipeSize,
         int plcCount,
         Func<InputSlitRecord, int, int, Task> onBundleClosedAsync,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        bool allowPartial = false);
 }
 
 public interface IPlcClient
@@ -285,7 +288,21 @@ public sealed class PoEndWorkflowResult
 /// </summary>
 public interface IPoEndWorkflowService
 {
-    Task<PoEndWorkflowResult> ExecuteAsync(string poNumber, int millNo, bool advancePoPlanFile, CancellationToken cancellationToken, Guid? correlationId = null);
+    Task<PoEndWorkflowResult> ExecuteAsync(
+        string poNumber,
+        int millNo,
+        bool advancePoPlanFile,
+        CancellationToken cancellationToken,
+        Guid? correlationId = null);
+
+    /// <param name="plcNdtCountFinal">DB251 NDT at M40.6 edge — fallback when sizeCounts/MW56 are empty.</param>
+    Task<PoEndWorkflowResult> ExecuteAsync(
+        string poNumber,
+        int millNo,
+        bool advancePoPlanFile,
+        CancellationToken cancellationToken,
+        Guid? correlationId,
+        int? plcNdtCountFinal);
 }
 
 /// <summary>

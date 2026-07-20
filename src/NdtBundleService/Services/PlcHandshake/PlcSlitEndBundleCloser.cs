@@ -7,8 +7,9 @@ using S7.Net;
 namespace NdtBundleService.Services.PlcHandshake;
 
 /// <summary>
-/// Detects slit-end and closes bundles from live PLC NDT count when <c>CloseTrigger</c> allows.
-/// Default: Slit ID change (DB251.DBW10, same value shown on Mills PLC). Optional merker override via config.
+/// Detects slit-end and accumulates live PLC NDT into the toward-next-bundle remainder (sizeCounts / MW56).
+/// Closes and prints when the accumulated remainder meets the formation-chart threshold.
+/// Default detection: Slit ID change (DB251.DBW10). Optional merker override via config.
 /// </summary>
 public interface IPlcSlitEndBundleCloser
 {
@@ -31,6 +32,7 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
     private readonly IActivePoPerMillService _activePo;
     private readonly IPipeSizeProvider _pipeSizeProvider;
     private readonly IFormationChartProvider _formationChart;
+    private readonly INdtBundleRuntimeStateStore _runtimeState;
     private readonly IMillBundleStateLock _millLock;
     private readonly INdtBundleRepository _bundleRepository;
     private readonly ILogger<PlcSlitEndBundleCloser> _logger;
@@ -48,6 +50,7 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
         IActivePoPerMillService activePo,
         IPipeSizeProvider pipeSizeProvider,
         IFormationChartProvider formationChart,
+        INdtBundleRuntimeStateStore runtimeState,
         IMillBundleStateLock millLock,
         INdtBundleRepository bundleRepository,
         ILogger<PlcSlitEndBundleCloser> logger)
@@ -58,6 +61,7 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
         _activePo = activePo;
         _pipeSizeProvider = pipeSizeProvider;
         _formationChart = formationChart;
+        _runtimeState = runtimeState;
         _millLock = millLock;
         _bundleRepository = bundleRepository;
         _logger = logger;
@@ -77,7 +81,7 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
         if (!BundleClosePolicy.AllowPlcClose(trigger, s7.IsHealthy))
             return;
 
-        if (!TryDetectSlitEnd(millNo, handshake, s7, liveNdtCount, liveSlitId, out var edgeReason, out var plcCountForClose))
+        if (!TryDetectSlitEnd(millNo, handshake, s7, liveNdtCount, liveSlitId, out var edgeReason, out var slitNdtPcs))
             return;
 
         if (_closedThisSlitByMill.Contains(millNo))
@@ -87,7 +91,7 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
         var poByMill = await _activePo.GetLatestPoByMillAsync(cancellationToken).ConfigureAwait(false);
         if (!poByMill.TryGetValue(millNo, out var po) || string.IsNullOrWhiteSpace(po))
         {
-            _logger.LogDebug("{MillName}: slit-end detected ({Reason}) but no active PO; skip PLC close.", mill.Name, edgeReason);
+            _logger.LogDebug("{MillName}: slit-end detected ({Reason}) but no active PO; skip PLC accumulate/close.", mill.Name, edgeReason);
             return;
         }
 
@@ -103,27 +107,48 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
         }
 
         var threshold = FormationChartLookup.ResolveThreshold(formation, pipeSize);
-        if (plcCountForClose < threshold)
-        {
-            _logger.LogDebug(
-                "{MillName}: slit-end ({Reason}) plcCount={Count} < threshold={Threshold}; skip close.",
-                mill.Name,
-                edgeReason,
-                plcCountForClose,
-                threshold);
-            return;
-        }
+        var sizeKey = FormationChartLookup.NormalizePipeSizeKey(pipeSize);
+        if (string.IsNullOrEmpty(sizeKey))
+            sizeKey = "Default";
 
         using (await _millLock.AcquireAsync(millNo, cancellationToken).ConfigureAwait(false))
         {
             if (_closedThisSlitByMill.Contains(millNo))
                 return;
 
+            await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
+
+            var sizeCounts = _runtimeState.GetSizeCounts(poNorm, millNo);
+            sizeCounts.TryGetValue(sizeKey, out var prevAccumulated);
+            var slitPcs = Math.Max(0, slitNdtPcs);
+            var accumulated = prevAccumulated + slitPcs;
+            sizeCounts[sizeKey] = accumulated;
+            _runtimeState.SetSizeCounts(poNorm, millNo, sizeCounts);
+            await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
+
+            if (slitPcs > 0 || accumulated != prevAccumulated)
+            {
+                _logger.LogInformation(
+                    "{MillName}: slit-end ({Reason}) added {SlitPcs} NDT → remainder {Accumulated} (threshold={Threshold}, was {Prev}).",
+                    mill.Name,
+                    edgeReason,
+                    slitPcs,
+                    accumulated,
+                    threshold,
+                    prevAccumulated);
+            }
+
+            if (accumulated < threshold || accumulated <= 0)
+            {
+                _closedThisSlitByMill.Add(millNo);
+                return;
+            }
+
             await _bundleEngine.CloseBundleFromPlcAsync(
                 poNorm,
                 millNo,
                 pipeSize,
-                plcCountForClose,
+                accumulated,
                 async (contextRecord, batchNo, totalNdtPcs) =>
                 {
                     if (totalNdtPcs <= 0)

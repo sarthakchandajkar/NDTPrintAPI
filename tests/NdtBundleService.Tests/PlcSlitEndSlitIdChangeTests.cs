@@ -12,6 +12,7 @@ namespace NdtBundleService.Tests;
 
 /// <summary>
 /// Slit end defaults to Mills PLC Slit ID change (DB251.DBW10), not NDT count reset.
+/// Sub-threshold slits accumulate into sizeCounts; close when remainder ≥ threshold.
 /// </summary>
 public sealed class PlcSlitEndSlitIdChangeTests
 {
@@ -71,20 +72,9 @@ public sealed class PlcSlitEndSlitIdChangeTests
     public async Task TryCloseOnSlitEnd_closes_when_SlitId_changes_and_count_meets_threshold()
     {
         var closed = new List<(int Batch, int Pcs)>();
-        var sut = new PlcSlitEndBundleCloser(
-            Options.Create(new NdtBundleOptions
-            {
-                CloseTrigger = "Plc",
-                PlcHandshake = new PlcHandshakeOptions { SlitEndTriggerByte = -1 }
-            }),
-            new FakePlcCloseEngine(closed),
-            new NoOpOutputWriter(),
-            new FixedActivePo("1000060163"),
-            new PipeSizeStub(),
-            new FormationStub(10),
-            new MillBundleStateLock(),
-            new NoOpPlcCloseRepo(),
-            NullLogger<PlcSlitEndBundleCloser>.Instance);
+        var runtime = new MiniRuntime();
+        await runtime.EnsureInitializedAsync(CancellationToken.None);
+        var sut = CreateCloserWithRuntime(closed, runtime);
 
         var mill = new MillConfig { Name = "Mill-1", MillNo = 1 };
         var s7 = new AlwaysHealthyNoOpS7();
@@ -95,26 +85,41 @@ public sealed class PlcSlitEndSlitIdChangeTests
         await sut.TryCloseOnSlitEndAsync(1, mill, s7, liveNdtCount: 0, liveSlitId: 4, CancellationToken.None);
         Assert.Single(closed);
         Assert.Equal(11, closed[0].Pcs);
+        Assert.Equal(0, runtime.GetSizeCounts("1000060163", 1).GetValueOrDefault("Default"));
     }
 
     [Fact]
-    public async Task TryCloseOnSlitEnd_skips_when_previous_NDT_below_threshold()
+    public async Task TryCloseOnSlitEnd_accumulates_sub_threshold_then_closes_on_overshoot()
     {
         var closed = new List<(int Batch, int Pcs)>();
-        var sut = new PlcSlitEndBundleCloser(
-            Options.Create(new NdtBundleOptions
-            {
-                CloseTrigger = "Plc",
-                PlcHandshake = new PlcHandshakeOptions { SlitEndTriggerByte = -1 }
-            }),
-            new FakePlcCloseEngine(closed),
-            new NoOpOutputWriter(),
-            new FixedActivePo("1000060163"),
-            new PipeSizeStub(),
-            new FormationStub(10),
-            new MillBundleStateLock(),
-            new NoOpPlcCloseRepo(),
-            NullLogger<PlcSlitEndBundleCloser>.Instance);
+        var runtime = new MiniRuntime();
+        await runtime.EnsureInitializedAsync(CancellationToken.None);
+        var sut = CreateCloserWithRuntime(closed, runtime);
+
+        var mill = new MillConfig { Name = "Mill-1", MillNo = 1 };
+        var s7 = new AlwaysHealthyNoOpS7();
+
+        // Slit 1: 9 pcs (< 10) → accumulate only
+        await sut.TryCloseOnSlitEndAsync(1, mill, s7, 9, 1, CancellationToken.None);
+        await sut.TryCloseOnSlitEndAsync(1, mill, s7, 0, 2, CancellationToken.None);
+        Assert.Empty(closed);
+        Assert.Equal(9, runtime.GetSizeCounts("1000060163", 1)["Default"]);
+
+        // Slit 2: 3 pcs → 9+3=12 ≥ 10 → close
+        await sut.TryCloseOnSlitEndAsync(1, mill, s7, 3, 2, CancellationToken.None);
+        await sut.TryCloseOnSlitEndAsync(1, mill, s7, 0, 3, CancellationToken.None);
+        Assert.Single(closed);
+        Assert.Equal(12, closed[0].Pcs);
+        Assert.Equal(0, runtime.GetSizeCounts("1000060163", 1).GetValueOrDefault("Default"));
+    }
+
+    [Fact]
+    public async Task TryCloseOnSlitEnd_sub_threshold_does_not_close()
+    {
+        var closed = new List<(int Batch, int Pcs)>();
+        var runtime = new MiniRuntime();
+        await runtime.EnsureInitializedAsync(CancellationToken.None);
+        var sut = CreateCloserWithRuntime(closed, runtime);
 
         var mill = new MillConfig { Name = "Mill-1", MillNo = 1 };
         var s7 = new AlwaysHealthyNoOpS7();
@@ -122,20 +127,27 @@ public sealed class PlcSlitEndSlitIdChangeTests
         await sut.TryCloseOnSlitEndAsync(1, mill, s7, 5, 1, CancellationToken.None);
         await sut.TryCloseOnSlitEndAsync(1, mill, s7, 0, 2, CancellationToken.None);
         Assert.Empty(closed);
+        Assert.Equal(5, runtime.GetSizeCounts("1000060163", 1)["Default"]);
     }
 
     private static PlcSlitEndBundleCloser CreateCloser() =>
+        CreateCloserWithRuntime(new List<(int, int)>(), new MiniRuntime());
+
+    private static PlcSlitEndBundleCloser CreateCloserWithRuntime(
+        List<(int Batch, int Pcs)> closed,
+        INdtBundleRuntimeStateStore runtime) =>
         new(
             Options.Create(new NdtBundleOptions
             {
                 CloseTrigger = "Plc",
                 PlcHandshake = new PlcHandshakeOptions { SlitEndTriggerByte = -1 }
             }),
-            new FakePlcCloseEngine(new List<(int, int)>()),
+            new FakePlcCloseEngine(closed, runtime),
             new NoOpOutputWriter(),
             new FixedActivePo("1000060163"),
             new PipeSizeStub(),
             new FormationStub(10),
+            runtime,
             new MillBundleStateLock(),
             new NoOpPlcCloseRepo(),
             NullLogger<PlcSlitEndBundleCloser>.Instance);
@@ -143,7 +155,13 @@ public sealed class PlcSlitEndSlitIdChangeTests
     private sealed class FakePlcCloseEngine : IBundleEngine
     {
         private readonly List<(int Batch, int Pcs)> _closed;
-        public FakePlcCloseEngine(List<(int Batch, int Pcs)> closed) => _closed = closed;
+        private readonly INdtBundleRuntimeStateStore _runtime;
+
+        public FakePlcCloseEngine(List<(int Batch, int Pcs)> closed, INdtBundleRuntimeStateStore runtime)
+        {
+            _closed = closed;
+            _runtime = runtime;
+        }
 
         public Task ProcessSlitRecordAsync(
             InputSlitRecord record,
@@ -166,12 +184,60 @@ public sealed class PlcSlitEndSlitIdChangeTests
             string? pipeSize,
             int plcCount,
             Func<InputSlitRecord, int, int, Task> onBundleClosedAsync,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            bool allowPartial = false)
         {
+            var sizeKey = "Default";
+            var sizeCounts = _runtime.GetSizeCounts(poNumber, millNo);
+            sizeCounts[sizeKey] = 0;
+            _runtime.SetSizeCounts(poNumber, millNo, sizeCounts);
+
             var record = new InputSlitRecord { PoNumber = poNumber, MillNo = millNo, NdtPipes = plcCount };
             _closed.Add((1, plcCount));
             await onBundleClosedAsync(record, 1, plcCount).ConfigureAwait(false);
         }
+    }
+
+    private sealed class MiniRuntime : INdtBundleRuntimeStateStore
+    {
+        private readonly Dictionary<string, Dictionary<string, int>> _sizes = new(StringComparer.OrdinalIgnoreCase);
+        private static string Key(string po, int mill) => $"{InputSlitCsvParsing.NormalizePo(po)}|{mill}";
+
+        public Task EnsureInitializedAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task SaveAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task SyncBatchSequencesFromBundlesAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Dictionary<string, int> GetSizeCounts(string poNumber, int millNo)
+        {
+            var k = Key(poNumber, millNo);
+            if (!_sizes.TryGetValue(k, out var d))
+            {
+                d = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                _sizes[k] = d;
+            }
+
+            return new Dictionary<string, int>(d, StringComparer.OrdinalIgnoreCase);
+        }
+
+        public void SetSizeCounts(string poNumber, int millNo, IReadOnlyDictionary<string, int> counts)
+        {
+            _sizes[Key(poNumber, millNo)] = new Dictionary<string, int>(counts, StringComparer.OrdinalIgnoreCase);
+        }
+
+        public int GetRunningTotal(string poNumber, int millNo) => 0;
+        public void ClearRunningTotal(string poNumber, int millNo) { }
+        public void AdvanceOnPoEnd(string poNumber, int millNo, int threshold) { }
+        public BundleCloseAllocation CloseBundle(string poNumber, int millNo, int closedTotalPcs, int threshold) =>
+            new(1, 0);
+        public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int batchNumberForRow, out int totalSoFar)
+        {
+            batchNumberForRow = 1;
+            totalSoFar = ndtPipes;
+        }
+        public int GetEngineBatchNo(string poNumber, int millNo) => 0;
+        public void SetEngineBatchNo(string poNumber, int millNo, int batchNo) { }
+        public int GetBatchOffset(string poNumber, int millNo) => 0;
+        public InputSlitRecord? GetLastRecord(string poNumber, int millNo) => null;
+        public void SetLastRecord(string poNumber, int millNo, InputSlitRecord? record) { }
     }
 
     private sealed class FixedActivePo : IActivePoPerMillService
@@ -194,12 +260,10 @@ public sealed class PlcSlitEndSlitIdChangeTests
             Task.CompletedTask;
     }
 
-    /// <summary>Only <see cref="INdtBundleRepository.TrySetPlcCloseMetadataAsync"/> is used on the close path.</summary>
     private sealed class NoOpPlcCloseRepo : INdtBundleRepository
     {
         public Task TrySetPlcCloseMetadataAsync(int engineBatchSequence, int millNo, CancellationToken cancellationToken) =>
             Task.CompletedTask;
-
         public Task RecordBundleAsync(NdtBundleRecord record, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task RecordBundlePendingPrintAsync(NdtBundleRecord record, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task UpdateBundlePrintStatusAsync(string bundleNo, string printStatus, string? printError, CancellationToken cancellationToken) => Task.CompletedTask;

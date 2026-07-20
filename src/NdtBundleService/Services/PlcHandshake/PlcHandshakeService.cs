@@ -9,7 +9,7 @@ namespace NdtBundleService.Services.PlcHandshake;
 
 /// <summary>
 /// Persistent S7 connection and PO-change handshake for one mill:
-/// trigger rising edge (FALSE→TRUE) → handle PO change → ack TRUE → wait trigger FALSE → ack FALSE.
+/// trigger rising edge (FALSE→TRUE) → ack TRUE → wait trigger FALSE (N80: rising edge of ack clears trigger) → ack FALSE.
 /// Uses rising-edge detection (same as plc-server) so a held or quickly re-pulsed M-bit does not
 /// repeat the PO-end workflow until trigger has been false for several poll cycles.
 /// All S7 I/O goes through the shared <see cref="IS7ConnectionProvider"/> for this mill.
@@ -272,7 +272,7 @@ public sealed class PlcHandshakeService
 
     /// <summary>
     /// One connected poll iteration without reconnect/delay. Used by sequence pin tests
-    /// (T11 handshake contract) and by <see cref="RunAsync"/>.
+    /// (N80 handshake: M40.7 rising edge clears M40.6) and by <see cref="RunAsync"/>.
     /// </summary>
     internal Task ExecuteHandshakePollForTestsAsync(CancellationToken cancellationToken)
     {

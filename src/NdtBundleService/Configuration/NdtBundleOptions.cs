@@ -135,10 +135,11 @@ public class NdtBundleOptions
     public int[] FileRetryBackoffSeconds { get; set; } = [5, 30, 120];
 
     /// <summary>
-    /// Partial-bundle flush at PO end for <c>PoEndSource=Plc</c> mills: <c>Immediate</c> or <c>AfterDrain</c> (default).
+    /// Partial-bundle flush at PO end for <c>PoEndSource=Plc</c> mills: <c>Immediate</c> (default) or <c>AfterDrain</c>.
+    /// Immediate prints the live remainder on M40.6 without waiting for Input Slit CSVs.
     /// File mills always flush immediately (unchanged).
     /// </summary>
-    public string PoEndFlushMode { get; set; } = "AfterDrain";
+    public string PoEndFlushMode { get; set; } = "Immediate";
 
     /// <summary>
     /// Minutes to accept late slit rows for a Plc mill PO after PO end before the deferred flush / reopen sweep.

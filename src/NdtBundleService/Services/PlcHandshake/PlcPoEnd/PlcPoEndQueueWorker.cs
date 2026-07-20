@@ -160,7 +160,13 @@ public sealed class PlcPoEndQueueWorker : BackgroundService
                 po,
                 request.CorrelationId);
 
-            var result = await _poEndWorkflow.ExecuteAsync(po!, request.MillNo, advancePlan, cancellationToken, request.CorrelationId)
+            var result = await _poEndWorkflow.ExecuteAsync(
+                    po!,
+                    request.MillNo,
+                    advancePlan,
+                    cancellationToken,
+                    request.CorrelationId,
+                    request.NdtCountFinal)
                 .ConfigureAwait(false);
 
             _logger.LogInformation(
