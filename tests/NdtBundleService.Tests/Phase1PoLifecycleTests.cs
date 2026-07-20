@@ -76,6 +76,7 @@ public sealed class Phase1PoLifecycleTests
             new StubPoEndWorkflow(),
             activePo,
             wip,
+            new PoLifecycleService(Monitor(CreatePlcOptions())),
             new PlcHandshakeCoordinator(),
             new PlcHandshakeStatusRegistry(),
             options,
@@ -497,15 +498,16 @@ public sealed class Phase1PoLifecycleTests
             }
         }
 
-        public int CloseBundle(string poNumber, int millNo, int closedTotalPcs, int threshold)
+        public BundleCloseAllocation CloseBundle(string poNumber, int millNo, int closedTotalPcs, int threshold)
         {
             var slot = Slot(poNumber, millNo);
             if (closedTotalPcs <= 0)
-                return slot.EngineBatchNo;
+                return new BundleCloseAllocation(slot.EngineBatchNo, slot.EngineBatchNo + 1);
+            var provisional = slot.EngineBatchNo + 1;
             slot.EngineBatchNo += 1;
             if (slot.BatchOffset < slot.EngineBatchNo)
                 slot.BatchOffset = slot.EngineBatchNo;
-            return slot.EngineBatchNo;
+            return new BundleCloseAllocation(slot.EngineBatchNo, provisional);
         }
 
         public void AdvanceOnPoEnd(string poNumber, int millNo, int threshold)

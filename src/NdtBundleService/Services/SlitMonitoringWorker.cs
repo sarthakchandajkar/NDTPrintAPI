@@ -262,6 +262,17 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 continue;
             }
 
+            var seen = await _traceability
+                .IsInputSlitFileSeenAsync(full, lwUtc, cancellationToken)
+                .ConfigureAwait(false);
+            if (seen)
+            {
+                _inputSlitLastHandledWriteUtc[full] = lwUtc;
+                _backfillCandidatePaths.Remove(full);
+                alreadyImported++;
+                continue;
+            }
+
             // Absent from SQL (or newer than stored write) → process via normal poll with F-5.2 guard.
             _inputSlitLastHandledWriteUtc.Remove(full);
             _backfillCandidatePaths.Add(full);
@@ -761,8 +772,16 @@ public sealed class SlitMonitoringWorker : BackgroundService
                             Path.GetFileName(fileFull),
                             FormatInputSlitProcessMills(o));
                         _fileRetryTracker.Clear(fileFull);
-                        _inputSlitLastHandledWriteUtc[fileFull] = File.GetLastWriteTimeUtc(fileFull);
+                        var lw = File.GetLastWriteTimeUtc(fileFull);
+                        _inputSlitLastHandledWriteUtc[fileFull] = lw;
                         _backfillCandidatePaths.Remove(fileFull);
+                        await _traceability
+                            .MarkInputSlitFileSeenAsync(
+                                fileFull,
+                                lw,
+                                "NoConfiguredMillRows",
+                                cancellationToken)
+                            .ConfigureAwait(false);
                     }
                     else if (ShouldApplyPlcFileRetryBackoff(o, rows))
                     {

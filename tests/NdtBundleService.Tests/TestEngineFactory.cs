@@ -16,7 +16,8 @@ internal static class TestEngineFactory
         IS7ConnectionProviderRegistry? s7Registry = null,
         int plcCloseGraceSeconds = 60,
         TimeProvider? timeProvider = null,
-        ILogger<NdtBundleEngine>? logger = null)
+        ILogger<NdtBundleEngine>? logger = null,
+        IBundleProvisionalStampCorrector? stampCorrector = null)
     {
         var options = Options.Create(new NdtBundleOptions
         {
@@ -27,10 +28,23 @@ internal static class TestEngineFactory
             formation,
             pipeSize,
             runtime,
+            stampCorrector ?? NoOpStampCorrector.Instance,
             options,
             s7Registry ?? new EmptyS7Registry(),
             logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<NdtBundleEngine>.Instance,
             timeProvider);
+    }
+
+    private sealed class NoOpStampCorrector : IBundleProvisionalStampCorrector
+    {
+        public static readonly NoOpStampCorrector Instance = new();
+        public Task CorrectAsync(
+            string poNumber,
+            int millNo,
+            int provisionalSequence,
+            int finalSequence,
+            CancellationToken cancellationToken) =>
+            Task.CompletedTask;
     }
 
     private sealed class EmptyS7Registry : IS7ConnectionProviderRegistry

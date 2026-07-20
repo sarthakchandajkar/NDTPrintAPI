@@ -115,7 +115,7 @@ public sealed class NdtBundleRuntimeStateStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task ApplySlitContribution_WithNdtPipes_ClosesBundleAtThresholdWithoutPrematureFloorBump()
+    public async Task ApplySlitContribution_DoesNotBurnSequenceAtThreshold_AllocationIsCloseOnly()
     {
         var store = CreateStore(new Dictionary<int, string>(), gracePeriodDays: 14);
         await store.EnsureInitializedAsync(CancellationToken.None);
@@ -127,11 +127,18 @@ public sealed class NdtBundleRuntimeStateStoreTests : IDisposable
         store.ApplySlitContribution("PO-200", 2, ndtPipes: 5, threshold: 15, out var batch2, out var total2);
         Assert.Equal(1, batch2);
         Assert.Equal(15, total2);
-        Assert.Equal(1, store.GetBatchOffset("PO-200", 2));
-        Assert.Equal(0, store.GetRunningTotal("PO-200", 2));
+        // Provisional stamp held; BatchOffset stays 0 until CloseBundle
+        Assert.Equal(0, store.GetBatchOffset("PO-200", 2));
+        Assert.Equal(15, store.GetRunningTotal("PO-200", 2));
 
         store.ApplySlitContribution("PO-200", 2, ndtPipes: 0, threshold: 15, out var batch3, out _);
-        Assert.Equal(2, batch3);
+        Assert.Equal(1, batch3);
+
+        var closed = store.CloseBundle("PO-200", 2, closedTotalPcs: 15, threshold: 15);
+        Assert.Equal(1, closed.FinalSequence);
+        Assert.Equal(1, closed.ProvisionalSequence);
+        Assert.Equal(1, store.GetBatchOffset("PO-200", 2));
+        Assert.Equal(0, store.GetRunningTotal("PO-200", 2));
     }
 
     [Fact]

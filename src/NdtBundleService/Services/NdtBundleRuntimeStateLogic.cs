@@ -25,8 +25,22 @@ public static class NdtBundleRuntimeStateLogic
         return false;
     }
 
-    /// <summary>Current open batch sequence for a slit row (completed count + 1).</summary>
+    /// <summary>Legacy open stamp (completed count + 1). Prefer mill-wide provisional via <see cref="ResolveProvisionalOpenBatchNumber"/>.</summary>
     public static int ResolveOpenBatchNumber(int batchOffset) => batchOffset + 1;
+
+    /// <summary>
+    /// Provisional open-row stamp: reuse slot provisional when set; otherwise mill floor + 1.
+    /// Does not reserve the mill-wide sequence (allocation happens only at close).
+    /// </summary>
+    public static int ResolveProvisionalOpenBatchNumber(int provisionalBatchNo, int millMaxSequence)
+    {
+        if (provisionalBatchNo > 0)
+            return provisionalBatchNo;
+        return Math.Max(0, millMaxSequence) + 1;
+    }
+
+    /// <summary>Next printed sequence for the mill (single source of truth at close).</summary>
+    public static int AllocateNextMillSequence(int millMaxSequence) => Math.Max(0, millMaxSequence) + 1;
 
     /// <summary>
     /// Raises <paramref name="batchOffset"/> and <paramref name="engineBatchNo"/> to the mill floor

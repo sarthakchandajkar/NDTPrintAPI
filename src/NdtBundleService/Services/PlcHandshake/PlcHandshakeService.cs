@@ -34,6 +34,7 @@ public sealed class PlcHandshakeService
 
     private bool _handshakeInProgress;
     private bool _ackAwaitingTriggerClear;
+    private DateTimeOffset? _idleTriggerTrueSinceUtc;
     private System.DateTime _ackClearDeadlineUtc;
     private volatile bool _plcConnectionEnabled;
     private bool _settingsTestInProgress;
@@ -429,6 +430,12 @@ public sealed class PlcHandshakeService
 
         _edge.SetPrevTriggerActive(trigger);
 
+        if (!risingEdge)
+        {
+            await TryRecoverIdleLatchedTriggerAsync(millNo, trigger, stoppingToken).ConfigureAwait(false);
+            RefreshTriggerAndAck(millNo, out trigger, out ack);
+        }
+
         await TryUpdateMillSignalsAsync(
                 millNo,
                 stoppingToken,
@@ -693,6 +700,9 @@ public sealed class PlcHandshakeService
                 ? HandshakeOutcome.StartupRecoveryCompleted
                 : HandshakeOutcome.Completed;
         FinalizeAudit(outcome, error: null);
+        // One confirmed FALSE poll completing the handshake is enough to re-arm for the next edge.
+        if (!forceDrop)
+            _edge.ArmAfterTriggerClear(isStartup: false);
         SetState(millNo, "Idle");
     }
 
@@ -806,6 +816,46 @@ public sealed class PlcHandshakeService
             _mill.TriggerAddress,
             limit,
             _audit.CorrelationId);
+    }
+
+    /// <summary>
+    /// F-6.3 level recovery: M40.6 TRUE while idle (no handshake in progress) longer than
+    /// <see cref="PlcHandshakeOptions.StuckTriggerAlarmSeconds"/> is treated like a new edge.
+    /// </summary>
+    private async Task TryRecoverIdleLatchedTriggerAsync(int millNo, bool trigger, CancellationToken stoppingToken)
+    {
+        if (!_edge.Primed
+            || _handshakeInProgress
+            || _settingsTestInProgress
+            || _ackAwaitingTriggerClear
+            || _audit is not null
+            || IsS7PoEndHandshakeDisabled())
+        {
+            _idleTriggerTrueSinceUtc = null;
+            return;
+        }
+
+        if (!trigger)
+        {
+            _idleTriggerTrueSinceUtc = null;
+            return;
+        }
+
+        _idleTriggerTrueSinceUtc ??= DateTimeOffset.UtcNow;
+        var limit = Math.Max(0, _options.StuckTriggerAlarmSeconds);
+        if ((DateTimeOffset.UtcNow - _idleTriggerTrueSinceUtc.Value).TotalSeconds < limit)
+            return;
+
+        UpdateStatus(millNo, s => s.StuckTriggerAlarm = true);
+        _logger.LogWarning(
+            "{MillName}: idle stuck trigger recovery — {Trigger} TRUE for >{Seconds}s with no handshake in progress; treating as new PO-end edge.",
+            _mill.Name,
+            _mill.TriggerAddress,
+            limit);
+
+        _idleTriggerTrueSinceUtc = null;
+        _edge.MarkPulseHandled();
+        await RunHandshakeAsync(millNo, stoppingToken).ConfigureAwait(false);
     }
 
     private async Task TryCloseOnSlitEndSafeAsync(

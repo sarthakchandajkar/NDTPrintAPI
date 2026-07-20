@@ -75,7 +75,7 @@ public sealed class PlcHandshakeOptions
     /// Consecutive poll cycles with trigger FALSE required after a completed handshake before the next
     /// rising edge is accepted (filters immediate PLC re-pulses on the same PO change).
     /// </summary>
-    public int MinimumTriggerFalsePollsBeforeRearm { get; set; } = 2;
+    public int MinimumTriggerFalsePollsBeforeRearm { get; set; } = 1;
 
     /// <summary>
     /// When true, a PO-end trigger already latched TRUE at service connect is cleared via the MES ack sequence

@@ -16,6 +16,7 @@ public sealed class NdtBundleEngine : IBundleEngine
     private readonly IFormationChartProvider _formationChartProvider;
     private readonly IPipeSizeProvider _pipeSizeProvider;
     private readonly INdtBundleRuntimeStateStore _runtimeState;
+    private readonly IBundleProvisionalStampCorrector _stampCorrector;
     private readonly IOptions<NdtBundleOptions> _options;
     private readonly IS7ConnectionProviderRegistry _s7Registry;
     private readonly ILogger<NdtBundleEngine> _logger;
@@ -28,6 +29,7 @@ public sealed class NdtBundleEngine : IBundleEngine
         IFormationChartProvider formationChartProvider,
         IPipeSizeProvider pipeSizeProvider,
         INdtBundleRuntimeStateStore runtimeState,
+        IBundleProvisionalStampCorrector stampCorrector,
         IOptions<NdtBundleOptions> options,
         IS7ConnectionProviderRegistry s7Registry,
         ILogger<NdtBundleEngine> logger,
@@ -36,6 +38,7 @@ public sealed class NdtBundleEngine : IBundleEngine
         _formationChartProvider = formationChartProvider;
         _pipeSizeProvider = pipeSizeProvider;
         _runtimeState = runtimeState;
+        _stampCorrector = stampCorrector;
         _options = options;
         _s7Registry = s7Registry;
         _logger = logger;
@@ -114,7 +117,10 @@ public sealed class NdtBundleEngine : IBundleEngine
             currentSizeCount = 0;
             _plcCloseGraceStartedUtc.Remove(graceKey);
 
-            var batchNo = _runtimeState.CloseBundle(record.PoNumber, record.MillNo, totalForBatch, sizeThreshold);
+            var alloc = _runtimeState.CloseBundle(record.PoNumber, record.MillNo, totalForBatch, sizeThreshold);
+            var batchNo = alloc.FinalSequence;
+            await CorrectStampsIfNeededAsync(record.PoNumber, record.MillNo, alloc, cancellationToken)
+                .ConfigureAwait(false);
             if (missedPlcClose)
             {
                 _logger.LogWarning(
@@ -195,7 +201,9 @@ public sealed class NdtBundleEngine : IBundleEngine
         ClearPlcCloseGrace(poNumber, millNo, sizeKey);
 
         var contextRecord = _runtimeState.GetLastRecord(poNumber, millNo) ?? CreateSyntheticRecord(poNumber, millNo);
-        var batchNo = _runtimeState.CloseBundle(poNumber, millNo, plcCount, sizeThreshold);
+        var alloc = _runtimeState.CloseBundle(poNumber, millNo, plcCount, sizeThreshold);
+        var batchNo = alloc.FinalSequence;
+        await CorrectStampsIfNeededAsync(poNumber, millNo, alloc, cancellationToken).ConfigureAwait(false);
         // Align RunningTotal/BatchOffset so late CSV rows can attach without burning a new sequence
         // until ApplySlitContribution rolls past threshold (recon override uses the closed batch).
         _runtimeState.AdvanceOnPoEnd(poNumber, millNo, sizeThreshold);
@@ -252,7 +260,9 @@ public sealed class NdtBundleEngine : IBundleEngine
                 continue;
 
             closedFromSizeCounts = true;
-            var batchNo = _runtimeState.CloseBundle(poNumber, millNo, count, sizeThreshold);
+            var alloc = _runtimeState.CloseBundle(poNumber, millNo, count, sizeThreshold);
+            var batchNo = alloc.FinalSequence;
+            await CorrectStampsIfNeededAsync(poNumber, millNo, alloc, cancellationToken).ConfigureAwait(false);
             sizeCounts[sizeKey] = 0;
             _logger.LogInformation(
                 "Closing partial size-based bundle {BatchNo} for PO {PO} Mill {Mill} Size {Size} due to PO end. CorrelationId {CorrelationId}",
@@ -269,7 +279,9 @@ public sealed class NdtBundleEngine : IBundleEngine
             var runningTotal = _runtimeState.GetRunningTotal(poNumber, millNo);
             if (runningTotal > 0)
             {
-                var batchNo = _runtimeState.CloseBundle(poNumber, millNo, runningTotal, sizeThreshold);
+                var alloc = _runtimeState.CloseBundle(poNumber, millNo, runningTotal, sizeThreshold);
+                var batchNo = alloc.FinalSequence;
+                await CorrectStampsIfNeededAsync(poNumber, millNo, alloc, cancellationToken).ConfigureAwait(false);
                 _logger.LogInformation(
                     "Closing partial running-total bundle {BatchNo} for PO {PO} Mill {Mill} ({Total} pcs) due to PO end. CorrelationId {CorrelationId}",
                     batchNo,
@@ -284,6 +296,23 @@ public sealed class NdtBundleEngine : IBundleEngine
         _runtimeState.SetSizeCounts(poNumber, millNo, sizeCounts);
         _runtimeState.ClearRunningTotal(poNumber, millNo);
         await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private Task CorrectStampsIfNeededAsync(
+        string poNumber,
+        int millNo,
+        BundleCloseAllocation alloc,
+        CancellationToken cancellationToken)
+    {
+        if (!alloc.NeedsStampCorrection)
+            return Task.CompletedTask;
+
+        return _stampCorrector.CorrectAsync(
+            poNumber,
+            millNo,
+            alloc.ProvisionalSequence,
+            alloc.FinalSequence,
+            cancellationToken);
     }
 
     private void ClearPlcCloseGrace(string poNumber, int millNo, string sizeKey) =>

@@ -36,6 +36,9 @@ public sealed class PlcHandshakeSequencePinTests
                 "R DB251@6",
                 "R DB251@8",
                 "R DB251@10",
+                // Idle latched-trigger recovery path refreshes merker bits before line-running.
+                "R M40.6",
+                "R M40.7",
                 "R DB250.DBX2.0"
             },
             s7.Operations);
@@ -95,6 +98,9 @@ public sealed class PlcHandshakeSequencePinTests
                 "R DB251@8",
                 "R DB251@10",
                 "W M40.7=FALSE",
+                "R M40.6",
+                "R M40.7",
+                // ArmAfterTriggerClear + idle refresh before line-running.
                 "R M40.6",
                 "R M40.7",
                 "R DB250.DBX2.0"

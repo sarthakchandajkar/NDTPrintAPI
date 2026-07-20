@@ -217,13 +217,14 @@ public sealed class Phase3F2ReconAndGracePinTests
                 _running[k] = 0;
         }
 
-        public int CloseBundle(string poNumber, int millNo, int closedTotalPcs, int threshold)
+        public BundleCloseAllocation CloseBundle(string poNumber, int millNo, int closedTotalPcs, int threshold)
         {
             var k = Key(poNumber, millNo);
             _engine.TryGetValue(k, out var n);
+            var provisional = n + 1;
             n += 1;
             _engine[k] = n;
-            return n;
+            return new BundleCloseAllocation(n, provisional);
         }
 
         public void AdvanceOnPoEnd(string poNumber, int millNo, int threshold) =>

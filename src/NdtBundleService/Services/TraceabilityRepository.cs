@@ -23,6 +23,33 @@ public interface ITraceabilityRepository
         string sourceFileFullPath,
         DateTime fileLastWriteTimeUtc,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// True when <c>Input_Slit_File_Seen</c> has this path+write (terminal skip, e.g. no configured-mill rows).
+    /// </summary>
+    Task<bool> IsInputSlitFileSeenAsync(
+        string sourceFileFullPath,
+        DateTime fileLastWriteTimeUtc,
+        CancellationToken cancellationToken);
+
+    /// <summary>Upserts a durable seen marker so reconcile will not re-queue the file version.</summary>
+    Task MarkInputSlitFileSeenAsync(
+        string sourceFileFullPath,
+        DateTime fileLastWriteTimeUtc,
+        string reason,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Updates <c>Output_Slit_Row.NDT_Batch_No</c> from provisional to final for the PO/mill.
+    /// Returns distinct source file paths that were updated (for per-slit CSV rewrite).
+    /// </summary>
+    Task<IReadOnlyList<string>> UpdateOutputSlitBatchNoAsync(
+        string poNumber,
+        int millNo,
+        string oldBatchNo,
+        string newBatchNo,
+        CancellationToken cancellationToken);
+
     Task RecordOutputSlitRowsAsync(string sourceFile, IReadOnlyList<(InputSlitRecord Record, string NdtBatchNo, int SourceRowNumber)> rows, CancellationToken cancellationToken);
     Task RecordManualStationRunAsync(
         string poNumber,
@@ -335,6 +362,182 @@ WHERE Source_File = @FullPath
                 sourceFileFullPath);
             return false;
         }
+    }
+
+    public async Task<bool> IsInputSlitFileSeenAsync(
+        string sourceFileFullPath,
+        DateTime fileLastWriteTimeUtc,
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled || string.IsNullOrWhiteSpace(sourceFileFullPath))
+            return false;
+
+        var full = Path.GetFullPath(sourceFileFullPath);
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await OpenConnectionAsync(conn, "Input_Slit_File_Seen check", cancellationToken).ConfigureAwait(false);
+            const string sql = @"
+SELECT TOP 1 1
+FROM dbo.Input_Slit_File_Seen
+WHERE Source_File = @FullPath
+  AND Source_LastWriteTimeUtc = @FileLw;";
+            await using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@FullPath", full);
+            cmd.Parameters.AddWithValue("@FileLw", fileLastWriteTimeUtc);
+            var scalar = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            return scalar is not null;
+        }
+        catch (SqlException ex) when (IsMissingInputSlitFileSeenTable(ex))
+        {
+            _logger.LogDebug(
+                "Input_Slit_File_Seen missing (run docs/Input_Slit_File_Seen_AddTable.sql); treating {File} as not seen.",
+                sourceFileFullPath);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Input_Slit_File_Seen check failed for {File}.", sourceFileFullPath);
+            return false;
+        }
+    }
+
+    public async Task MarkInputSlitFileSeenAsync(
+        string sourceFileFullPath,
+        DateTime fileLastWriteTimeUtc,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled || string.IsNullOrWhiteSpace(sourceFileFullPath))
+            return;
+
+        var full = Path.GetFullPath(sourceFileFullPath);
+        var reasonTrim = string.IsNullOrWhiteSpace(reason) ? "Unknown" : reason.Trim();
+        if (reasonTrim.Length > 64)
+            reasonTrim = reasonTrim[..64];
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await OpenConnectionAsync(conn, "Input_Slit_File_Seen upsert", cancellationToken).ConfigureAwait(false);
+            const string sql = @"
+IF NOT EXISTS (
+    SELECT 1 FROM dbo.Input_Slit_File_Seen
+    WHERE Source_File = @FullPath AND Source_LastWriteTimeUtc = @FileLw)
+BEGIN
+    INSERT INTO dbo.Input_Slit_File_Seen (Source_File, Source_LastWriteTimeUtc, Reason)
+    VALUES (@FullPath, @FileLw, @Reason);
+END";
+            await using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@FullPath", full);
+            cmd.Parameters.AddWithValue("@FileLw", fileLastWriteTimeUtc);
+            cmd.Parameters.AddWithValue("@Reason", reasonTrim);
+            await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            _writeTracker.RecordSuccess("Input_Slit_File_Seen", $"{Path.GetFileName(full)} ({reasonTrim})");
+        }
+        catch (SqlException ex) when (IsMissingInputSlitFileSeenTable(ex))
+        {
+            _logger.LogWarning(
+                "Input_Slit_File_Seen missing — run docs/Input_Slit_File_Seen_AddTable.sql. Could not mark {File} seen ({Reason}).",
+                sourceFileFullPath,
+                reasonTrim);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to mark Input_Slit_File_Seen for {File}.", sourceFileFullPath);
+        }
+    }
+
+    public async Task<IReadOnlyList<string>> UpdateOutputSlitBatchNoAsync(
+        string poNumber,
+        int millNo,
+        string oldBatchNo,
+        string newBatchNo,
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled
+            || string.IsNullOrWhiteSpace(oldBatchNo)
+            || string.IsNullOrWhiteSpace(newBatchNo)
+            || string.Equals(oldBatchNo, newBatchNo, StringComparison.OrdinalIgnoreCase))
+        {
+            return Array.Empty<string>();
+        }
+
+        var po = InputSlitCsvParsing.NormalizePo(poNumber);
+        var files = new List<string>();
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await OpenConnectionAsync(conn, "Output_Slit_Row batch correct", cancellationToken).ConfigureAwait(false);
+
+            const string selectSql = @"
+SELECT DISTINCT Source_File
+FROM dbo.Output_Slit_Row
+WHERE NDT_Batch_No = @OldBatch
+  AND Mill_No = @Mill
+  AND PO_Number = @Po;";
+            await using (var sel = new SqlCommand(selectSql, conn))
+            {
+                sel.Parameters.AddWithValue("@OldBatch", oldBatchNo.Trim());
+                sel.Parameters.AddWithValue("@Mill", millNo);
+                sel.Parameters.AddWithValue("@Po", po);
+                await using var reader = await sel.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    if (!reader.IsDBNull(0))
+                        files.Add(reader.GetString(0));
+                }
+            }
+
+            const string updateSql = @"
+UPDATE dbo.Output_Slit_Row
+SET NDT_Batch_No = @NewBatch
+WHERE NDT_Batch_No = @OldBatch
+  AND Mill_No = @Mill
+  AND PO_Number = @Po;";
+            await using var upd = new SqlCommand(updateSql, conn);
+            upd.Parameters.AddWithValue("@NewBatch", newBatchNo.Trim());
+            upd.Parameters.AddWithValue("@OldBatch", oldBatchNo.Trim());
+            upd.Parameters.AddWithValue("@Mill", millNo);
+            upd.Parameters.AddWithValue("@Po", po);
+            var updated = await upd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            if (updated > 0)
+            {
+                _writeTracker.RecordSuccess("Output_Slit_Row", $"batch {oldBatchNo}→{newBatchNo} ({updated})");
+                _logger.LogInformation(
+                    "Corrected {Count} Output_Slit_Row row(s) batch {OldBatch} → {NewBatch} for PO {PO} Mill {Mill}.",
+                    updated,
+                    oldBatchNo,
+                    newBatchNo,
+                    po,
+                    millNo);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Failed to correct Output_Slit_Row batch {OldBatch} → {NewBatch} for PO {PO} Mill {Mill}.",
+                oldBatchNo,
+                newBatchNo,
+                po,
+                millNo);
+        }
+
+        return files;
+    }
+
+    private static bool IsMissingInputSlitFileSeenTable(SqlException ex)
+    {
+        // 208 = invalid object name
+        foreach (SqlError err in ex.Errors)
+        {
+            if (err.Number == 208
+                && err.Message.Contains("Input_Slit_File_Seen", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return ex.Message.Contains("Input_Slit_File_Seen", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsMissingSourceLastWriteColumn(SqlException ex)

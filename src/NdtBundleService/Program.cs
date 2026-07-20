@@ -45,6 +45,7 @@ builder.Services.AddSingleton<IBundleLabelInfoProvider, BundleLabelCsvProvider>(
 builder.Services.AddSingleton<ICurrentPoPlanService, CurrentPoPlanService>();
 builder.Services.AddSingleton<INdtBundleRepository, NdtBundleRepository>();
 builder.Services.AddSingleton<INdtBundleRuntimeStateStore, NdtBundleRuntimeStateStore>();
+builder.Services.AddSingleton<IBundleProvisionalStampCorrector, BundleProvisionalStampCorrector>();
 builder.Services.AddSingleton<IBundleEngine, NdtBundleEngine>();
 builder.Services.AddSingleton<IBundleOutputWriter, CsvBundleOutputWriter>();
 builder.Services.AddSingleton<INdtBatchStateService, NdtBatchStateService>();

@@ -2,6 +2,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
+using NdtBundleService.Services.PoLifecycle;
 using Serilog.Context;
 
 namespace NdtBundleService.Services.PlcHandshake.PlcPoEnd;
@@ -15,16 +16,19 @@ public sealed class PlcPoEndQueueWorker : BackgroundService
     private readonly IPoEndWorkflowService _poEndWorkflow;
     private readonly IActivePoPerMillService _activePoPerMill;
     private readonly IWipBundleRunningPoProvider _wipRunningPo;
+    private readonly IPoLifecycleService _poLifecycle;
     private readonly PlcHandshakeCoordinator _coordinator;
     private readonly PlcHandshakeStatusRegistry _statusRegistry;
     private readonly IOptions<NdtBundleOptions> _options;
     private readonly ILogger<PlcPoEndQueueWorker> _logger;
+    private readonly PlcPoEndAckOnlyRateLimiter _ackOnlyLogLimiter = new();
 
     public PlcPoEndQueueWorker(
         PlcPoEndQueue queue,
         IPoEndWorkflowService poEndWorkflow,
         IActivePoPerMillService activePoPerMill,
         IWipBundleRunningPoProvider wipRunningPo,
+        IPoLifecycleService poLifecycle,
         PlcHandshakeCoordinator coordinator,
         PlcHandshakeStatusRegistry statusRegistry,
         IOptions<NdtBundleOptions> options,
@@ -34,6 +38,7 @@ public sealed class PlcPoEndQueueWorker : BackgroundService
         _poEndWorkflow = poEndWorkflow;
         _activePoPerMill = activePoPerMill;
         _wipRunningPo = wipRunningPo;
+        _poLifecycle = poLifecycle;
         _coordinator = coordinator;
         _statusRegistry = statusRegistry;
         _options = options;
@@ -123,13 +128,26 @@ public sealed class PlcPoEndQueueWorker : BackgroundService
 
             // F-6.1: resolve while RunningPo is still set — before NotifyPoEndForMill clears it in the workflow.
             var po = await ResolvePoNumberAsync(request, cancellationToken).ConfigureAwait(false);
-            if (string.IsNullOrWhiteSpace(po))
+            var phase = string.IsNullOrWhiteSpace(po)
+                ? PoLifecyclePhase.Running
+                : _poLifecycle.GetPhase(request.MillNo, po);
+            var decision = PlcPoEndWorkflowGate.Decide(!string.IsNullOrWhiteSpace(po), phase);
+            if (decision == PlcPoEndWorkflowGate.Decision.AckOnlySkip)
             {
-                _logger.LogWarning(
-                    "PLC PO end workflow skipped — Mill {MillNo}, PO_Id {PoId}, no PO resolved, CorrelationId {CorrelationId}.",
-                    request.MillNo,
-                    request.PoId,
-                    request.CorrelationId);
+                var rateKey = $"{request.MillNo}|{(string.IsNullOrWhiteSpace(po) ? "_" : po)}|{phase}";
+                if (_ackOnlyLogLimiter.ShouldLog(rateKey, DateTime.UtcNow))
+                {
+                    _logger.LogWarning(
+                        "PLC PO end ack-only (workflow skipped) — Mill {MillNo}, PO {PO}, Phase {Phase}, PO_Id {PoId}, CorrelationId {CorrelationId}.",
+                        request.MillNo,
+                        string.IsNullOrWhiteSpace(po) ? "(none)" : po,
+                        phase,
+                        request.PoId,
+                        request.CorrelationId);
+                }
+
+                await _coordinator.NotifyPoEndWorkflowCompletedAsync(request.MillNo, cancellationToken)
+                    .ConfigureAwait(false);
                 return;
             }
 
@@ -142,7 +160,7 @@ public sealed class PlcPoEndQueueWorker : BackgroundService
                 po,
                 request.CorrelationId);
 
-            var result = await _poEndWorkflow.ExecuteAsync(po, request.MillNo, advancePlan, cancellationToken, request.CorrelationId)
+            var result = await _poEndWorkflow.ExecuteAsync(po!, request.MillNo, advancePlan, cancellationToken, request.CorrelationId)
                 .ConfigureAwait(false);
 
             _logger.LogInformation(
