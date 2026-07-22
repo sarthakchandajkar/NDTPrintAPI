@@ -211,6 +211,12 @@ public sealed class Phase3F6HandshakeAuditPinTests
             Task.FromResult<string?>(null);
         public void NotifyPoEndForMill(int millNo, string endedPo) { }
         public bool IsWaitingForNewWipAfterPoEnd(int millNo) => false;
+        public bool TryGetPoEndWaitContext(int millNo, out bool waitingForNewWip, out string? endedPo)
+        {
+            waitingForNewWip = false;
+            endedPo = null;
+            return true;
+        }
         public bool ResumeRunningWipForMill(int millNo) => false;
         public bool TrySetRunningPoFromWipFile(int millNo, string newPo, DateTime wipStampUtc, string wipFileName) => false;
     }

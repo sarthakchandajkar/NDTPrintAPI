@@ -506,6 +506,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                         .TryGetRunningPoForMillAsync(record.MillNo, cancellationToken)
                         .ConfigureAwait(false);
                     var waitingForWip = _wipRunningPo.IsWaitingForNewWipAfterPoEnd(record.MillNo);
+                    _wipRunningPo.TryGetPoEndWaitContext(record.MillNo, out _, out var wipEndedPo);
                     var poEndSource = MillPoEndSourceResolver.ForMill(record.MillNo, o);
                     // F-3: Plc mills with a valid slit-file PO continue bundling during WIP wait (config-gated).
                     // File mills keep the historical hard-stop byte-for-byte.
@@ -530,6 +531,27 @@ public sealed class SlitMonitoringWorker : BackgroundService
                                          && !string.IsNullOrWhiteSpace(record.PoNumber);
 
                     var effectivePo = SlitEffectivePoResolver.Resolve(record.PoNumber, runningPoFromWip);
+                    if (poEndSource == MillPoEndSource.Plc
+                        && !string.IsNullOrWhiteSpace(effectivePo)
+                        && _poLifecycle.GetPhase(record.MillNo, effectivePo) == PoLifecyclePhase.Closed)
+                    {
+                        var planSnapshot = _poPlanWipEnrichment.TryGetCachedEnrichment();
+                        if (PoPlanValidation.IsKnownPo(planSnapshot, effectivePo)
+                            && PoResumeCandidateSelector.IsEligibleForResumeCandidate(
+                                record.MillNo,
+                                effectivePo,
+                                wipEndedPo,
+                                _poLifecycle.GetClosedEntries())
+                            && _poLifecycle.TryMarkResumeCandidate(record.MillNo, effectivePo))
+                        {
+                            _logger.LogInformation(
+                                "Mill {Mill}: PO {PO} marked resume candidate from slit file {File} (awaiting WIP confirmation).",
+                                record.MillNo,
+                                effectivePo,
+                                Path.GetFileName(fileFull));
+                        }
+                    }
+
                     if (!string.IsNullOrWhiteSpace(runningPoFromWip)
                         && !string.IsNullOrWhiteSpace(record.PoNumber)
                         && !InputSlitCsvParsing.PoEquals(record.PoNumber, runningPoFromWip))
@@ -728,9 +750,24 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     sourceRowNumber++;
                 }
 
-                // F-5.2 / F-4.4: Closed-PO backfill with AutoClose — flush any reopeneds immediately.
+                // F-5.2 / F-4.4: Closed-PO backfill with AutoClose — flush orphans when guards allow.
                 foreach (var (po, mill) in pendingOrphanClose)
                 {
+                    var phase = _poLifecycle.GetPhase(mill, po);
+                    var millRunningPo = await _wipRunningPo.TryGetRunningPoForMillAsync(mill, cancellationToken).ConfigureAwait(false);
+                    await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
+                    var lastActivity = _runtimeState.GetLastActivityUtc(po, mill);
+
+                    if (!OrphanSweepGuard.ShouldSweepClosedPo(
+                            mill,
+                            po,
+                            phase,
+                            millRunningPo,
+                            lastActivity,
+                            DateTime.UtcNow,
+                            o.OrphanQuiescenceMinutes))
+                        continue;
+
                     var bundleLock = await _millBundleStateLock.AcquireAsync(mill, cancellationToken).ConfigureAwait(false);
                     try
                     {

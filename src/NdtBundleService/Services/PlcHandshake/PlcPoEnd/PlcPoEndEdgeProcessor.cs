@@ -55,7 +55,7 @@ public static class PlcPoEndEdgeProcessor
             if (tryEnqueue(request))
             {
                 logger.LogInformation(
-                    "{MillName}: PO end event enqueued — Mill {MillNo}, PO_Id {PoId}, CorrelationId {CorrelationId}.",
+                    "{MillName}: PO change event enqueued — Mill {MillNo}, PO_Id {PoId}, CorrelationId {CorrelationId}.",
                     input.MillName,
                     input.MillNo,
                     input.PoId,
@@ -64,7 +64,7 @@ public static class PlcPoEndEdgeProcessor
             else
             {
                 logger.LogWarning(
-                    "{MillName}: PO end event not enqueued (mill {MillNo} already queued or processing) — PO_Id {PoId}, CorrelationId {CorrelationId}.",
+                    "{MillName}: PO change event not enqueued (mill {MillNo} already queued or processing) — PO_Id {PoId}, CorrelationId {CorrelationId}.",
                     input.MillName,
                     input.MillNo,
                     input.PoId,

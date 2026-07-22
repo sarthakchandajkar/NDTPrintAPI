@@ -222,6 +222,12 @@ public sealed class PlcHandshakeSequencePinTests
         public void NotifyPoEndForMill(int millNo, string endedPo) { }
 
         public bool IsWaitingForNewWipAfterPoEnd(int millNo) => false;
+        public bool TryGetPoEndWaitContext(int millNo, out bool waitingForNewWip, out string? endedPo)
+        {
+            waitingForNewWip = false;
+            endedPo = null;
+            return true;
+        }
 
         public bool ResumeRunningWipForMill(int millNo) => false;
 

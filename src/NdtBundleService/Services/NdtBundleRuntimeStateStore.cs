@@ -19,6 +19,11 @@ public interface INdtBundleRuntimeStateStore
 
     void ClearRunningTotal(string poNumber, int millNo);
 
+    /// <summary>Clears open partial state (RunningTotal, sizeCounts, provisional) without altering printed sequence counters.</summary>
+    void ClearOpenAccumulation(string poNumber, int millNo);
+
+    DateTime GetLastActivityUtc(string poNumber, int millNo);
+
     void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int batchNumberForRow, out int totalSoFar);
 
     /// <summary>
@@ -147,6 +152,25 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
     {
         lock (_stateLock)
             GetSlot(poNumber, millNo).RunningTotal = 0;
+    }
+
+    public void ClearOpenAccumulation(string poNumber, int millNo)
+    {
+        lock (_stateLock)
+        {
+            var slot = GetSlot(poNumber, millNo);
+            slot.RunningTotal = 0;
+            slot.ProvisionalBatchNo = 0;
+            slot.SizeCounts.Clear();
+            slot.LastRecord = null;
+            TouchSlotActivity(slot);
+        }
+    }
+
+    public DateTime GetLastActivityUtc(string poNumber, int millNo)
+    {
+        lock (_stateLock)
+            return GetSlot(poNumber, millNo).LastActivityUtc;
     }
 
     public Task SyncBatchSequencesFromBundlesAsync(CancellationToken cancellationToken) =>

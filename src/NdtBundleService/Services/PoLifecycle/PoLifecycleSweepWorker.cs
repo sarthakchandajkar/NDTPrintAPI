@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
@@ -20,6 +19,7 @@ public sealed class PoLifecycleSweepWorker : BackgroundService
     private readonly IBundleEngine _bundleEngine;
     private readonly IBundleOutputWriter _outputWriter;
     private readonly IMillBundleStateLock _millLock;
+    private readonly IWipBundleRunningPoProvider _wipRunningPo;
     private readonly IOptionsMonitor<NdtBundleOptions> _options;
     private readonly ILogger<PoLifecycleSweepWorker> _logger;
 
@@ -31,6 +31,7 @@ public sealed class PoLifecycleSweepWorker : BackgroundService
         IBundleEngine bundleEngine,
         IBundleOutputWriter outputWriter,
         IMillBundleStateLock millLock,
+        IWipBundleRunningPoProvider wipRunningPo,
         IOptionsMonitor<NdtBundleOptions> options,
         ILogger<PoLifecycleSweepWorker> logger)
     {
@@ -41,6 +42,7 @@ public sealed class PoLifecycleSweepWorker : BackgroundService
         _bundleEngine = bundleEngine;
         _outputWriter = outputWriter;
         _millLock = millLock;
+        _wipRunningPo = wipRunningPo;
         _options = options;
         _logger = logger;
     }
@@ -91,7 +93,7 @@ public sealed class PoLifecycleSweepWorker : BackgroundService
             if (MillPoEndSourceResolver.ForMill(entry.MillNo, opts) != MillPoEndSource.Plc)
                 continue;
 
-            await CloseOrphanIfNeededAsync(entry, cancellationToken).ConfigureAwait(false);
+            await CloseOrphanIfNeededAsync(entry, now, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -133,8 +135,24 @@ public sealed class PoLifecycleSweepWorker : BackgroundService
         }
     }
 
-    private async Task CloseOrphanIfNeededAsync(PoLifecycleDrainEntry entry, CancellationToken cancellationToken)
+    private async Task CloseOrphanIfNeededAsync(PoLifecycleDrainEntry entry, DateTime utcNow, CancellationToken cancellationToken)
     {
+        var phase = _lifecycle.GetPhase(entry.MillNo, entry.PoNumber);
+        var millRunningPo = await _wipRunningPo
+            .TryGetRunningPoForMillAsync(entry.MillNo, cancellationToken)
+            .ConfigureAwait(false);
+        var opts = _options.CurrentValue;
+
+        if (!OrphanSweepGuard.ShouldSweepClosedPo(
+                entry.MillNo,
+                entry.PoNumber,
+                phase,
+                millRunningPo,
+                _runtimeState.GetLastActivityUtc(entry.PoNumber, entry.MillNo),
+                utcNow,
+                opts.OrphanQuiescenceMinutes))
+            return;
+
         await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
 
         var sizeCounts = _runtimeState.GetSizeCounts(entry.PoNumber, entry.MillNo);
@@ -149,6 +167,20 @@ public sealed class PoLifecycleSweepWorker : BackgroundService
             var bundleLock = await _millLock.AcquireAsync(entry.MillNo, cancellationToken).ConfigureAwait(false);
             try
             {
+                phase = _lifecycle.GetPhase(entry.MillNo, entry.PoNumber);
+                millRunningPo = await _wipRunningPo
+                    .TryGetRunningPoForMillAsync(entry.MillNo, cancellationToken)
+                    .ConfigureAwait(false);
+                if (!OrphanSweepGuard.ShouldSweepClosedPo(
+                        entry.MillNo,
+                        entry.PoNumber,
+                        phase,
+                        millRunningPo,
+                        _runtimeState.GetLastActivityUtc(entry.PoNumber, entry.MillNo),
+                        utcNow,
+                        opts.OrphanQuiescenceMinutes))
+                    return;
+
                 sizeCounts = _runtimeState.GetSizeCounts(entry.PoNumber, entry.MillNo);
                 running = _runtimeState.GetRunningTotal(entry.PoNumber, entry.MillNo);
                 hasOpen = running > 0 || sizeCounts.Values.Any(v => v > 0);

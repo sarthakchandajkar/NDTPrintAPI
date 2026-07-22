@@ -146,6 +146,8 @@ public sealed class CsvBundleOutputWriterPrintStatusTests
             Task.FromResult<(string BundleNo, int EngineSequence, int PlcTotal)?>(null);
         public Task<PlcCsvReconResult?> TryReconcilePlcClosedBundleAsync(string poNumber, int millNo, int slitSum, CancellationToken cancellationToken) =>
             Task.FromResult<PlcCsvReconResult?>(null);
+        public Task<PlcCsvReconResult?> TryForceFinalizeAwaitingReconOnReopenAsync(string poNumber, int millNo, CancellationToken cancellationToken) =>
+            Task.FromResult<PlcCsvReconResult?>(null);
         public Task<IReadOnlyList<NdtBundleRecord>> GetStuckPrintsAsync(TimeSpan olderThan, CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<NdtBundleRecord>>(Array.Empty<NdtBundleRecord>());
     }

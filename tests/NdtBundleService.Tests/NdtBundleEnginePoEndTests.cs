@@ -147,6 +147,8 @@ public sealed class NdtBundleEnginePoEndTests
         public int GetRunningTotal(string poNumber, int millNo) => Slot(poNumber, millNo).RunningTotal;
 
         public void ClearRunningTotal(string poNumber, int millNo) => Slot(poNumber, millNo).RunningTotal = 0;
+        public void ClearOpenAccumulation(string poNumber, int millNo) => ClearRunningTotal(poNumber, millNo);
+        public DateTime GetLastActivityUtc(string poNumber, int millNo) => DateTime.UtcNow;
 
         public Task SyncBatchSequencesFromBundlesAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 

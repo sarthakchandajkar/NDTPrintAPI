@@ -189,6 +189,9 @@ public sealed class PoEndImmediateRemainderTests
         public Task<PlcCsvReconResult?> TryReconcilePlcClosedBundleAsync(
             string poNumber, int millNo, int slitSum, CancellationToken cancellationToken) =>
             Task.FromResult<PlcCsvReconResult?>(null);
+        public Task<PlcCsvReconResult?> TryForceFinalizeAwaitingReconOnReopenAsync(
+            string poNumber, int millNo, CancellationToken cancellationToken) =>
+            Task.FromResult<PlcCsvReconResult?>(null);
     }
 
     private sealed class RecordingWip : IWipBundleRunningPoProvider
@@ -198,6 +201,12 @@ public sealed class PoEndImmediateRemainderTests
             Task.FromResult<string?>("1000060163");
         public void NotifyPoEndForMill(int millNo, string endedPo) => Waiting = true;
         public bool IsWaitingForNewWipAfterPoEnd(int millNo) => Waiting;
+        public bool TryGetPoEndWaitContext(int millNo, out bool waitingForNewWip, out string? endedPo)
+        {
+            waitingForNewWip = Waiting;
+            endedPo = null;
+            return true;
+        }
         public bool ResumeRunningWipForMill(int millNo) => false;
         public bool TrySetRunningPoFromWipFile(int millNo, string newPo, DateTime wipStampUtc, string wipFileName) => false;
     }
@@ -253,6 +262,8 @@ public sealed class PoEndImmediateRemainderTests
             _sizes[Key(poNumber, millNo)] = new Dictionary<string, int>(counts, StringComparer.OrdinalIgnoreCase);
         public int GetRunningTotal(string poNumber, int millNo) => 0;
         public void ClearRunningTotal(string poNumber, int millNo) { }
+        public void ClearOpenAccumulation(string poNumber, int millNo) => ClearRunningTotal(poNumber, millNo);
+        public DateTime GetLastActivityUtc(string poNumber, int millNo) => DateTime.UtcNow;
         public void AdvanceOnPoEnd(string poNumber, int millNo, int threshold) { }
         public BundleCloseAllocation CloseBundle(string poNumber, int millNo, int closedTotalPcs, int threshold)
         {

@@ -153,6 +153,12 @@ public class NdtBundleOptions
     /// </summary>
     public bool AutoCloseOrphanBundles { get; set; } = true;
 
+    /// <summary>
+    /// Minutes a PO must remain <c>Closed</c> before the orphan sweep may auto-close open partials.
+    /// Defense-in-depth guard; reopen and running-PO checks apply independently.
+    /// </summary>
+    public int OrphanQuiescenceMinutes { get; set; } = 15;
+
     /// <summary>Seconds between drain-expiry and orphan-sweep passes. Minimum 5.</summary>
     public int PoLifecycleSweepIntervalSeconds { get; set; } = 30;
 

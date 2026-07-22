@@ -12,6 +12,14 @@ public interface IPoLifecycleService
     /// <summary>Marks the PO closed after drain flush/sweep. No-op when not draining.</summary>
     bool TryMarkClosed(int millNo, string poNumber);
 
+    /// <summary>Reopens a Closed PO for hold/resume cycles. No-op when not Closed or not a Plc mill.</summary>
+    bool TryReopen(int millNo, string poNumber);
+
+    /// <summary>Marks a Closed PO as a resume candidate (slit hint; reopen still requires WIP confirmation).</summary>
+    bool TryMarkResumeCandidate(int millNo, string poNumber);
+
+    bool IsResumeCandidate(int millNo, string poNumber);
+
     PoLifecyclePhase GetPhase(int millNo, string poNumber);
 
     /// <summary>Draining entries whose drain window has expired (Plc mills only).</summary>

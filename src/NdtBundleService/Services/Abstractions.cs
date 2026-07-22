@@ -88,6 +88,15 @@ public interface INdtBundleRepository
         int millNo,
         int slitSum,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// On PO reopen: force-finalize any awaiting recon for this PO/mill using slit rows received so far.
+    /// Clears <c>Awaiting_Csv_Recon</c>; logs WRN when PLC vs slit totals differ.
+    /// </summary>
+    Task<PlcCsvReconResult?> TryForceFinalizeAwaitingReconOnReopenAsync(
+        string poNumber,
+        int millNo,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>Result of reconciling a late Input Slit sum against a PLC-closed bundle.</summary>
@@ -328,6 +337,9 @@ public interface IWipBundleRunningPoProvider
 
     /// <summary>True when PO end completed but no qualifying new WIP bundle file has arrived yet for this mill.</summary>
     bool IsWaitingForNewWipAfterPoEnd(int millNo);
+
+    /// <summary>Post–PO-end wait context for slit-file adoption and orphan guards.</summary>
+    bool TryGetPoEndWaitContext(int millNo, out bool waitingForNewWip, out string? endedPo);
 
     /// <summary>
     /// Clears post–PO-end WIP wait for a mill and re-seeds running PO from the latest WIP bundle file.

@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Services.FileBasedPoChange;
+using NdtBundleService.Services.PoLifecycle;
 
 namespace NdtBundleService.Services;
 
@@ -23,6 +24,7 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
 
     private readonly IOptions<NdtBundleOptions> _options;
     private readonly FileBasedPoChangeQueue? _fileBasedPoChangeQueue;
+    private readonly PoReopenService? _poReopen;
     private readonly ILogger<WipBundleRunningPoProvider> _logger;
 
     private readonly object _lock = new();
@@ -37,11 +39,13 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
     public WipBundleRunningPoProvider(
         IOptions<NdtBundleOptions> options,
         ILogger<WipBundleRunningPoProvider> logger,
-        FileBasedPoChangeQueue? fileBasedPoChangeQueue = null)
+        FileBasedPoChangeQueue? fileBasedPoChangeQueue = null,
+        PoReopenService? poReopen = null)
     {
         _options = options;
         _logger = logger;
         _fileBasedPoChangeQueue = fileBasedPoChangeQueue;
+        _poReopen = poReopen;
 
         TryStartWatchers();
     }
@@ -115,6 +119,22 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
         }
     }
 
+    public bool TryGetPoEndWaitContext(int millNo, out bool waitingForNewWip, out string? endedPo)
+    {
+        waitingForNewWip = false;
+        endedPo = null;
+        if (millNo is < 1 or > 4)
+            return false;
+
+        lock (_lock)
+        {
+            var st = _mills[millNo - 1];
+            waitingForNewWip = st.WaitingForNewWip;
+            endedPo = st.EndedPo;
+            return true;
+        }
+    }
+
     public bool ResumeRunningWipForMill(int millNo)
     {
         if (millNo is < 1 or > 4)
@@ -142,6 +162,8 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
                 st.RunningPo = InputSlitCsvParsing.NormalizePo(best.PoNumber);
                 st.RunningWipStampUtc = best.StampUtc;
             }
+
+            TryReopenRunningPoIfClosed(millNo, st.RunningPo);
 
             _logger.LogWarning(
                 "Mill {Mill}: resumed WIP tracking after false PO end (ended PO was {EndedPo}); running PO is now {RunningPo} from latest WIP file.",
@@ -379,10 +401,12 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
         st.EndedPo = null;
 
         _logger.LogInformation(
-            "Mill {Mill}: new running PO {Po} accepted from WIP bundle file {File} after PO end.",
+            "Mill {Mill}: new running PO {Po} accepted from WIP bundle file {File} after PO change.",
             millNo,
             normalized,
             fileName);
+
+        TryReopenRunningPoIfClosed(millNo, normalized);
 
         return true;
     }
@@ -410,6 +434,7 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
             st.RunningWipStampUtc = wipStampUtc;
             st.WaitingForNewWip = false;
             st.EndedPo = null;
+            TryReopenRunningPoIfClosed(millNo, normalized);
             return true;
         }
     }
@@ -516,7 +541,16 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
             millNo,
             wipFileName,
             normalizedNew);
+        TryReopenRunningPoIfClosed(millNo, normalizedNew);
         return true;
+    }
+
+    private void TryReopenRunningPoIfClosed(int millNo, string? runningPo)
+    {
+        if (_poReopen is null || string.IsNullOrWhiteSpace(runningPo))
+            return;
+
+        _poReopen.TryReopenIfClosed(millNo, runningPo, runningPo);
     }
 
     private DateTime FindLatestWipStampUtcForMill(int millNo)

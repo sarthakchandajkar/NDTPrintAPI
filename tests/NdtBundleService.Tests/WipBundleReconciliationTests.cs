@@ -214,6 +214,8 @@ public sealed class WipBundleReconciliationTests : IDisposable
 
         public Task<PlcCsvReconResult?> TryReconcilePlcClosedBundleAsync(string poNumber, int millNo, int slitSum, CancellationToken cancellationToken) =>
             Task.FromResult<PlcCsvReconResult?>(null);
+        public Task<PlcCsvReconResult?> TryForceFinalizeAwaitingReconOnReopenAsync(string poNumber, int millNo, CancellationToken cancellationToken) =>
+            Task.FromResult<PlcCsvReconResult?>(null);
 
         public Task<NdtBundleRecord?> GetLatestPrintedBundleForMillAsync(int millNo, CancellationToken cancellationToken) =>
             Task.FromResult<NdtBundleRecord?>(null);
@@ -255,6 +257,12 @@ public sealed class WipBundleReconciliationTests : IDisposable
         }
 
         public bool IsWaitingForNewWipAfterPoEnd(int millNo) => false;
+        public bool TryGetPoEndWaitContext(int millNo, out bool waitingForNewWip, out string? endedPo)
+        {
+            waitingForNewWip = false;
+            endedPo = null;
+            return true;
+        }
         public bool ResumeRunningWipForMill(int millNo) => false;
         public bool TrySetRunningPoFromWipFile(int millNo, string newPo, DateTime wipStampUtc, string wipFileName) => true;
         public void NotifyPoEndForMill(int millNo, string endedPo) { }

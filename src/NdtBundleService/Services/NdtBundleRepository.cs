@@ -702,6 +702,41 @@ WHERE Bundle_No = @BundleNo;";
         }
     }
 
+    public async Task<PlcCsvReconResult?> TryForceFinalizeAwaitingReconOnReopenAsync(
+        string poNumber,
+        int millNo,
+        CancellationToken cancellationToken)
+    {
+        var awaiting = await TryGetAwaitingPlcReconBatchAsync(poNumber, millNo, cancellationToken)
+            .ConfigureAwait(false);
+        if (awaiting is null)
+            return null;
+
+        var slits = await GetSlitsForBatchAsync(awaiting.Value.BundleNo, cancellationToken).ConfigureAwait(false);
+        var slitSum = slits.Sum(s => s.NdtPipes);
+
+        var result = await TryReconcilePlcClosedBundleAsync(poNumber, millNo, slitSum, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (result is { CountDiscrepancy: true })
+        {
+            _logger.LogWarning(
+                "PO reopen force-finalized awaiting recon for bundle {BundleNo}: plc={PlcTotal} slitSum={SlitSum} (rows received so far).",
+                result.BundleNo,
+                result.PlcTotal,
+                result.SlitSum);
+        }
+        else if (result is not null)
+        {
+            _logger.LogInformation(
+                "PO reopen force-finalized awaiting recon for bundle {BundleNo} with slit sum {SlitSum}.",
+                result.BundleNo,
+                result.SlitSum);
+        }
+
+        return result;
+    }
+
     private static bool TryParseEngineSequenceFromBundleNo(string bundleNo, out int sequence)
     {
         sequence = 0;

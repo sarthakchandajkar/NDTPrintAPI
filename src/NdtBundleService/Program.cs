@@ -70,6 +70,7 @@ builder.Services.AddSingleton<IMillNdtCountReader, S7MillNdtCountReader>();
 builder.Services.AddSingleton<IMillSlitLiveNdtAccumulator, MillSlitLiveNdtAccumulator>();
 builder.Services.AddSingleton<IMillBundleStateLock, MillBundleStateLock>();
 builder.Services.AddSingleton<IPoLifecycleService, PoLifecycleService>();
+builder.Services.AddSingleton<PoReopenService>();
 builder.Services.AddSingleton<PoEndWorkflowService>();
 builder.Services.AddSingleton<IPoEndWorkflowService>(sp => sp.GetRequiredService<PoEndWorkflowService>());
 builder.Services.AddSingleton<MillPoEndTransitionDetector>();

@@ -51,7 +51,7 @@ public sealed class PoChangeHandler : IPoChangeHandler
         if (!poByMill.TryGetValue(millNo, out var po) || string.IsNullOrWhiteSpace(po))
         {
             _logger.LogWarning(
-                "{MillName}: PO change trigger active but no PO from latest Input Slit CSV for Mill {MillNo}; PO end workflow skipped.",
+                "{MillName}: PO change trigger active but no PO from latest Input Slit CSV for Mill {MillNo}; PO change workflow skipped.",
                 mill.Name,
                 millNo);
             return;
@@ -61,7 +61,7 @@ public sealed class PoChangeHandler : IPoChangeHandler
         var advancePlan = handshake.AdvancePoPlanFileOnPoEnd && _currentPoPlanService != null;
 
         _logger.LogInformation(
-            "{MillName}: running PO end workflow for PO {PO} (advance plan file: {Advance}).",
+            "{MillName}: running PO change workflow for PO {PO} (advance plan file: {Advance}).",
             mill.Name,
             po,
             advancePlan);
@@ -69,11 +69,11 @@ public sealed class PoChangeHandler : IPoChangeHandler
         try
         {
             await _poEndWorkflow.ExecuteAsync(po, millNo, advancePlan, cancellationToken).ConfigureAwait(false);
-            _logger.LogInformation("{MillName}: PO end workflow completed for PO {PO}.", mill.Name, po);
+            _logger.LogInformation("{MillName}: PO change workflow completed for PO {PO}.", mill.Name, po);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "{MillName}: PO end workflow failed for PO {PO}.", mill.Name, po);
+            _logger.LogError(ex, "{MillName}: PO change workflow failed for PO {PO}.", mill.Name, po);
         }
     }
 }

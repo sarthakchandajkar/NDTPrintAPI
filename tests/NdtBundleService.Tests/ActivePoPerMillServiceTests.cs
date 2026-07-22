@@ -101,6 +101,13 @@ public sealed class ActivePoPerMillServiceTests : IDisposable
 
         public bool IsWaitingForNewWipAfterPoEnd(int millNo) => false;
 
+        public bool TryGetPoEndWaitContext(int millNo, out bool waitingForNewWip, out string? endedPo)
+        {
+            waitingForNewWip = false;
+            endedPo = null;
+            return true;
+        }
+
         public bool ResumeRunningWipForMill(int millNo) => false;
 
         public bool TrySetRunningPoFromWipFile(int millNo, string newPo, DateTime wipStampUtc, string wipFileName) => false;

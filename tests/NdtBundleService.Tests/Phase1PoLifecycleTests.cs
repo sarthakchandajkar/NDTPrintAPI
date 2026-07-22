@@ -195,6 +195,7 @@ public sealed class Phase1PoLifecycleTests
             engine,
             output,
             new MillBundleStateLock(),
+            wip,
             Monitor(opts),
             NullLogger<PoLifecycleSweepWorker>.Instance);
 
@@ -244,6 +245,7 @@ public sealed class Phase1PoLifecycleTests
             engine,
             output,
             new MillBundleStateLock(),
+            wip,
             Monitor(opts),
             NullLogger<PoLifecycleSweepWorker>.Instance);
         await sweep.SweepOnceAsync(CancellationToken.None);
@@ -277,6 +279,7 @@ public sealed class Phase1PoLifecycleTests
             new RecordingWipProvider("PO-FILE"),
             lifecycle,
             opts);
+        var wipFile = new RecordingWipProvider("PO-FILE");
         var sweep = new PoLifecycleSweepWorker(
             lifecycle,
             workflow,
@@ -285,6 +288,7 @@ public sealed class Phase1PoLifecycleTests
             engine,
             new CapturingOutputWriter(_ => { }, closed),
             new MillBundleStateLock(),
+            wipFile,
             Monitor(opts),
             NullLogger<PoLifecycleSweepWorker>.Instance);
 
@@ -342,6 +346,7 @@ public sealed class Phase1PoLifecycleTests
             PoEndFlushMode = flushMode,
             PoEndDrainMinutes = drainMinutes,
             AutoCloseOrphanBundles = true,
+            OrphanQuiescenceMinutes = 0,
             PlcHandshake = new PlcHandshakeOptions
             {
                 Enabled = true,
@@ -386,6 +391,13 @@ public sealed class Phase1PoLifecycleTests
         }
 
         public bool IsWaitingForNewWipAfterPoEnd(int millNo) => _waiting;
+
+        public bool TryGetPoEndWaitContext(int millNo, out bool waitingForNewWip, out string? endedPo)
+        {
+            waitingForNewWip = _waiting;
+            endedPo = null;
+            return true;
+        }
 
         public bool ResumeRunningWipForMill(int millNo)
         {
@@ -459,6 +471,9 @@ public sealed class Phase1PoLifecycleTests
         public Task<PlcCsvReconResult?> TryReconcilePlcClosedBundleAsync(
             string poNumber, int millNo, int slitSum, CancellationToken cancellationToken) =>
             Task.FromResult<PlcCsvReconResult?>(null);
+        public Task<PlcCsvReconResult?> TryForceFinalizeAwaitingReconOnReopenAsync(
+            string poNumber, int millNo, CancellationToken cancellationToken) =>
+            Task.FromResult<PlcCsvReconResult?>(null);
     }
 
     private sealed class CapturingOutputWriter : IBundleOutputWriter
@@ -530,6 +545,13 @@ public sealed class Phase1PoLifecycleTests
         public int GetBatchOffset(string poNumber, int millNo) => Slot(poNumber, millNo).BatchOffset;
         public int GetRunningTotal(string poNumber, int millNo) => Slot(poNumber, millNo).RunningTotal;
         public void ClearRunningTotal(string poNumber, int millNo) => Slot(poNumber, millNo).RunningTotal = 0;
+        public void ClearOpenAccumulation(string poNumber, int millNo)
+        {
+            var slot = Slot(poNumber, millNo);
+            slot.RunningTotal = 0;
+            slot.SizeCounts.Clear();
+        }
+        public DateTime GetLastActivityUtc(string poNumber, int millNo) => DateTime.UtcNow;
         public Task SyncBatchSequencesFromBundlesAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
         public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int batchNumberForRow, out int totalSoFar)

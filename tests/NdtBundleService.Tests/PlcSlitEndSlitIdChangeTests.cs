@@ -225,6 +225,8 @@ public sealed class PlcSlitEndSlitIdChangeTests
 
         public int GetRunningTotal(string poNumber, int millNo) => 0;
         public void ClearRunningTotal(string poNumber, int millNo) { }
+        public void ClearOpenAccumulation(string poNumber, int millNo) => ClearRunningTotal(poNumber, millNo);
+        public DateTime GetLastActivityUtc(string poNumber, int millNo) => DateTime.UtcNow;
         public void AdvanceOnPoEnd(string poNumber, int millNo, int threshold) { }
         public BundleCloseAllocation CloseBundle(string poNumber, int millNo, int closedTotalPcs, int threshold) =>
             new(1, 0);
@@ -293,6 +295,9 @@ public sealed class PlcSlitEndSlitIdChangeTests
             Task.FromResult<(string, int, int)?>(null);
         public Task<PlcCsvReconResult?> TryReconcilePlcClosedBundleAsync(
             string poNumber, int millNo, int slitSum, CancellationToken cancellationToken) =>
+            Task.FromResult<PlcCsvReconResult?>(null);
+        public Task<PlcCsvReconResult?> TryForceFinalizeAwaitingReconOnReopenAsync(
+            string poNumber, int millNo, CancellationToken cancellationToken) =>
             Task.FromResult<PlcCsvReconResult?>(null);
     }
 

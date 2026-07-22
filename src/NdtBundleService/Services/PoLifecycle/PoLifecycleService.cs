@@ -57,6 +57,65 @@ public sealed class PoLifecycleService : IPoLifecycleService
         }
     }
 
+    public bool TryReopen(int millNo, string poNumber)
+    {
+        if (!IsPlcLifecycleMill(millNo))
+            return false;
+
+        var po = InputSlitCsvParsing.NormalizePo(poNumber);
+        if (string.IsNullOrWhiteSpace(po) || millNo is < 1 or > 4)
+            return false;
+
+        lock (_lock)
+        {
+            if (!_entries.TryGetValue(MakeKey(millNo, po), out var entry))
+                return false;
+
+            if (entry.Phase != PoLifecyclePhase.Closed)
+                return false;
+
+            entry.Phase = PoLifecyclePhase.Running;
+            entry.IsResumeCandidate = false;
+            return true;
+        }
+    }
+
+    public bool TryMarkResumeCandidate(int millNo, string poNumber)
+    {
+        if (!IsPlcLifecycleMill(millNo))
+            return false;
+
+        var po = InputSlitCsvParsing.NormalizePo(poNumber);
+        if (string.IsNullOrWhiteSpace(po) || millNo is < 1 or > 4)
+            return false;
+
+        lock (_lock)
+        {
+            if (!_entries.TryGetValue(MakeKey(millNo, po), out var entry))
+                return false;
+
+            if (entry.Phase != PoLifecyclePhase.Closed)
+                return false;
+
+            entry.IsResumeCandidate = true;
+            return true;
+        }
+    }
+
+    public bool IsResumeCandidate(int millNo, string poNumber)
+    {
+        var po = InputSlitCsvParsing.NormalizePo(poNumber);
+        if (string.IsNullOrWhiteSpace(po) || millNo is < 1 or > 4)
+            return false;
+
+        lock (_lock)
+        {
+            return _entries.TryGetValue(MakeKey(millNo, po), out var entry)
+                   && entry.Phase == PoLifecyclePhase.Closed
+                   && entry.IsResumeCandidate;
+        }
+    }
+
     public PoLifecyclePhase GetPhase(int millNo, string poNumber)
     {
         var po = InputSlitCsvParsing.NormalizePo(poNumber);
@@ -104,5 +163,6 @@ public sealed class PoLifecycleService : IPoLifecycleService
         public string PoNumber { get; set; } = string.Empty;
         public DateTime EndedAtUtc { get; set; }
         public PoLifecyclePhase Phase { get; set; }
+        public bool IsResumeCandidate { get; set; }
     }
 }

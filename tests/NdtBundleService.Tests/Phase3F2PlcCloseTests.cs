@@ -181,6 +181,8 @@ public sealed class Phase3F2PlcCloseTests
         public int GetBatchOffset(string poNumber, int millNo) => 0;
         public int GetRunningTotal(string poNumber, int millNo) => 0;
         public void ClearRunningTotal(string poNumber, int millNo) { }
+        public void ClearOpenAccumulation(string poNumber, int millNo) => ClearRunningTotal(poNumber, millNo);
+        public DateTime GetLastActivityUtc(string poNumber, int millNo) => DateTime.UtcNow;
         public Task SyncBatchSequencesFromBundlesAsync(CancellationToken cancellationToken) => Task.CompletedTask;
         public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int batchNumberForRow, out int totalSoFar)
         {
