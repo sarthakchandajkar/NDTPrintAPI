@@ -11,14 +11,14 @@ namespace NdtBundleService.Services.PoLifecycle;
 public sealed class PoReopenService
 {
     private readonly IPoLifecycleService _lifecycle;
-    private readonly INdtBundleRuntimeStateStore _runtimeState;
+    private readonly Lazy<INdtBundleRuntimeStateStore> _runtimeState;
     private readonly INdtBundleRepository _bundleRepository;
     private readonly IOptionsMonitor<NdtBundleOptions> _options;
     private readonly ILogger<PoReopenService> _logger;
 
     public PoReopenService(
         IPoLifecycleService lifecycle,
-        INdtBundleRuntimeStateStore runtimeState,
+        Lazy<INdtBundleRuntimeStateStore> runtimeState,
         INdtBundleRepository bundleRepository,
         IOptionsMonitor<NdtBundleOptions> options,
         ILogger<PoReopenService> logger)
@@ -70,7 +70,7 @@ public sealed class PoReopenService
                 millNo);
         }
 
-        _runtimeState.ClearOpenAccumulation(po, millNo);
+        _runtimeState.Value.ClearOpenAccumulation(po, millNo);
 
         _logger.LogWarning(
             "PO reopened (was Closed): PO {PO} Mill {Mill}.",

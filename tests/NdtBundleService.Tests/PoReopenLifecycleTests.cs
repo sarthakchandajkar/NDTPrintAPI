@@ -314,7 +314,7 @@ public sealed class PoReopenLifecycleTests
         NdtBundleOptions opts) =>
         new(
             lifecycle,
-            runtime,
+            new Lazy<INdtBundleRuntimeStateStore>(() => runtime),
             repo,
             Monitor(opts),
             NullLogger<PoReopenService>.Instance);
