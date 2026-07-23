@@ -467,7 +467,16 @@ public sealed class Phase1PoLifecycleTests
         public Task<int> MarkManualReviewAsync(string poNumber, int millNo, CancellationToken cancellationToken) => Task.FromResult(0);
         public Task<(string BundleNo, int EngineSequence, int PlcTotal)?> TryGetAwaitingPlcReconBatchAsync(
             string poNumber, int millNo, CancellationToken cancellationToken) =>
-            Task.FromResult<(string, int, int)?>(null);
+            Task.FromResult<(string BundleNo, int EngineSequence, int PlcTotal)?>(null);
+        public Task<IReadOnlyList<PlcCsvReconAwaitingBundle>> ListAwaitingPlcReconBatchesAsync(
+            string poNumber, int millNo, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<PlcCsvReconAwaitingBundle>>(Array.Empty<PlcCsvReconAwaitingBundle>());
+        public Task<PlcCsvReconResult?> TryFinalizePlcReconBundleAsync(
+            string bundleNo, int slitSum, int reconWindowMinutes, DateTime utcNow, bool force, CancellationToken cancellationToken) =>
+            Task.FromResult<PlcCsvReconResult?>(null);
+        public Task<IReadOnlyList<PlcCsvReconResult>> TryFinalizeReadyPlcReconBundlesAsync(
+            string poNumber, int millNo, int reconWindowMinutes, DateTime utcNow, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<PlcCsvReconResult>>(Array.Empty<PlcCsvReconResult>());
         public Task<PlcCsvReconResult?> TryReconcilePlcClosedBundleAsync(
             string poNumber, int millNo, int slitSum, CancellationToken cancellationToken) =>
             Task.FromResult<PlcCsvReconResult?>(null);

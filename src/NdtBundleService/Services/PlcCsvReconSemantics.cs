@@ -22,4 +22,26 @@ public static class PlcCsvReconSemantics
             CountDiscrepancy: slitSum != plcTotal,
             ClearsAwaitingCsvRecon: true,
             UpdatesStoredTotal: false);
+
+    public static PlcCsvReconApplyResult EvaluateFinalize(
+        string bundleNo,
+        int plcTotal,
+        int slitSum,
+        DateTime printedAtUtc,
+        int reconWindowMinutes,
+        DateTime utcNow,
+        bool force) =>
+        new(
+            BundleNo: bundleNo,
+            PlcTotal: plcTotal,
+            SlitSum: slitSum,
+            CountDiscrepancy: slitSum != plcTotal,
+            ClearsAwaitingCsvRecon: force
+                                   || PlcCsvReconFifo.ShouldFinalize(
+                                       plcTotal,
+                                       slitSum,
+                                       printedAtUtc,
+                                       reconWindowMinutes,
+                                       utcNow),
+            UpdatesStoredTotal: false);
 }

@@ -173,6 +173,11 @@ export interface ReconcileBundle {
   slitFinishTime?: string | null;
   /** When slit times are missing, used for dashboard date filtering. */
   printedAt?: string | null;
+  manualRecon?: boolean;
+  manualReconReason?: string | null;
+  manualReconOriginalTotal?: number | null;
+  postReconCsvSum?: number | null;
+  awaitingCsvRecon?: boolean;
 }
 
 export interface ReconcileSlitItem {
@@ -451,6 +456,24 @@ export const api = {
       { method: "POST" }
     ),
   reconcileBundles: () => fetchApi<ReconcileBundle[]>("/api/Reconcile/bundles"),
+  manualBundleReconcile: (
+    ndtBatchNo: string,
+    correctedTotal: number,
+    reason: string,
+    reconciledBy: string
+  ) =>
+    fetchApi<{
+      message?: string;
+      printSuccess?: boolean;
+      printMessage?: string;
+      correctedTotal?: number;
+      originalTotal?: number;
+      forceFinalized?: boolean;
+      countDiscrepancyLogged?: boolean;
+    }>("/api/Reconcile/manual-bundle-reconcile", {
+      method: "POST",
+      body: JSON.stringify({ ndtBatchNo, correctedTotal, reason, reconciledBy }),
+    }),
   reconcile: (ndtBatchNo: string, newNdtPipes: number) =>
     fetchApi<{ message?: string; csvFilesUpdated?: number }>("/api/Reconcile/reconcile", {
       method: "POST",

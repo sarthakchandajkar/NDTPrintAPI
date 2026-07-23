@@ -1084,12 +1084,14 @@ ORDER BY ImportedAtUtc, Source_File, Source_Row_Number;";
             computedTotals.Add(running);
 
         // 3) Get existing bundle rows in sequence order for this PO/mill.
-        var existing = new List<(long Id, string BundleNo, int CurrentTotal)>();
+        var existing = new List<(long Id, string BundleNo, int CurrentTotal, bool ManualRecon, string? ManualReconReason)>();
         const string sqlExisting = @"
 SELECT
     NDTBundle_ID,
     Bundle_No,
-    COALESCE(Total_NDT_Pcs, 0) AS Total_NDT_Pcs
+    COALESCE(Total_NDT_Pcs, 0) AS Total_NDT_Pcs,
+    COALESCE(Manual_Recon, 0) AS Manual_Recon,
+    Manual_Recon_Reason
 FROM dbo.NDT_Bundle
 WHERE (PO_Number = @PoRequested OR PO_Number = @PoNormalized)
   AND Mill_No = @MillNo
@@ -1107,7 +1109,9 @@ ORDER BY
                 existing.Add((
                     r.IsDBNull(0) ? 0L : Convert.ToInt64(r.GetValue(0)),
                     r.IsDBNull(1) ? string.Empty : r.GetString(1),
-                    r.IsDBNull(2) ? 0 : r.GetInt32(2)));
+                    r.IsDBNull(2) ? 0 : r.GetInt32(2),
+                    !r.IsDBNull(3) && r.GetBoolean(3),
+                    r.IsDBNull(4) ? null : r.GetString(4)));
             }
         }
 
@@ -1140,8 +1144,17 @@ ORDER BY
                 for (var i = 0; i < existing.Count; i++)
                 {
                     var newTotal = i < computedTotals.Count ? computedTotals[i] : 0;
+                    var row = existing[i];
+                    if (row.ManualRecon)
+                    {
+                        _logger.LogWarning(
+                            "Backfill overriding manually reconciled bundle {BundleNo}: Manual_Recon_Reason={Reason}.",
+                            row.BundleNo,
+                            row.ManualReconReason ?? "(none recorded)");
+                    }
+
                     cmdUpd.Parameters["@NewTotal"].Value = newTotal;
-                    cmdUpd.Parameters["@Id"].Value = existing[i].Id;
+                    cmdUpd.Parameters["@Id"].Value = row.Id;
                     await cmdUpd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
                 }
 

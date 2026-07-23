@@ -314,7 +314,7 @@ public sealed class PoReopenLifecycleTests
         NdtBundleOptions opts) =>
         new(
             lifecycle,
-            new Lazy<INdtBundleRuntimeStateStore>(() => runtime),
+            runtime,
             repo,
             Monitor(opts),
             NullLogger<PoReopenService>.Instance);
@@ -553,6 +553,15 @@ public sealed class PoReopenLifecycleTests
         public Task<(string BundleNo, int EngineSequence, int PlcTotal)?> TryGetAwaitingPlcReconBatchAsync(
             string poNumber, int millNo, CancellationToken cancellationToken) =>
             Task.FromResult<(string, int, int)?>(null);
+        public Task<IReadOnlyList<PlcCsvReconAwaitingBundle>> ListAwaitingPlcReconBatchesAsync(
+            string poNumber, int millNo, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<PlcCsvReconAwaitingBundle>>(Array.Empty<PlcCsvReconAwaitingBundle>());
+        public Task<PlcCsvReconResult?> TryFinalizePlcReconBundleAsync(
+            string bundleNo, int slitSum, int reconWindowMinutes, DateTime utcNow, bool force, CancellationToken cancellationToken) =>
+            Task.FromResult<PlcCsvReconResult?>(null);
+        public Task<IReadOnlyList<PlcCsvReconResult>> TryFinalizeReadyPlcReconBundlesAsync(
+            string poNumber, int millNo, int reconWindowMinutes, DateTime utcNow, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<PlcCsvReconResult>>(Array.Empty<PlcCsvReconResult>());
         public Task<PlcCsvReconResult?> TryReconcilePlcClosedBundleAsync(
             string poNumber, int millNo, int slitSum, CancellationToken cancellationToken) =>
             Task.FromResult<PlcCsvReconResult?>(null);
@@ -621,6 +630,82 @@ public sealed class PoReopenLifecycleTests
             return Task.FromResult<(string, int, int)?>((a.BundleNo, 15, a.PlcTotal));
         }
 
+        public Task<IReadOnlyList<PlcCsvReconAwaitingBundle>> ListAwaitingPlcReconBatchesAsync(
+            string poNumber,
+            int millNo,
+            CancellationToken cancellationToken)
+        {
+            if (_awaiting is null)
+                return Task.FromResult<IReadOnlyList<PlcCsvReconAwaitingBundle>>(Array.Empty<PlcCsvReconAwaitingBundle>());
+            var a = _awaiting.Value;
+            if (a.Mill != millNo || !InputSlitCsvParsing.PoEquals(a.Po, poNumber))
+                return Task.FromResult<IReadOnlyList<PlcCsvReconAwaitingBundle>>(Array.Empty<PlcCsvReconAwaitingBundle>());
+
+            var slitSum = _slits.Sum(s => s.NdtPipes);
+            IReadOnlyList<PlcCsvReconAwaitingBundle> list =
+            [
+                new PlcCsvReconAwaitingBundle(a.BundleNo, 15, a.PlcTotal, slitSum, DateTime.UtcNow.AddHours(-1))
+            ];
+            return Task.FromResult(list);
+        }
+
+        public Task<PlcCsvReconResult?> TryFinalizePlcReconBundleAsync(
+            string bundleNo,
+            int slitSum,
+            int reconWindowMinutes,
+            DateTime utcNow,
+            bool force,
+            CancellationToken cancellationToken)
+        {
+            if (_awaiting is null)
+                return Task.FromResult<PlcCsvReconResult?>(null);
+            var a = _awaiting.Value;
+            if (!string.Equals(a.BundleNo, bundleNo, StringComparison.OrdinalIgnoreCase))
+                return Task.FromResult<PlcCsvReconResult?>(null);
+
+            if (!force
+                && !PlcCsvReconFifo.ShouldFinalize(a.PlcTotal, slitSum, DateTime.UtcNow.AddHours(-1), reconWindowMinutes, utcNow))
+            {
+                return Task.FromResult<PlcCsvReconResult?>(null);
+            }
+
+            _awaiting = null;
+            return Task.FromResult<PlcCsvReconResult?>(new PlcCsvReconResult
+            {
+                BundleNo = a.BundleNo,
+                PlcTotal = a.PlcTotal,
+                SlitSum = slitSum
+            });
+        }
+
+        public async Task<IReadOnlyList<PlcCsvReconResult>> TryFinalizeReadyPlcReconBundlesAsync(
+            string poNumber,
+            int millNo,
+            int reconWindowMinutes,
+            DateTime utcNow,
+            CancellationToken cancellationToken)
+        {
+            if (_awaiting is null)
+                return Array.Empty<PlcCsvReconResult>();
+
+            var a = _awaiting.Value;
+            if (a.Mill != millNo || !InputSlitCsvParsing.PoEquals(a.Po, poNumber))
+                return Array.Empty<PlcCsvReconResult>();
+
+            var slitSum = _slits.Sum(s => s.NdtPipes);
+            var result = await TryFinalizePlcReconBundleAsync(
+                    a.BundleNo,
+                    slitSum,
+                    reconWindowMinutes,
+                    utcNow,
+                    force: false,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return result is null
+                ? Array.Empty<PlcCsvReconResult>()
+                : new[] { result };
+        }
+
         public Task<PlcCsvReconResult?> TryReconcilePlcClosedBundleAsync(
             string poNumber, int millNo, int slitSum, CancellationToken cancellationToken)
         {
@@ -644,11 +729,17 @@ public sealed class PoReopenLifecycleTests
             string poNumber, int millNo, CancellationToken cancellationToken)
         {
             ForceFinalizeCount++;
-            var awaiting = await TryGetAwaitingPlcReconBatchAsync(poNumber, millNo, cancellationToken).ConfigureAwait(false);
-            if (awaiting is null)
+            if (_awaiting is null)
                 return null;
             var slitSum = _slits.Sum(s => s.NdtPipes);
-            return await TryReconcilePlcClosedBundleAsync(poNumber, millNo, slitSum, cancellationToken).ConfigureAwait(false);
+            return await TryFinalizePlcReconBundleAsync(
+                    _awaiting.Value.BundleNo,
+                    slitSum,
+                    reconWindowMinutes: 1,
+                    DateTime.UtcNow,
+                    force: true,
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
     }
 

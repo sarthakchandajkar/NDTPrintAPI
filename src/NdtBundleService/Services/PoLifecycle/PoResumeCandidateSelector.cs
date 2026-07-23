@@ -33,9 +33,10 @@ public static class PoResumeCandidateSelector
 
         var resumeTarget = forMill
             .FirstOrDefault(e => !string.IsNullOrWhiteSpace(e.PoNumber)
-                                 && !InputSlitCsvParsing.PoEquals(e.PoNumber, wipEndedPo));
+                                 && (string.IsNullOrWhiteSpace(wipEndedPo)
+                                     || !InputSlitCsvParsing.PoEquals(e.PoNumber, wipEndedPo)));
 
         return !string.IsNullOrWhiteSpace(resumeTarget.PoNumber)
-               && InputSlitCsvParsing.PoEquals(po, resumeTarget.PoNumber);
+               && InputSlitCsvParsing.PoEquals(po, resumeTarget.PoNumber!);
     }
 }

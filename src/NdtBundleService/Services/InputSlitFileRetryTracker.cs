@@ -13,6 +13,8 @@ public sealed class InputSlitFileRetryTracker
         public int StepIndex;
         public DateTime NextAttemptUtc;
         public int LastLoggedStep = -1;
+        public int FailureCount;
+        public bool ManualReviewLogged;
     }
 
     private readonly Dictionary<string, State> _states = new(StringComparer.OrdinalIgnoreCase);
@@ -64,6 +66,34 @@ public sealed class InputSlitFileRetryTracker
         lock (_lock)
         {
             _states.Remove(fileFullPath);
+        }
+    }
+
+    /// <summary>
+    /// Records a processing failure and returns whether the cap was reached (Manual_Review terminal state).
+    /// </summary>
+    public (bool MaxReached, bool ShouldLogManualReview, int FailureCount) RecordFailure(
+        string fileFullPath,
+        int maxFailures)
+    {
+        if (maxFailures <= 0)
+            maxFailures = 1;
+
+        lock (_lock)
+        {
+            if (!_states.TryGetValue(fileFullPath, out var st))
+            {
+                st = new State();
+                _states[fileFullPath] = st;
+            }
+
+            st.FailureCount++;
+            var maxReached = st.FailureCount >= maxFailures;
+            var shouldLogManualReview = maxReached && !st.ManualReviewLogged;
+            if (shouldLogManualReview)
+                st.ManualReviewLogged = true;
+
+            return (maxReached, shouldLogManualReview, st.FailureCount);
         }
     }
 

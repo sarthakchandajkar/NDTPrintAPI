@@ -24,7 +24,7 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
 
     private readonly IOptions<NdtBundleOptions> _options;
     private readonly FileBasedPoChangeQueue? _fileBasedPoChangeQueue;
-    private readonly PoReopenService? _poReopen;
+    private readonly IWipConfirmedRunningPoNotifier _wipConfirmedNotifier;
     private readonly ILogger<WipBundleRunningPoProvider> _logger;
 
     private readonly object _lock = new();
@@ -39,13 +39,13 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
     public WipBundleRunningPoProvider(
         IOptions<NdtBundleOptions> options,
         ILogger<WipBundleRunningPoProvider> logger,
-        FileBasedPoChangeQueue? fileBasedPoChangeQueue = null,
-        PoReopenService? poReopen = null)
+        IWipConfirmedRunningPoNotifier wipConfirmedNotifier,
+        FileBasedPoChangeQueue? fileBasedPoChangeQueue = null)
     {
         _options = options;
         _logger = logger;
+        _wipConfirmedNotifier = wipConfirmedNotifier;
         _fileBasedPoChangeQueue = fileBasedPoChangeQueue;
-        _poReopen = poReopen;
 
         TryStartWatchers();
     }
@@ -163,7 +163,7 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
                 st.RunningWipStampUtc = best.StampUtc;
             }
 
-            TryReopenRunningPoIfClosed(millNo, st.RunningPo);
+            TryNotifyWipConfirmedRunningPo(millNo, st.RunningPo);
 
             _logger.LogWarning(
                 "Mill {Mill}: resumed WIP tracking after false PO end (ended PO was {EndedPo}); running PO is now {RunningPo} from latest WIP file.",
@@ -406,7 +406,7 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
             normalized,
             fileName);
 
-        TryReopenRunningPoIfClosed(millNo, normalized);
+        TryNotifyWipConfirmedRunningPo(millNo, normalized);
 
         return true;
     }
@@ -434,7 +434,7 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
             st.RunningWipStampUtc = wipStampUtc;
             st.WaitingForNewWip = false;
             st.EndedPo = null;
-            TryReopenRunningPoIfClosed(millNo, normalized);
+            TryNotifyWipConfirmedRunningPo(millNo, normalized);
             return true;
         }
     }
@@ -541,16 +541,16 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
             millNo,
             wipFileName,
             normalizedNew);
-        TryReopenRunningPoIfClosed(millNo, normalizedNew);
+        TryNotifyWipConfirmedRunningPo(millNo, normalizedNew);
         return true;
     }
 
-    private void TryReopenRunningPoIfClosed(int millNo, string? runningPo)
+    private void TryNotifyWipConfirmedRunningPo(int millNo, string? runningPo)
     {
-        if (_poReopen is null || string.IsNullOrWhiteSpace(runningPo))
+        if (string.IsNullOrWhiteSpace(runningPo))
             return;
 
-        _poReopen.TryReopenIfClosed(millNo, runningPo, runningPo);
+        _wipConfirmedNotifier.NotifyWipConfirmed(millNo, runningPo);
     }
 
     private DateTime FindLatestWipStampUtcForMill(int millNo)

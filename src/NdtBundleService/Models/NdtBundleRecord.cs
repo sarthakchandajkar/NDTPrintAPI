@@ -26,4 +26,17 @@ public sealed class NdtBundleRecord
     public bool AwaitingCsvRecon { get; init; }
 
     public bool CountDiscrepancy { get; init; }
+
+    public bool ManualRecon { get; init; }
+
+    public string? ManualReconBy { get; init; }
+
+    public DateTime? ManualReconAt { get; init; }
+
+    public string? ManualReconReason { get; init; }
+
+    public int? ManualReconOriginalTotal { get; init; }
+
+    /// <summary>Full recompute of slit-row sum after manual lock; audit only.</summary>
+    public int? PostReconCsvSum { get; init; }
 }

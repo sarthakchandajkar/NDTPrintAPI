@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Services;
+using NdtBundleService.Services.PoLifecycle;
 using NdtBundleService.Services.FileBasedPoChange;
 using Xunit;
 
@@ -87,7 +88,14 @@ public sealed class WipBundlePoEndExclusionTests
         return new WipBundleRunningPoProvider(
             options,
             NullLogger<WipBundleRunningPoProvider>.Instance,
+            NullWipConfirmedRunningPoNotifier.Instance,
             queue);
+    }
+
+    private sealed class NullWipConfirmedRunningPoNotifier : IWipConfirmedRunningPoNotifier
+    {
+        public static readonly NullWipConfirmedRunningPoNotifier Instance = new();
+        public void NotifyWipConfirmed(int millNo, string normalizedPo) { }
     }
 
     private static bool InvokeTryEnqueueFileBasedPoChange(

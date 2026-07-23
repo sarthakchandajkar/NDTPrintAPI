@@ -388,9 +388,13 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
             _logger.LogInformation("Processing Input Slit file {File}", fileFull);
 
+            IReadOnlyList<(string RawLine, InputSlitRecord? Record)> rows =
+                Array.Empty<(string RawLine, InputSlitRecord? Record)>();
+
             try
             {
-                var (headerLine, rows, ndtColumnIndex, poColumnIndex) = await ReadSlitFileWithRawLinesAsync(fileFull, cancellationToken).ConfigureAwait(false);
+                (var headerLine, rows, var ndtColumnIndex, var poColumnIndex) =
+                    await ReadSlitFileWithRawLinesAsync(fileFull, cancellationToken).ConfigureAwait(false);
 
                 var qualifyingForLive = rows
                     .Select(r => r.Record)
@@ -478,7 +482,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 var anyRowBundled = false;
                 var anyEligibleMillRow = false;
                 var pendingOrphanClose = new HashSet<(string Po, int Mill)>();
-                var slitSumByPoMill = new Dictionary<(string Po, int Mill), int>();
+                var fifoSessions = new Dictionary<(string Po, int Mill), List<PlcCsvReconAwaitingBundle>>();
+                var reconTouchedPoMills = new HashSet<(string Po, int Mill)>();
                 var manualReviewFlagged = new HashSet<(string Po, int Mill)>();
                 foreach (var row in rows)
                 {
@@ -650,22 +655,33 @@ public sealed class SlitMonitoringWorker : BackgroundService
                             .ConfigureAwait(false);
                         try
                         {
-                            var awaitingPlc = await _bundleRepository
-                                .TryGetAwaitingPlcReconBatchAsync(
-                                    bundleRecord.PoNumber,
-                                    bundleRecord.MillNo,
-                                    cancellationToken)
-                                .ConfigureAwait(false);
+                            var poMillKey = (
+                                InputSlitCsvParsing.NormalizePo(bundleRecord.PoNumber),
+                                bundleRecord.MillNo);
 
-                            if (PlcCsvReconAttach.TryAttach(
-                                    awaitingPlc,
+                            if (!fifoSessions.TryGetValue(poMillKey, out var awaitingList))
+                            {
+                                var loaded = await _bundleRepository
+                                    .ListAwaitingPlcReconBatchesAsync(
+                                        bundleRecord.PoNumber,
+                                        bundleRecord.MillNo,
+                                        cancellationToken)
+                                    .ConfigureAwait(false);
+                                awaitingList = loaded.Count > 0
+                                    ? loaded.Select(static b => b).ToList()
+                                    : [];
+                                fifoSessions[poMillKey] = awaitingList;
+                            }
+
+                            if (awaitingList.Count > 0
+                                && PlcCsvReconFifo.TryAttachRow(
+                                    awaitingList,
                                     bundleRecord,
-                                    slitSumByPoMill,
                                     out var attachedBatchNo))
                             {
-                                // F-2: attach late CSV rows to the PLC-closed bundle; do not open a new sequence
-                                // or re-accumulate size counts toward a second close.
+                                // F-2 FIFO: attach late CSV rows to the oldest unfilled PLC-closed bundle.
                                 ndtBatchNoFormatted = attachedBatchNo;
+                                reconTouchedPoMills.Add(poMillKey);
                             }
                             else
                             {
@@ -882,6 +898,16 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     {
                         try
                         {
+                            if (await _bundleRepository
+                                    .IsManualReconLockedAsync(batchNo, cancellationToken)
+                                    .ConfigureAwait(false))
+                            {
+                                await _bundleRepository
+                                    .TryUpdatePostReconCsvSumAsync(batchNo, cancellationToken)
+                                    .ConfigureAwait(false);
+                                continue;
+                            }
+
                             await _bundleRepository
                                 .TrySyncBundleTotalFromSlitsAsync(batchNo, forceFromSlits: false, cancellationToken)
                                 .ConfigureAwait(false);
@@ -895,27 +921,44 @@ public sealed class SlitMonitoringWorker : BackgroundService
                         }
                     }
 
-                    foreach (var ((po, mill), slitSum) in slitSumByPoMill)
+                    var reconPoMills = reconTouchedPoMills.ToList();
+                    if (reconPoMills.Count == 0)
+                    {
+                        reconPoMills = outputRowsForSql
+                            .Select(r => (
+                                InputSlitCsvParsing.NormalizePo(r.Record.PoNumber),
+                                r.Record.MillNo))
+                            .Distinct()
+                            .ToList();
+                    }
+
+                    foreach (var (po, mill) in reconPoMills)
                     {
                         try
                         {
-                            var recon = await _bundleRepository
-                                .TryReconcilePlcClosedBundleAsync(po, mill, slitSum, cancellationToken)
+                            var finalized = await _bundleRepository
+                                .TryFinalizeReadyPlcReconBundlesAsync(
+                                    po,
+                                    mill,
+                                    o.ReconWindowMinutes,
+                                    DateTime.UtcNow,
+                                    cancellationToken)
                                 .ConfigureAwait(false);
-                            if (recon is null)
-                                continue;
 
-                            if (recon.CountDiscrepancy && o.ReprintOnCountMismatch)
+                            foreach (var recon in finalized)
                             {
-                                await TryReprintOnPlcCsvMismatchAsync(recon, mill, cancellationToken)
-                                    .ConfigureAwait(false);
+                                if (recon.CountDiscrepancy && o.ReprintOnCountMismatch)
+                                {
+                                    await TryReprintOnPlcCsvMismatchAsync(recon, mill, cancellationToken)
+                                        .ConfigureAwait(false);
+                                }
                             }
                         }
                         catch (Exception reconEx)
                         {
                             _logger.LogWarning(
                                 reconEx,
-                                "PLC CSV recon failed for PO {PO} Mill {Mill} after slit import.",
+                                "PLC CSV recon finalize failed for PO {PO} Mill {Mill} after slit import.",
                                 po,
                                 mill);
                         }
@@ -934,6 +977,66 @@ public sealed class SlitMonitoringWorker : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to process Input Slit file {File}", fileFull);
+
+                if (ShouldApplyPlcFileRetryBackoff(o, rows))
+                {
+                    var (maxReached, shouldLogManualReview, failureCount) = _fileRetryTracker.RecordFailure(
+                        fileFull,
+                        o.MaxInputSlitFileProcessingFailures);
+
+                    if (!maxReached)
+                    {
+                        var (delay, shouldLog, step) = _fileRetryTracker.Park(
+                            fileFull,
+                            DateTime.UtcNow,
+                            o.FileRetryBackoffSeconds);
+                        if (shouldLog)
+                        {
+                            _logger.LogInformation(
+                                "Input Slit file {File} parked after processing failure {FailureCount}/{MaxFailures} (backoff step {Step}, {DelaySeconds}s).",
+                                Path.GetFileName(fileFull),
+                                failureCount,
+                                o.MaxInputSlitFileProcessingFailures,
+                                step,
+                                (int)delay.TotalSeconds);
+                        }
+                    }
+                    else if (shouldLogManualReview)
+                    {
+                        _logger.LogWarning(
+                            "Input Slit file {File} exceeded max processing failures ({Count}); marking Manual_Review for affected PO/mill rows.",
+                            Path.GetFileName(fileFull),
+                            failureCount);
+
+                        var reviewKeys = rows
+                            .Select(r => r.Record)
+                            .Where(r => r is not null && IsMillAllowedForNdtInputSlit(o, r.MillNo))
+                            .Select(r => (
+                                InputSlitCsvParsing.NormalizePo(r!.PoNumber),
+                                r.MillNo))
+                            .Where(k => !string.IsNullOrWhiteSpace(k.Item1))
+                            .Distinct()
+                            .ToList();
+
+                        foreach (var (po, mill) in reviewKeys)
+                        {
+                            await _bundleRepository
+                                .MarkManualReviewAsync(po, mill, cancellationToken)
+                                .ConfigureAwait(false);
+                        }
+
+                        _fileRetryTracker.Clear(fileFull);
+                        _inputSlitLastHandledWriteUtc[fileFull] = lwUtc;
+                        _backfillCandidatePaths.Remove(fileFull);
+                        await _traceability
+                            .MarkInputSlitFileSeenAsync(
+                                fileFull,
+                                lwUtc,
+                                "MaxProcessingFailures",
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                }
             }
         }
     }
@@ -1022,6 +1125,14 @@ public sealed class SlitMonitoringWorker : BackgroundService
     {
         try
         {
+            if (await _bundleRepository.IsManualReconLockedAsync(recon.BundleNo, cancellationToken).ConfigureAwait(false))
+            {
+                _logger.LogInformation(
+                    "ReprintOnCountMismatch skipped for manually reconciled bundle {BundleNo}.",
+                    recon.BundleNo);
+                return;
+            }
+
             await _bundleRepository
                 .TrySyncBundleTotalFromSlitsAsync(recon.BundleNo, forceFromSlits: true, cancellationToken)
                 .ConfigureAwait(false);

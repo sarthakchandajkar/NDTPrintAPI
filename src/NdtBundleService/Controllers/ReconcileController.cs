@@ -1,6 +1,4 @@
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Options;
-using NdtBundleService.Configuration;
 using NdtBundleService.Models;
 using NdtBundleService.Services;
 
@@ -19,11 +17,7 @@ public sealed class ReconcileController : ControllerBase
     private readonly IReconcileSyncService _reconcileSync;
     private readonly IFormationChartProvider _formationChartProvider;
     private readonly IPipeSizeProvider _pipeSizeProvider;
-    private readonly IWipLabelProvider _wipLabelProvider;
-    private readonly INetworkPrinterSender _printerSender;
-    private readonly IMillPrinterSettingsService _millPrinters;
-    private readonly NdtBundleOptions _options;
-    private readonly IZplGenerationToggle _zplToggle;
+    private readonly IReconcileBundleTagService _reconcileTagService;
     private readonly ILogger<ReconcileController> _logger;
 
     public ReconcileController(
@@ -32,11 +26,7 @@ public sealed class ReconcileController : ControllerBase
         IReconcileSyncService reconcileSync,
         IFormationChartProvider formationChartProvider,
         IPipeSizeProvider pipeSizeProvider,
-        IWipLabelProvider wipLabelProvider,
-        INetworkPrinterSender printerSender,
-        IMillPrinterSettingsService millPrinters,
-        IOptions<NdtBundleOptions> options,
-        IZplGenerationToggle zplToggle,
+        IReconcileBundleTagService reconcileTagService,
         ILogger<ReconcileController> logger)
     {
         _bundleRepository = bundleRepository;
@@ -44,11 +34,7 @@ public sealed class ReconcileController : ControllerBase
         _reconcileSync = reconcileSync;
         _formationChartProvider = formationChartProvider;
         _pipeSizeProvider = pipeSizeProvider;
-        _wipLabelProvider = wipLabelProvider;
-        _millPrinters = millPrinters;
-        _printerSender = printerSender;
-        _options = options.Value;
-        _zplToggle = zplToggle;
+        _reconcileTagService = reconcileTagService;
         _logger = logger;
     }
 
@@ -75,7 +61,10 @@ public sealed class ReconcileController : ControllerBase
                 b.SlitNo,
                 SlitStartTime = b.SlitStartTime,
                 SlitFinishTime = b.SlitFinishTime,
-                PrintedAt = b.PrintedAt
+                PrintedAt = b.PrintedAt,
+                b.ManualRecon,
+                b.ManualReconReason,
+                b.PostReconCsvSum
             }).ToList());
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -239,6 +228,74 @@ public sealed class ReconcileController : ControllerBase
     }
 
     /// <summary>
+    /// Operator manual bundle reconcile: force-finalize awaiting recon when applicable, lock bundle,
+    /// set corrected total, and reprint tag (with "Reprint" marker). Works with or without slit rows.
+    /// </summary>
+    [HttpPost("manual-bundle-reconcile")]
+    public async Task<IActionResult> ManualBundleReconcile(
+        [FromBody] ManualBundleReconcileRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request is null)
+            return BadRequest(new { Message = "Request body is required." });
+        if (string.IsNullOrWhiteSpace(request.NdtBatchNo))
+            return BadRequest(new { Message = "NdtBatchNo is required." });
+        if (request.CorrectedTotal < 0)
+            return BadRequest(new { Message = "CorrectedTotal must be non-negative." });
+        if (string.IsNullOrWhiteSpace(request.Reason))
+            return BadRequest(new { Message = "Reason is required." });
+        if (string.IsNullOrWhiteSpace(request.ReconciledBy))
+            return BadRequest(new { Message = "ReconciledBy is required." });
+
+        var batchNo = request.NdtBatchNo.Trim();
+        ManualBundleReconcileResult? result;
+        try
+        {
+            result = await _bundleRepository
+                .ManualReconcileBundleAsync(
+                    batchNo,
+                    request.CorrectedTotal,
+                    request.Reason,
+                    request.ReconciledBy,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Manual bundle reconcile failed for {BatchNo}.", batchNo);
+            return StatusCode(500, new { Message = "Manual bundle reconcile failed.", Error = ex.Message });
+        }
+
+        if (result is null)
+            return NotFound(new { Message = $"Bundle {batchNo} not found." });
+
+        await _bundleRepository
+            .UpdateBundleSummaryCsvAsync(batchNo, request.CorrectedTotal, CancellationToken.None)
+            .ConfigureAwait(false);
+
+        var printResult = await _reconcileTagService
+            .ReprintAsync(result.Bundle, cancellationToken)
+            .ConfigureAwait(false);
+
+        return Ok(new
+        {
+            Message = printResult.Success
+                ? "Bundle manually reconciled and tag reprinted."
+                : "Bundle manually reconciled but tag reprint failed.",
+            PrintSuccess = printResult.Success,
+            PrintMessage = printResult.Message,
+            PrintErrorDetail = printResult.ErrorDetail,
+            NdtBatchNo = batchNo,
+            OriginalTotal = result.OriginalTotal,
+            CorrectedTotal = result.CorrectedTotal,
+            ForceFinalized = result.ForceFinalized,
+            CountDiscrepancyLogged = result.CountDiscrepancyLogged,
+            SlitSumAtFinalize = result.SlitSumAtFinalize,
+            ManualReconOriginalTotal = result.Bundle.ManualReconOriginalTotal ?? result.OriginalTotal
+        });
+    }
+
+    /// <summary>
     /// Reconcile a bundle: set the NDT pipe count to the operator-specified value.
     /// Updates database (if configured) and all output CSV files containing this NDT Batch No.
     /// </summary>
@@ -251,6 +308,16 @@ public sealed class ReconcileController : ControllerBase
             return BadRequest(new { Message = "NewNdtPipes must be non-negative." });
 
         var batchNo = request.NdtBatchNo.Trim();
+        if (await _bundleRepository.IsManualReconLockedAsync(batchNo, cancellationToken).ConfigureAwait(false))
+        {
+            var locked = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
+            return Conflict(new
+            {
+                Message = "Bundle is manually reconciled and locked. Use manual bundle reconcile instead of slit-based reconcile.",
+                ManualReconReason = locked?.ManualReconReason
+            });
+        }
+
         var bundle = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
         if (bundle is null)
             return NotFound(new { Message = $"Bundle {batchNo} not found." });
@@ -297,7 +364,12 @@ public sealed class ReconcileController : ControllerBase
                 bundle.PoNumber,
                 bundle.MillNo,
                 bundle.TotalNdtPcs,
-                bundle.SlitNo
+                bundle.SlitNo,
+                bundle.ManualRecon,
+                bundle.ManualReconReason,
+                bundle.ManualReconOriginalTotal,
+                bundle.PostReconCsvSum,
+                bundle.AwaitingCsvRecon
             },
             Slits = slits.Select(s => new { SlitNo = s.SlitNo, NdtPipes = s.NdtPipes }).ToList()
         });
@@ -323,6 +395,16 @@ public sealed class ReconcileController : ControllerBase
 
         try
         {
+            if (await _bundleRepository.IsManualReconLockedAsync(batchNo, cancellationToken).ConfigureAwait(false))
+            {
+                var locked = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
+                return Conflict(new
+                {
+                    Message = "Bundle is manually reconciled and locked. Slit edits are not allowed.",
+                    ManualReconReason = locked?.ManualReconReason
+                });
+            }
+
             var bundle = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
             if (bundle is null)
                 return NotFound(new { Message = $"Bundle {batchNo} not found." });
@@ -384,6 +466,16 @@ public sealed class ReconcileController : ControllerBase
             return BadRequest(new { Message = "At least one SlitNo is required." });
 
         var batchNo = request.NdtBatchNo.Trim();
+        if (await _bundleRepository.IsManualReconLockedAsync(batchNo, cancellationToken).ConfigureAwait(false))
+        {
+            var locked = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
+            return Conflict(new
+            {
+                Message = "Bundle is manually reconciled and locked. Slit deletes are not allowed.",
+                ManualReconReason = locked?.ManualReconReason
+            });
+        }
+
         var bundle = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
         if (bundle is null)
             return NotFound(new { Message = $"Bundle {batchNo} not found." });
@@ -434,68 +526,24 @@ public sealed class ReconcileController : ControllerBase
         if (bundle is null)
             return NotFound(new { Message = $"Bundle {batchNo} not found." });
 
-        if (!_zplToggle.IsEnabled)
-            return BadRequest(new { Message = "NDT tag ZPL and network print are disabled (runtime toggle)." });
-
-        var (address, printerPort, printerConfigured) = _millPrinters.ResolveForMill(bundle.MillNo);
-        if (!printerConfigured)
-            return BadRequest(new { Message = $"Printer not configured for Mill {bundle.MillNo} (Settings → printers)." });
-
-        var wip = await _wipLabelProvider.GetWipLabelAsync(bundle.PoNumber, bundle.MillNo, cancellationToken).ConfigureAwait(false);
-        var pipeGrade = wip?.PipeGrade;
-        var pipeSize = wip?.PipeSize ?? "";
-        var pipeThickness = wip?.PipeThickness ?? "";
-        var pipeLength = wip?.PipeLength ?? "";
-        var bundleWeight = NdtBundleWeightCalculator.FormatBundleWeight(
-            wip?.PipeWeightPerMeter,
-            pipeLength,
-            bundle.TotalNdtPcs);
-        var pipeType = wip?.PipeType ?? "";
-
-        if (string.IsNullOrWhiteSpace(bundleWeight))
+        var printResult = await _reconcileTagService.ReprintAsync(bundle, cancellationToken).ConfigureAwait(false);
+        if (printResult.Success)
+            return Ok(new { Message = printResult.Message, NdtBatchNo = batchNo, NdtPcs = bundle.TotalNdtPcs });
+        return StatusCode(500, new
         {
-            _logger.LogWarning(
-                "Reprint tag for bundle {BatchNo} PO {PO}: bundle weight is empty (weight/m={Weight}, length={Length}, pcs={Pcs}).",
-                batchNo,
-                bundle.PoNumber,
-                wip?.PipeWeightPerMeter ?? "(missing)",
-                pipeLength,
-                bundle.TotalNdtPcs);
-        }
+            Message = printResult.Message,
+            Detail = printResult.ErrorDetail,
+            NdtBatchNo = batchNo,
+            NdtPcs = bundle.TotalNdtPcs
+        });
+    }
 
-        var labelDate = bundle.PrintedAt ?? bundle.SlitFinishTime ?? bundle.SlitStartTime ?? DateTime.Now;
-
-        var zplBytes = ZplNdtLabelBuilder.BuildNdtTagZpl(
-            bundle.BundleNo,
-            bundle.MillNo,
-            bundle.PoNumber,
-            pipeGrade,
-            pipeSize,
-            pipeThickness,
-            pipeLength,
-            bundleWeight,
-            pipeType,
-            labelDate,
-            bundle.TotalNdtPcs,
-            isReprint: true);
-
-        _logger.LogInformation("Printing reconciled bundle {BatchNo} (Reprint) with {NdtPcs} pcs.", batchNo, bundle.TotalNdtPcs);
-
-        try
-        {
-            await NdtBundleOutputPaths.TrySaveBundleZplAsync(_options, bundle.BundleNo, zplBytes, cancellationToken)
-                .ConfigureAwait(false);
-
-            var sendResult = await _printerSender.SendAsync(address, printerPort, zplBytes, cancellationToken).ConfigureAwait(false);
-            if (sendResult.Success)
-                return Ok(new { Message = "Bundle tag (Reprint) sent to printer.", NdtBatchNo = batchNo, NdtPcs = bundle.TotalNdtPcs });
-            return StatusCode(500, new { Message = "Failed to send to printer. Check NdtTagPrinterAddress/Port and optional NdtTagPrinterLocalBindAddress.", Detail = sendResult.ErrorDetail });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Print bundle failed for {BatchNo}.", batchNo);
-            return StatusCode(500, new { Message = "Print failed: " + ex.Message });
-        }
+    public sealed class ManualBundleReconcileRequest
+    {
+        public string NdtBatchNo { get; set; } = string.Empty;
+        public int CorrectedTotal { get; set; }
+        public string Reason { get; set; } = string.Empty;
+        public string ReconciledBy { get; set; } = string.Empty;
     }
 
     public sealed class ReconcileRequest

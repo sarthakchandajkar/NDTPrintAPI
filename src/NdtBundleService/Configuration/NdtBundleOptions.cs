@@ -135,6 +135,18 @@ public class NdtBundleOptions
     public int[] FileRetryBackoffSeconds { get; set; } = [5, 30, 120];
 
     /// <summary>
+    /// After this many consecutive processing failures for one Input Slit file on a Plc mill,
+    /// mark affected PO/mill bundles Manual_Review and stop retrying (single WRN).
+    /// </summary>
+    public int MaxInputSlitFileProcessingFailures { get; set; } = 20;
+
+    /// <summary>
+    /// Minutes to keep a PLC-closed bundle in <c>Awaiting_Csv_Recon</c> before force-finalizing recon
+    /// (discrepancy WRN only at finalize). Default 180.
+    /// </summary>
+    public int ReconWindowMinutes { get; set; } = 180;
+
+    /// <summary>
     /// Partial-bundle flush at PO end for <c>PoEndSource=Plc</c> mills: <c>Immediate</c> (default) or <c>AfterDrain</c>.
     /// Immediate prints the live remainder on M40.6 without waiting for Input Slit CSVs.
     /// File mills always flush immediately (unchanged).

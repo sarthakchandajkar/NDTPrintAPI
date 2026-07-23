@@ -4,13 +4,9 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
+using NdtBundleService.DependencyInjection;
 using NdtBundleService.Services;
 using NdtBundleService.Services.PlcHandshake;
-using NdtBundleService.Services.PlcHandshake.PlcPoEnd;
-using NdtBundleService.Services.PlcHandshake.S7;
-using NdtBundleService.Services.FileBasedPoChange;
-using NdtBundleService.Services.TcpOpenComm;
-using NdtBundleService.Services.PoLifecycle;
 using QuestPDF.Infrastructure;
 using Serilog;
 using Serilog.Events;
@@ -27,99 +23,15 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 
 ConfigureSerilog(builder);
 
+builder.Host.UseDefaultServiceProvider(options =>
+{
+    options.ValidateOnBuild = true;
+    options.ValidateScopes = true;
+});
+
 builder.Services.AddWindowsService();
 
-// Bind options from configuration (appsettings.json, environment, etc.)
-builder.Services.Configure<NdtBundleOptions>(builder.Configuration.GetSection("NdtBundle"));
-builder.Services.Configure<FileLoggingOptions>(builder.Configuration.GetSection("Logging:File"));
-builder.Services.AddSingleton<AppLogReader>();
-
-// Core services
-builder.Services.AddSingleton<IPoPlanProvider, PoPlanCsvProvider>();
-builder.Services.AddSingleton<IPoPlanWipRepository, PoPlanWipRepository>();
-builder.Services.AddSingleton<IPoPlanWipImporter, PoPlanWipImporter>();
-builder.Services.AddSingleton<IFormationChartProvider, FormationChartCsvProvider>();
-builder.Services.AddSingleton<IPipeSizeProvider, PipeSizeCsvProvider>();
-builder.Services.AddSingleton<IPoPlanWipEnrichmentProvider, PoPlanWipEnrichmentProvider>();
-builder.Services.AddSingleton<IBundleLabelInfoProvider, BundleLabelCsvProvider>();
-builder.Services.AddSingleton<ICurrentPoPlanService, CurrentPoPlanService>();
-builder.Services.AddSingleton<INdtBundleRepository, NdtBundleRepository>();
-builder.Services.AddSingleton<INdtBundleRuntimeStateStore, NdtBundleRuntimeStateStore>();
-builder.Services.AddSingleton<IBundleProvisionalStampCorrector, BundleProvisionalStampCorrector>();
-builder.Services.AddSingleton<IBundleEngine, NdtBundleEngine>();
-builder.Services.AddSingleton<IBundleOutputWriter, CsvBundleOutputWriter>();
-builder.Services.AddSingleton<INdtBatchStateService, NdtBatchStateService>();
-builder.Services.AddSingleton<INdtLabelPrinter, PdfNdtLabelPrinter>();
-builder.Services.AddSingleton<INdtBundleTagPrinter, NdtBundleTagPrintService>();
-builder.Services.AddSingleton<INetworkPrinterSender, NetworkPrinterSender>();
-builder.Services.AddSingleton<IWipLabelProvider, WipLabelProvider>();
-builder.Services.AddSingleton<INdtTagPrinter, NdtZplTagPrinter>();
-builder.Services.AddSingleton<IZplGenerationToggle, ZplGenerationToggle>();
-builder.Services.AddSingleton<SettingsAuthService>();
-builder.Services.AddSingleton<IMillPrinterSettingsService, MillPrinterSettingsService>();
-builder.Services.AddSingleton<IFormationChartSettingsService, FormationChartSettingsService>();
-builder.Services.AddSingleton<IActivePoPerMillService, ActivePoPerMillService>();
-builder.Services.AddSingleton<IWipBundleRunningPoProvider, WipBundleRunningPoProvider>();
-builder.Services.AddSingleton<FileBasedPoChangeQueue>();
-builder.Services.AddSingleton<IWipBundleReconciliationService, WipBundleReconciliationService>();
-builder.Services.AddSingleton<PlcPoEndQueue>();
-builder.Services.AddSingleton<IS7ConnectionProviderRegistry, S7ConnectionProviderRegistry>();
-builder.Services.AddSingleton<IPlcSlitEndBundleCloser, PlcSlitEndBundleCloser>();
-builder.Services.AddSingleton<IHandshakeEventRepository, HandshakeEventRepository>();
-builder.Services.AddSingleton<IMillNdtCountReader, S7MillNdtCountReader>();
-builder.Services.AddSingleton<IMillSlitLiveNdtAccumulator, MillSlitLiveNdtAccumulator>();
-builder.Services.AddSingleton<IMillBundleStateLock, MillBundleStateLock>();
-builder.Services.AddSingleton<IPoLifecycleService, PoLifecycleService>();
-builder.Services.AddSingleton(sp => new Lazy<INdtBundleRuntimeStateStore>(() => sp.GetRequiredService<INdtBundleRuntimeStateStore>()));
-builder.Services.AddSingleton<PoReopenService>();
-builder.Services.AddSingleton<PoEndWorkflowService>();
-builder.Services.AddSingleton<IPoEndWorkflowService>(sp => sp.GetRequiredService<PoEndWorkflowService>());
-builder.Services.AddSingleton<MillPoEndTransitionDetector>();
-builder.Services.AddSingleton<PoEndDetectionDiagnostics>();
-builder.Services.AddSingleton<PlcPoEndPollHandler>();
-builder.Services.AddSingleton<PlcConnectionHealth>();
-builder.Services.AddSingleton<PlcHandshakeStatusRegistry>();
-builder.Services.AddSingleton<PlcHandshakeCoordinator>();
-builder.Services.AddSingleton<IPoChangeHandler, PoChangeHandler>();
-builder.Services.AddSingleton<IMillHooterPlcValuesService, MillHooterPlcValuesService>();
-builder.Services.AddSingleton<IPlcClient>(sp =>
-{
-    var bundleOptions = sp.GetRequiredService<IOptions<NdtBundleOptions>>().Value;
-    var handshake = bundleOptions.PlcHandshake ?? new PlcHandshakeOptions();
-    if (handshake.Enabled)
-    {
-        return new PlcHandshakeMirrorPlcClient(sp.GetRequiredService<PlcHandshakeStatusRegistry>());
-    }
-
-    var plc = bundleOptions.PlcPoEnd ?? new PlcPoEndOptions();
-    if (plc.Enabled && PlcPoEndOptions.IsS7Driver(plc))
-    {
-        return new S7MillPoEndPlcClient(
-            sp.GetRequiredService<IOptions<NdtBundleOptions>>(),
-            sp.GetRequiredService<PlcConnectionHealth>(),
-            sp.GetRequiredService<ILogger<S7MillPoEndPlcClient>>());
-    }
-
-    if (plc.Enabled && string.Equals(plc.Driver, "ModbusTcp", StringComparison.OrdinalIgnoreCase))
-    {
-        return new ModbusTcpMillPoEndPlcClient(
-            sp.GetRequiredService<IOptions<NdtBundleOptions>>(),
-            sp.GetRequiredService<PlcConnectionHealth>(),
-            sp.GetRequiredService<ILogger<ModbusTcpMillPoEndPlcClient>>());
-    }
-
-    return new StubPlcClient(sp.GetRequiredService<ILogger<StubPlcClient>>());
-});
-builder.Services.AddSingleton<IManualNdtTagService, ManualNdtTagService>();
-builder.Services.AddSingleton<IUploadNdtBundleFileService, UploadNdtBundleFileService>();
-builder.Services.AddSingleton<ITraceabilityRepository, TraceabilityRepository>();
-builder.Services.AddSingleton<IReconcileSyncService, ReconcileSyncService>();
-builder.Services.AddSingleton<ISqlTraceabilityWriteTracker, SqlTraceabilityWriteTracker>();
-builder.Services.AddSingleton<ISqlTraceabilityHealth, SqlTraceabilityHealth>();
-
-builder.Services.AddHostedService<SqlTraceabilityStartupCheck>();
-builder.Services.AddHostedService<PoPlanWipImportHostedService>();
-builder.Services.AddHostedService<PoPlanCacheWarmupService>();
+builder.Services.AddNdtBundleServices(builder.Configuration);
 
 builder.Services.AddCors(options =>
 {
@@ -140,16 +52,6 @@ builder.Services.AddControllers().AddJsonOptions(o =>
 });
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
-
-// Background worker that orchestrates the flow
-builder.Services.AddHostedService<PlcHandshakeWorker>();
-builder.Services.AddHostedService<PlcPoEndQueueWorker>();
-builder.Services.AddHostedService<MillTcpOpenCommWorker>();
-builder.Services.AddHostedService<FileBasedPoChangeWorker>();
-builder.Services.AddHostedService<WipBundleFileReconciliationWorker>();
-builder.Services.AddHostedService<PoLifecycleSweepWorker>();
-builder.Services.AddHostedService<SlitMonitoringWorker>();
-builder.Services.AddHostedService<UploadNdtBundleSchedulerWorker>();
 
 try
 {

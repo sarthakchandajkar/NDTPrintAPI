@@ -36,14 +36,18 @@ export default function ReconcilePage() {
   const [newSlitNdtPipes, setNewSlitNdtPipes] = useState(0);
   const [slitsMarkedForDelete, setSlitsMarkedForDelete] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
-  const [submitting, setSubmitting] = useState(false);
   const [savingSlit, setSavingSlit] = useState(false);
   const [deletingSlits, setDeletingSlits] = useState(false);
-  const [printing, setPrinting] = useState(false);
+  const [manualReconciling, setManualReconciling] = useState(false);
+  const [correctedTotal, setCorrectedTotal] = useState(0);
+  const [reconcileReason, setReconcileReason] = useState("");
+  const [reconciledBy, setReconciledBy] = useState("");
+  const [bundleManualRecon, setBundleManualRecon] = useState(false);
+  const [bundleManualReconReason, setBundleManualReconReason] = useState<string | null>(null);
+  const [bundlePostReconCsvSum, setBundlePostReconCsvSum] = useState<number | null>(null);
   const [reconcileEnabled, setReconcileEnabled] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const [printMessage, setPrintMessage] = useState<string | null>(null);
 
   // Station reconcile (Visual / Hydro / Revisual)
   const [stationBatchNo, setStationBatchNo] = useState("");
@@ -103,6 +107,10 @@ export default function ReconcilePage() {
       setSelectedSlitNo("");
       setNewSlitNdtPipes(0);
       setSlitsMarkedForDelete([]);
+      setCorrectedTotal(0);
+      setBundleManualRecon(false);
+      setBundleManualReconReason(null);
+      setBundlePostReconCsvSum(null);
       return;
     }
 
@@ -111,6 +119,16 @@ export default function ReconcilePage() {
     api
       .reconcileBundleSlits(selectedBatchNo)
       .then((res) => {
+        const bundleTotal =
+          typeof res?.bundle?.totalNdtPcs === "number" && res.bundle.totalNdtPcs > 0
+            ? res.bundle.totalNdtPcs
+            : 0;
+        setCorrectedTotal(bundleTotal);
+        setBundleManualRecon(Boolean(res?.bundle?.manualRecon));
+        setBundleManualReconReason(res?.bundle?.manualReconReason ?? null);
+        setBundlePostReconCsvSum(
+          typeof res?.bundle?.postReconCsvSum === "number" ? res.bundle.postReconCsvSum : null
+        );
         setSlits(Array.isArray(res?.slits) ? res.slits : []);
         const firstSlit = (Array.isArray(res?.slits) ? res.slits : []).find((s) => (s.slitNo ?? "").trim() !== "");
         if (firstSlit?.slitNo) {
@@ -132,7 +150,6 @@ export default function ReconcilePage() {
     // Clear per-mode state when switching reconcile mode
     setError(null);
     setSuccess(null);
-    setPrintMessage(null);
 
     if (mode !== "OutputBundle") {
       setSelectedBatchNo("");
@@ -226,22 +243,50 @@ export default function ReconcilePage() {
     }
   };
 
-  const reconcileBundleTotal = async (newTotal: number) => {
+  const manualBundleReconcile = async () => {
     if (!selectedBatchNo.trim()) {
-      setError("Select a bundle.");
+      setError("Enter or select an NDT Batch No.");
       return;
     }
-    setSubmitting(true);
+    if (correctedTotal < 0) {
+      setError("Corrected total must be non-negative.");
+      return;
+    }
+    if (!reconcileReason.trim()) {
+      setError("Reason is required.");
+      return;
+    }
+    if (!reconciledBy.trim()) {
+      setError("Your name/ID is required (Reconciled by).");
+      return;
+    }
+
+    setManualReconciling(true);
     setError(null);
     setSuccess(null);
     try {
-      const res = await api.reconcile(selectedBatchNo.trim(), newTotal);
-      setSuccess(res.message ?? "Bundle reconciled. CSV(s) updated and tag reprinted.");
+      const res = await api.manualBundleReconcile(
+        selectedBatchNo.trim(),
+        correctedTotal,
+        reconcileReason.trim(),
+        reconciledBy.trim()
+      );
+      const printNote = res.printSuccess ? " Tag reprinted." : res.printMessage ? ` Print: ${res.printMessage}` : "";
+      setSuccess((res.message ?? "Bundle manually reconciled.") + printNote);
       await refresh();
+      setSlitsLoading(true);
+      const details = await api.reconcileBundleSlits(selectedBatchNo.trim());
+      setSlits(Array.isArray(details?.slits) ? details.slits : []);
+      setBundleManualRecon(Boolean(details?.bundle?.manualRecon));
+      setBundleManualReconReason(details?.bundle?.manualReconReason ?? null);
+      setBundlePostReconCsvSum(
+        typeof details?.bundle?.postReconCsvSum === "number" ? details.bundle.postReconCsvSum : null
+      );
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Reconcile failed.");
+      setError(e instanceof Error ? e.message : "Manual bundle reconcile failed.");
     } finally {
-      setSubmitting(false);
+      setManualReconciling(false);
+      setSlitsLoading(false);
     }
   };
 
@@ -338,25 +383,6 @@ export default function ReconcilePage() {
     }
   };
 
-  const handlePrintBundle = async () => {
-    if (!selectedBatchNo.trim()) {
-      setError("Select a bundle to print.");
-      return;
-    }
-    setPrinting(true);
-    setError(null);
-    setPrintMessage(null);
-    try {
-      const res = await api.printReconciledBundle(selectedBatchNo.trim());
-      setPrintMessage(res.message ?? "Bundle tag sent to printer.");
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Print failed.";
-      setError(msg);
-    } finally {
-      setPrinting(false);
-    }
-  };
-
   const selectedBundle = bundles.find((b) => b.bundleNo === selectedBatchNo) ?? null;
   const computedTotal = slits.reduce((sum, s) => sum + (typeof s.ndtPipes === "number" ? s.ndtPipes : 0), 0);
   const reconcileModeLabel = reconcileEnabled ? "ON" : "OFF";
@@ -376,8 +402,8 @@ export default function ReconcilePage() {
     <div className="space-y-6">
       <h1 className="text-2xl font-bold text-gray-900">Reconcile Bundle</h1>
       <p className="text-gray-600 text-sm">
-        Use this screen to reconcile output bundle totals (existing workflow) or reconcile station outputs (Visual /
-        Hydrotesting / Revisual) for an NDT batch.
+        Correct a bundle&apos;s total pipe count and reprint its tag in one step — no slit rows required.
+        Slit edit/delete below is for traceability on unlocked bundles only.
       </p>
 
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-4 max-w-3xl flex items-center justify-between">
@@ -406,11 +432,6 @@ export default function ReconcilePage() {
       {success && (
         <div className="rounded-md bg-green-50 border border-green-200 p-4 text-green-800 text-sm">
           {success}
-        </div>
-      )}
-      {printMessage && (
-        <div className="rounded-md bg-green-50 border border-green-200 p-4 text-green-800 text-sm">
-          {printMessage}
         </div>
       )}
 
@@ -584,10 +605,91 @@ export default function ReconcilePage() {
           hint="Uses Slit Finish Time, then Slit Start Time, then tag print time (PrintedAt). Bundles without any date are hidden when a date range is set."
         />
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <section className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden lg:col-span-2">
+          <div className="px-5 py-3 bg-primary-50 text-gray-900 font-semibold border-b border-gray-200">
+            Bundle total reconcile &amp; reprint
+          </div>
+          <div className="p-5 space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="sm:col-span-2">
+                <label className="block text-sm font-medium text-gray-700 mb-1">NDT Batch No.</label>
+                <input
+                  value={selectedBatchNo}
+                  onChange={(e) => setSelectedBatchNo(e.target.value)}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
+                  placeholder="Scan or type batch number (any age)"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Current total (NDT pipes)</label>
+                <div className="border border-gray-200 rounded-md px-3 py-2 text-sm bg-gray-50 font-semibold tabular-nums">
+                  {selectedBundle?.totalNdtPcs != null && selectedBundle.totalNdtPcs > 0
+                    ? selectedBundle.totalNdtPcs
+                    : slitsLoading
+                      ? "…"
+                      : computedTotal > 0
+                        ? computedTotal
+                        : "—"}
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Corrected total (NDT pipes)</label>
+                <input
+                  type="number"
+                  min={0}
+                  value={correctedTotal}
+                  onChange={(e) => setCorrectedTotal(parseInt(e.target.value, 10) || 0)}
+                  disabled={!selectedBatchNo.trim()}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50"
+                />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-sm font-medium text-gray-700 mb-1">Reason (required)</label>
+                <input
+                  value={reconcileReason}
+                  onChange={(e) => setReconcileReason(e.target.value)}
+                  disabled={!selectedBatchNo.trim()}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50"
+                  placeholder="e.g. Damaged label; count verified on floor"
+                />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-sm font-medium text-gray-700 mb-1">Reconciled by (required)</label>
+                <input
+                  value={reconciledBy}
+                  onChange={(e) => setReconciledBy(e.target.value)}
+                  disabled={!selectedBatchNo.trim()}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50 max-w-md"
+                  placeholder="Operator name or ID"
+                />
+              </div>
+            </div>
+
+            {bundleManualRecon && (
+              <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                <span className="font-semibold">Manually reconciled (locked).</span>
+                {bundleManualReconReason ? ` Reason: ${bundleManualReconReason}.` : ""}
+                {bundlePostReconCsvSum != null
+                  ? ` Post-recon CSV slit sum: ${bundlePostReconCsvSum}.`
+                  : ""}
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={manualBundleReconcile}
+              disabled={manualReconciling || !selectedBatchNo.trim() || !reconcileEnabled}
+              className="px-4 py-2 bg-primary-600 text-white text-sm font-medium rounded-md hover:bg-primary-700 disabled:opacity-50 disabled:pointer-events-none"
+            >
+              {manualReconciling ? "Reconciling & printing…" : "Reconcile & Reprint"}
+            </button>
+          </div>
+        </section>
+
         <section className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
           <div className="px-5 py-3 bg-primary-50 text-gray-900 font-semibold border-b border-gray-200 flex items-center justify-between">
             <span>
-              Bundles
+              Bundle picker
               {!loading && bundles.length > 0 && (millFilter !== "all" || isDateRangeActive(dateRange)) && (
                 <span className="ml-2 text-sm font-normal text-gray-600">
                   ({filteredBundles.length} of {bundles.length})
@@ -642,12 +744,17 @@ export default function ReconcilePage() {
         </section>
 
         <section className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-5 py-3 bg-primary-50 text-gray-900 font-semibold border-b border-gray-200">
-            Slit Details
+          <div className="px-5 py-3 bg-gray-100 text-gray-900 font-semibold border-b border-gray-200">
+            Slit traceability (unlocked bundles only)
           </div>
           <div className="p-5 space-y-4">
-            {!selectedBatchNo || !selectedBundle ? (
-              <p className="text-sm text-gray-500">Select a bundle from the left to view its slits.</p>
+            {bundleManualRecon ? (
+              <p className="text-sm text-amber-800">
+                This bundle is manually reconciled. Slit edit/delete is disabled; late CSV rows are recorded for audit
+                only.
+              </p>
+            ) : !selectedBatchNo || !selectedBundle ? (
+              <p className="text-sm text-gray-500">Select a bundle to view slit traceability rows.</p>
             ) : (
               <>
                 <div className="grid grid-cols-2 gap-4 text-sm border border-gray-200 rounded-md p-3 bg-gray-50">
@@ -656,161 +763,121 @@ export default function ReconcilePage() {
                     <div className="font-medium text-gray-900">{selectedBundle.bundleNo}</div>
                   </div>
                   <div>
-                    <div className="text-gray-500">PO Number</div>
-                    <div className="font-medium text-gray-900">{selectedBundle.poNumber ?? "—"}</div>
-                  </div>
-                  <div>
-                    <div className="text-gray-500">Mill</div>
-                    <div className="font-medium text-gray-900">{selectedBundle.millNo ?? "—"}</div>
-                  </div>
-                  <div>
-                    <div className="text-gray-500">Total NDT Pipes</div>
-                    <div className="font-semibold text-gray-900">
-                      {selectedBundle.totalNdtPcs != null && selectedBundle.totalNdtPcs > 0
-                        ? selectedBundle.totalNdtPcs
-                        : computedTotal}
-                    </div>
-                    <div className="text-xs text-gray-500">
-                      {selectedBundle.totalNdtPcs != null &&
-                      selectedBundle.totalNdtPcs > 0 &&
-                      selectedBundle.totalNdtPcs !== computedTotal
-                        ? `Slit sum: ${computedTotal} (use Reconcile total to align)`
-                        : "From bundle record / slit sum"}
-                    </div>
+                    <div className="text-gray-500">Slit sum</div>
+                    <div className="font-semibold text-gray-900 tabular-nums">{computedTotal}</div>
                   </div>
                 </div>
 
-                <div className="flex flex-wrap gap-3 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => reconcileBundleTotal(computedTotal)}
-                    disabled={submitting || !selectedBatchNo.trim() || !reconcileEnabled}
-                    className="px-4 py-2 bg-primary-500 text-white text-sm font-medium rounded-md hover:bg-primary-600 disabled:opacity-50 disabled:pointer-events-none"
-                  >
-                    {submitting ? "Saving…" : "Save bundle total"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handlePrintBundle}
-                    disabled={printing || !selectedBatchNo.trim()}
-                    className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:pointer-events-none"
-                  >
-                    {printing ? "Printing…" : "Print bundle"}
-                  </button>
-                </div>
+                {slitsLoading ? (
+                  <p className="text-sm text-gray-500">Loading slits…</p>
+                ) : slits.length === 0 ? (
+                  <p className="text-sm text-gray-500">No slit rows yet — bundle reconcile above does not require them.</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200 text-sm">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-2 py-2 w-10 text-left font-medium text-gray-500 uppercase text-xs" scope="col">
+                            Del
+                          </th>
+                          <th className="px-3 py-2 text-left font-medium text-gray-500 uppercase text-xs">Slit No</th>
+                          <th className="px-3 py-2 text-left font-medium text-gray-500 uppercase text-xs">NDT Pipes</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-200">
+                        {slits.map((s, idx) => (
+                          <tr
+                            key={`${s.slitNo ?? "—"}-${idx}`}
+                            className={`hover:bg-gray-50 cursor-pointer ${selectedSlitNo === s.slitNo ? "bg-primary-50" : ""}`}
+                            onClick={() => {
+                              const slitNo = s.slitNo ?? "";
+                              setSelectedSlitNo(slitNo);
+                              setNewSlitNdtPipes(typeof s.ndtPipes === "number" ? s.ndtPipes : 0);
+                            }}
+                          >
+                            <td className="px-2 py-2 align-middle" onClick={(e) => e.stopPropagation()}>
+                              <input
+                                type="checkbox"
+                                className="h-4 w-4 rounded border-gray-300"
+                                checked={slitsMarkedForDelete.includes(slitValueForApi(s))}
+                                onChange={() => toggleSlitDeleteMark(s)}
+                                aria-label={`Mark slit ${slitValueForApi(s)} for deletion`}
+                              />
+                            </td>
+                            <td className="px-3 py-2 text-gray-900 font-medium">{s.slitNo ?? "—"}</td>
+                            <td className="px-3 py-2 text-gray-700">{s.ndtPipes ?? 0}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {!slitsLoading && slits.length > 0 && (
+                  <div className="border-t border-gray-200 pt-4 space-y-3">
+                    <div className="text-sm font-semibold text-gray-900">Edit slit</div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Slit No</label>
+                        <select
+                          value={selectedSlitNo}
+                          onChange={(e) => {
+                            const slitNo = e.target.value;
+                            setSelectedSlitNo(slitNo);
+                            const current = slits.find((x) => (x.slitNo ?? "") === slitNo);
+                            setNewSlitNdtPipes(typeof current?.ndtPipes === "number" ? current.ndtPipes : 0);
+                          }}
+                          disabled={!selectedBatchNo.trim() || slits.length === 0}
+                          className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50"
+                        >
+                          <option value="">— Select slit —</option>
+                          {slits.map((s, idx) => (
+                            <option key={`${s.slitNo ?? "—"}-${idx}`} value={s.slitNo ?? ""}>
+                              {s.slitNo ?? "—"}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">NDT Pipes</label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={newSlitNdtPipes}
+                          onChange={(e) => setNewSlitNdtPipes(parseInt(e.target.value, 10) || 0)}
+                          disabled={!selectedSlitNo.trim()}
+                          className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50"
+                        />
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-3">
+                      <button
+                        type="button"
+                        onClick={saveSlit}
+                        disabled={savingSlit || !selectedBatchNo.trim() || !selectedSlitNo.trim() || !reconcileEnabled}
+                        className="px-4 py-2 bg-primary-500 text-white text-sm font-medium rounded-md hover:bg-primary-600 disabled:opacity-50 disabled:pointer-events-none"
+                      >
+                        {savingSlit ? "Saving…" : "Save slit"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={deleteMarkedSlits}
+                        disabled={
+                          deletingSlits ||
+                          !selectedBatchNo.trim() ||
+                          slits.length === 0 ||
+                          slitsMarkedForDelete.length === 0 ||
+                          !reconcileEnabled
+                        }
+                        className="px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-md hover:bg-red-700 disabled:opacity-50 disabled:pointer-events-none"
+                      >
+                        {deletingSlits ? "Deleting…" : `Delete selected slit${slitsMarkedForDelete.length === 1 ? "" : "s"}`}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </>
             )}
-            {selectedBatchNo && selectedBundle && (slitsLoading ? (
-              <p className="text-sm text-gray-500">Loading slits…</p>
-            ) : slits.length === 0 ? (
-              <p className="text-sm text-gray-500">No slit rows found for this bundle.</p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-200 text-sm">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-2 py-2 w-10 text-left font-medium text-gray-500 uppercase text-xs" scope="col">
-                        Del
-                      </th>
-                      <th className="px-3 py-2 text-left font-medium text-gray-500 uppercase text-xs">Slit No</th>
-                      <th className="px-3 py-2 text-left font-medium text-gray-500 uppercase text-xs">NDT Pipes</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-200">
-                    {slits.map((s, idx) => (
-                      <tr
-                        key={`${s.slitNo ?? "—"}-${idx}`}
-                        className={`hover:bg-gray-50 cursor-pointer ${selectedSlitNo === s.slitNo ? "bg-primary-50" : ""}`}
-                        onClick={() => {
-                          const slitNo = s.slitNo ?? "";
-                          setSelectedSlitNo(slitNo);
-                          setNewSlitNdtPipes(typeof s.ndtPipes === "number" ? s.ndtPipes : 0);
-                        }}
-                      >
-                        <td className="px-2 py-2 align-middle" onClick={(e) => e.stopPropagation()}>
-                          <input
-                            type="checkbox"
-                            className="h-4 w-4 rounded border-gray-300"
-                            checked={slitsMarkedForDelete.includes(slitValueForApi(s))}
-                            onChange={() => toggleSlitDeleteMark(s)}
-                            aria-label={`Mark slit ${slitValueForApi(s)} for deletion`}
-                          />
-                        </td>
-                        <td className="px-3 py-2 text-gray-900 font-medium">{s.slitNo ?? "—"}</td>
-                        <td className="px-3 py-2 text-gray-700">{s.ndtPipes ?? 0}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ))}
-
-            {selectedBatchNo && selectedBundle && (
-              <div className="border-t border-gray-200 pt-4 space-y-3">
-                <div className="text-sm font-semibold text-gray-900">Edit slit</div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Slit No</label>
-                    <select
-                      value={selectedSlitNo}
-                      onChange={(e) => {
-                        const slitNo = e.target.value;
-                        setSelectedSlitNo(slitNo);
-                        const current = slits.find((x) => (x.slitNo ?? "") === slitNo);
-                        setNewSlitNdtPipes(typeof current?.ndtPipes === "number" ? current.ndtPipes : 0);
-                      }}
-                      disabled={!selectedBatchNo.trim() || slits.length === 0}
-                      className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50"
-                    >
-                      <option value="">— Select slit —</option>
-                      {slits.map((s, idx) => (
-                        <option key={`${s.slitNo ?? "—"}-${idx}`} value={s.slitNo ?? ""}>
-                          {s.slitNo ?? "—"}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">NDT Pipes</label>
-                    <input
-                      type="number"
-                      min={0}
-                      value={newSlitNdtPipes}
-                      onChange={(e) => setNewSlitNdtPipes(parseInt(e.target.value, 10) || 0)}
-                      disabled={!selectedSlitNo.trim()}
-                      className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50"
-                    />
-                  </div>
-                </div>
-                <div className="flex flex-wrap gap-3">
-                  <button
-                    type="button"
-                    onClick={saveSlit}
-                    disabled={savingSlit || !selectedBatchNo.trim() || !selectedSlitNo.trim() || !reconcileEnabled}
-                    className="px-4 py-2 bg-primary-500 text-white text-sm font-medium rounded-md hover:bg-primary-600 disabled:opacity-50 disabled:pointer-events-none"
-                  >
-                    {savingSlit ? "Saving…" : "Save slit"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={deleteMarkedSlits}
-                    disabled={
-                      deletingSlits ||
-                      !selectedBatchNo.trim() ||
-                      slits.length === 0 ||
-                      slitsMarkedForDelete.length === 0 ||
-                      !reconcileEnabled
-                    }
-                    className="px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-md hover:bg-red-700 disabled:opacity-50 disabled:pointer-events-none"
-                  >
-                    {deletingSlits ? "Deleting…" : `Delete selected slit${slitsMarkedForDelete.length === 1 ? "" : "s"}`}
-                  </button>
-                </div>
-              </div>
-            )}
-            {!selectedBatchNo || !selectedBundle ? (
-              <p className="text-sm text-gray-500">Select a bundle to view its slits.</p>
-            ) : null}
           </div>
         </section>
       </div>

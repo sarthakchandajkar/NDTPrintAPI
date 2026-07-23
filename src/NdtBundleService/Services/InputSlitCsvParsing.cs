@@ -119,15 +119,21 @@ public static class InputSlitCsvParsing
     }
 
     /// <summary>Compares PO cells that may differ by formatting (Excel <c>1000057028.0</c> vs <c>1000057028</c>).</summary>
-    public static bool PoEquals(string rowPo, string requestedPo)
+    public static bool PoEquals(string? rowPo, string? requestedPo)
     {
+        if (string.IsNullOrWhiteSpace(rowPo) || string.IsNullOrWhiteSpace(requestedPo))
+            return false;
+
         var a = NormalizePo(rowPo);
         var b = NormalizePo(requestedPo);
         return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
     }
 
-    public static string NormalizePo(string s)
+    public static string NormalizePo(string? s)
     {
+        if (string.IsNullOrWhiteSpace(s))
+            return string.Empty;
+
         s = s.Trim();
         if (s.Length == 0)
             return s;

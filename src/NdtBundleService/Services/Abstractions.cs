@@ -72,7 +72,7 @@ public interface INdtBundleRepository
 
     /// <summary>
     /// When a PLC-closed bundle is awaiting CSV recon for this PO/mill, returns its formatted number,
-    /// engine sequence (last 5 digits), and PLC total. Null when none.
+    /// engine sequence (last 5 digits), and PLC total for the oldest awaiting bundle. Null when none.
     /// </summary>
     Task<(string BundleNo, int EngineSequence, int PlcTotal)?> TryGetAwaitingPlcReconBatchAsync(
         string poNumber,
@@ -80,13 +80,44 @@ public interface INdtBundleRepository
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// All PLC-closed bundles awaiting CSV recon for this PO/mill, oldest first, with current slit sums.
+    /// </summary>
+    Task<IReadOnlyList<PlcCsvReconAwaitingBundle>> ListAwaitingPlcReconBatchesAsync(
+        string poNumber,
+        int millNo,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// When a slit CSV sum is known for a PLC-closed bundle awaiting recon, clear awaiting flag and
     /// set <c>Count_Discrepancy</c> when sums differ. Returns the recon result when a row was found.
+    /// Delegates to <see cref="TryFinalizePlcReconBundleAsync"/> (force finalize).
     /// </summary>
     Task<PlcCsvReconResult?> TryReconcilePlcClosedBundleAsync(
         string poNumber,
         int millNo,
         int slitSum,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Finalizes recon for one bundle when slit sum meets PLC count or the recon window expired.
+    /// Discrepancy WRN is emitted only when this clears <c>Awaiting_Csv_Recon</c>.
+    /// </summary>
+    Task<PlcCsvReconResult?> TryFinalizePlcReconBundleAsync(
+        string bundleNo,
+        int slitSum,
+        int reconWindowMinutes,
+        DateTime utcNow,
+        bool force,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Finalizes all awaiting recon bundles for this PO/mill that are ready (count met or window expired).
+    /// </summary>
+    Task<IReadOnlyList<PlcCsvReconResult>> TryFinalizeReadyPlcReconBundlesAsync(
+        string poNumber,
+        int millNo,
+        int reconWindowMinutes,
+        DateTime utcNow,
         CancellationToken cancellationToken);
 
     /// <summary>
@@ -97,6 +128,42 @@ public interface INdtBundleRepository
         string poNumber,
         int millNo,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// True when <c>Manual_Recon=1</c> for the bundle. When SQL is disabled, returns false.
+    /// </summary>
+    Task<bool> IsManualReconLockedAsync(string batchNo, CancellationToken cancellationToken) =>
+        Task.FromResult(false);
+
+    /// <summary>
+    /// Atomically force-finalizes PLC awaiting recon (when applicable), sets manual lock + audit fields,
+    /// and writes <c>Total_NDT_Pcs</c>. Returns null when bundle not found or SQL disabled.
+    /// </summary>
+    Task<ManualBundleReconcileResult?> ManualReconcileBundleAsync(
+        string batchNo,
+        int correctedTotal,
+        string reason,
+        string reconciledBy,
+        CancellationToken cancellationToken) =>
+        Task.FromResult<ManualBundleReconcileResult?>(null);
+
+    /// <summary>
+    /// Full recompute of current slit-row sum into <c>Post_Recon_Csv_Sum</c> for locked bundles only.
+    /// Never mutates <c>Total_NDT_Pcs</c> or print status.
+    /// </summary>
+    Task<int> TryUpdatePostReconCsvSumAsync(string batchNo, CancellationToken cancellationToken) =>
+        Task.FromResult(0);
+}
+
+/// <summary>Result of operator manual bundle reconcile (count correction + lock).</summary>
+public sealed class ManualBundleReconcileResult
+{
+    public required NdtBundleRecord Bundle { get; init; }
+    public int OriginalTotal { get; init; }
+    public int CorrectedTotal { get; init; }
+    public bool ForceFinalized { get; init; }
+    public bool CountDiscrepancyLogged { get; init; }
+    public int SlitSumAtFinalize { get; init; }
 }
 
 /// <summary>Result of reconciling a late Input Slit sum against a PLC-closed bundle.</summary>
@@ -441,6 +508,19 @@ public interface IWipLabelProvider
 public interface INdtTagPrinter
 {
     Task<bool> PrintBundleTagAsync(InputSlitRecord record, int batchNumber, int totalNdtPcs, bool isReprint, CancellationToken cancellationToken = default);
+}
+
+/// <summary>Reprints an NDT bundle tag with the existing "Reprint" ZPL marker and updates print status.</summary>
+public interface IReconcileBundleTagService
+{
+    Task<ReconcileBundleTagPrintResult> ReprintAsync(NdtBundleRecord bundle, CancellationToken cancellationToken);
+}
+
+public sealed class ReconcileBundleTagPrintResult
+{
+    public bool Success { get; init; }
+    public string? Message { get; init; }
+    public string? ErrorDetail { get; init; }
 }
 
 /// <summary>
