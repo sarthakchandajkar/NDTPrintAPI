@@ -156,6 +156,13 @@ public class NdtBundleOptions
     public int ReconWindowMinutes { get; set; } = 180;
 
     /// <summary>
+    /// When a PLC-closed bundle is recon-finalized and the eventual slit-file sum differs from the PLC-close
+    /// total by more than this percent (relative to the PLC total), set <c>Manual_Review=1</c> on that bundle
+    /// and log WRN with both values. Does not rewrite <c>Total_NDT_Pcs</c>. Default 20.
+    /// </summary>
+    public int PlcCsvDiscrepancyReviewThresholdPercent { get; set; } = 20;
+
+    /// <summary>
     /// Partial-bundle flush at PO end for <c>PoEndSource=Plc</c> mills: <c>Immediate</c> (default) or <c>AfterDrain</c>.
     /// Immediate prints the live remainder on M40.6 without waiting for Input Slit CSVs.
     /// File mills always flush immediately (unchanged).

@@ -760,17 +760,34 @@ WHERE Bundle_No = @BundleNo
             if (!applied.ClearsAwaitingCsvRecon)
                 return null;
 
+            var effects = PlcCsvReconReviewEscalation.ComputeEffects(
+                plcTotal,
+                slitSum,
+                applied.ClearsAwaitingCsvRecon,
+                Opt.PlcCsvDiscrepancyReviewThresholdPercent);
+
             const string updateSql = @"
 UPDATE dbo.NDT_Bundle
 SET Awaiting_Csv_Recon = 0,
-    Count_Discrepancy = @Discrepancy
+    Count_Discrepancy = @Discrepancy,
+    Manual_Review = CASE WHEN @ManualReview = 1 THEN 1 ELSE Manual_Review END
 WHERE Bundle_No = @BundleNo;";
             await using var upd = new Microsoft.Data.SqlClient.SqlCommand(updateSql, conn);
             upd.Parameters.AddWithValue("@BundleNo", bundleNoTrimmed);
-            upd.Parameters.AddWithValue("@Discrepancy", applied.CountDiscrepancy ? 1 : 0);
+            upd.Parameters.AddWithValue("@Discrepancy", effects.CountDiscrepancy ? 1 : 0);
+            upd.Parameters.AddWithValue("@ManualReview", effects.ManualReviewEscalated ? 1 : 0);
             await upd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 
-            if (applied.CountDiscrepancy)
+            if (effects.ManualReviewEscalated)
+            {
+                _logger.LogWarning(
+                    "PLC vs CSV discrepancy exceeds review threshold for bundle {BundleNo}: plcTotal={PlcTotal} slitSum={SlitSum} thresholdPercent={ThresholdPercent}. Manual_Review set (total unchanged).",
+                    bundleNoTrimmed,
+                    plcTotal,
+                    slitSum,
+                    Opt.PlcCsvDiscrepancyReviewThresholdPercent);
+            }
+            else if (effects.CountDiscrepancy)
             {
                 _logger.LogWarning(
                     "PLC vs CSV count discrepancy for bundle {BundleNo}: plc={PlcTotal} slitSum={SlitSum}.",
@@ -790,7 +807,8 @@ WHERE Bundle_No = @BundleNo;";
             {
                 BundleNo = applied.BundleNo,
                 PlcTotal = applied.PlcTotal,
-                SlitSum = applied.SlitSum
+                SlitSum = applied.SlitSum,
+                ManualReviewEscalated = effects.ManualReviewEscalated
             };
         }
         catch (Exception ex)

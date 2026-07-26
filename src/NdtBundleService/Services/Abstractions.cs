@@ -173,6 +173,7 @@ public sealed class PlcCsvReconResult
     public int PlcTotal { get; init; }
     public int SlitSum { get; init; }
     public bool CountDiscrepancy => SlitSum != PlcTotal;
+    public bool ManualReviewEscalated { get; init; }
 }
 
 public interface IPoPlanProvider
