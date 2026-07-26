@@ -115,10 +115,25 @@ function buildSquareTagZpl(params, size) {
     stationText,
   } = params;
 
+  const margin = 40;
+  const left = margin;
+  const fieldWidth = size.widthDots - margin * 2;
+  const topBarcodeHeight = 145;
+  const bottomBarcodeHeight = 100;
+  const barcodeHumanReadable = 34;
+  const bottomGap = 16;
+
+  const bottomY2 = size.lengthDots - margin - bottomBarcodeHeight - barcodeHumanReadable;
+  const bottomY1 = bottomY2 - bottomGap - bottomBarcodeHeight - barcodeHumanReadable;
+  const textStartY = margin + topBarcodeHeight + barcodeHumanReadable + 12;
+  const textEndY = bottomY1 - 12;
+  const hasStation = Boolean(stationText);
+  const textLineCount = hasStation ? 5 : 4;
+  const lineStep = Math.max(46, Math.floor((textEndY - textStartY) / textLineCount));
+
   const zpl = [];
   zpl.push("^XA");
   zpl.push(`^PW${size.widthDots}^LL${size.lengthDots}^LH0,0`);
-  zpl.push("^CF0,34");
 
   const escapedBatch = escape(ndtBatchNo);
   const escapedPo = escape(poNumber);
@@ -130,37 +145,34 @@ function buildSquareTagZpl(params, size) {
   const escapedType = escape(pipeType);
   const escapedStation = escape(stationText);
 
-  const left = 60;
-  const fieldWidth = size.widthDots - left * 2;
+  let y = margin;
+  zpl.push(`^FO${left},${y}^BY3^BCN,${topBarcodeHeight},Y,N,N^FD${escapedBatch}^FS`);
+  y = textStartY;
 
-  let y = 36;
-  zpl.push(`^FO${left},${y}^BY3^BCN,110,Y,N,N^FD${escapedBatch}^FS`);
-  y += 148;
-
-  zpl.push("^CF0,30");
+  zpl.push("^CF0,38");
   zpl.push(
     `^FO${left},${y}^FB${fieldWidth},1,0,C,0^FDMill- ${millNo}  PO: ${escapedPo}  Bund: ${escapedBatch}^FS`
   );
-  y += 38;
+  y += lineStep;
 
   const gradePart = escapedGrade === "" ? "Gr- -" : `Gr- ${escapedGrade}`;
-  zpl.push("^CF0,28");
+  zpl.push("^CF0,34");
   zpl.push(
     `^FO${left},${y}^FB${fieldWidth},1,0,C,0^FD${gradePart}  Size: ${
       escapedSize === "" ? "-" : escapedSize
     }  Thk: ${escapedThickness === "" ? "-" : escapedThickness}^FS`
   );
-  y += 36;
+  y += lineStep;
   zpl.push(
     `^FO${left},${y}^FB${fieldWidth},1,0,C,0^FDLen: ${
       escapedLength === "" ? "-" : escapedLength
     }  Wt: ${escapedWeight === "" ? "-" : escapedWeight}^FS`
   );
-  y += 36;
+  y += lineStep;
 
-  if (escapedStation) {
+  if (hasStation) {
     zpl.push(`^FO${left},${y}^FB${fieldWidth},1,0,C,0^FDStation: ${escapedStation}^FS`);
-    y += 36;
+    y += lineStep;
   }
 
   const d = date instanceof Date ? date : new Date();
@@ -170,15 +182,13 @@ function buildSquareTagZpl(params, size) {
   const dateText = `${dd}/${mm}/${yy}`;
   const typeText = escapedType ? `  ${escapedType}` : "";
   const reprintText = isReprint ? "  Reprint" : "";
-  zpl.push("^CF0,32");
+  zpl.push("^CF0,36");
   zpl.push(
     `^FO${left},${y}^FB${fieldWidth},1,0,C,0^FDDate: ${dateText}  Pcs. ${pcsInBundle}${typeText}${reprintText}^FS`
   );
 
-  const bottomY1 = size.lengthDots - 250;
-  const bottomY2 = bottomY1 + 118;
-  zpl.push(`^FO${left},${bottomY1}^BY2^BCN,88,Y,N,N^FD${escapedBatch}^FS`);
-  zpl.push(`^FO${left},${bottomY2}^BY2^BCN,88,Y,N,N^FD${escapedBatch}^FS`);
+  zpl.push(`^FO${left},${bottomY1}^BY3^BCN,${bottomBarcodeHeight},Y,N,N^FD${escapedBatch}^FS`);
+  zpl.push(`^FO${left},${bottomY2}^BY3^BCN,${bottomBarcodeHeight},Y,N,N^FD${escapedBatch}^FS`);
   zpl.push("^XZ");
   return Buffer.from(zpl.join(""), "utf8");
 }

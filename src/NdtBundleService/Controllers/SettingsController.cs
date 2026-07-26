@@ -669,7 +669,9 @@ public sealed class SettingsController : ControllerBase
                 pipeSize: "1.5",
                 pipeLen: "6",
                 pcsPerBundle: 1,
-                slitNo: $"M{request.MillNo}");
+                slitNo: $"M{request.MillNo}",
+                labelWidthMm: _options.NdtTagLabelWidthMm,
+                labelLengthMm: ResolveDummyLabelLengthMm(request.MillNo));
 
             var sendResult = await _networkPrinterSender
                 .SendAsync(resolved.Address, resolved.Port, zplBytes, cancellationToken)
@@ -713,6 +715,19 @@ public sealed class SettingsController : ControllerBase
                 message = "Print failed: " + ex.Message
             });
         }
+    }
+
+    private int ResolveDummyLabelLengthMm(int millNo)
+    {
+        if (millNo >= 1
+            && millNo <= 4
+            && _options.NdtTagLabelLengthMmByMill.TryGetValue(millNo.ToString(), out var overrideLength)
+            && overrideLength > 0)
+        {
+            return overrideLength;
+        }
+
+        return _options.NdtTagLabelLengthMm;
     }
 
     private bool TryAuthorize(out IActionResult? denied)

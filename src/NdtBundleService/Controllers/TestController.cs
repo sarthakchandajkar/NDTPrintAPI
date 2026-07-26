@@ -1358,7 +1358,9 @@ ORDER BY
                 pipeSize: "6",
                 pipeLen: "40",
                 pcsPerBundle: 10,
-                slitNo: "SLIT-01");
+                slitNo: "SLIT-01",
+                labelWidthMm: _options.NdtTagLabelWidthMm,
+                labelLengthMm: _options.NdtTagLabelLengthMm);
 
             var sendResult = await _networkPrinterSender.SendAsync(address, _options.NdtTagPrinterPort, zplBytes, cancellationToken).ConfigureAwait(false);
 

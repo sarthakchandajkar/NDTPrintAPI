@@ -44,7 +44,20 @@ public sealed class ZplNdtLabelBuilderTests
         var zpl = Encoding.UTF8.GetString(BuildSampleTag(size));
 
         Assert.Contains("^PW800^LL800^LH0,0", zpl, StringComparison.Ordinal);
-        Assert.Equal(2, CountOccurrences(zpl, "^BCN,88,Y,N,N^FD"));
+        Assert.Equal(3, CountOccurrences(zpl, "^BCN,"));
+        Assert.Contains("^FO40,476^BY3^BCN,100,Y,N,N^FD", zpl, StringComparison.Ordinal);
+        Assert.Contains("^FO40,626^BY3^BCN,100,Y,N,N^FD", zpl, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildDummyLabelZpl_Square100x100_SpreadsContentAcrossFullLabel()
+    {
+        var zpl = Encoding.UTF8.GetString(ZplDummyLabelBuilder.BuildDummyLabelZpl(labelWidthMm: 100, labelLengthMm: 100));
+
+        Assert.Contains("^PW800^LL800^LH0,0", zpl, StringComparison.Ordinal);
+        Assert.Equal(3, CountOccurrences(zpl, "^BCN,"));
+        Assert.Contains("MADE IN OMAN - TEST PRINT^FS", zpl, StringComparison.Ordinal);
+        Assert.Contains("^FO40,732^FB720,1,0,C,0^FDMADE IN OMAN - TEST PRINT^FS", zpl, StringComparison.Ordinal);
     }
 
     [Fact]
