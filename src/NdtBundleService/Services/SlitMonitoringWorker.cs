@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Models;
 using NdtBundleService.Services.PoLifecycle;
+using NdtBundleService.Services.PlcHandshake.S7;
 
 namespace NdtBundleService.Services;
 
@@ -34,6 +35,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
     private readonly IMillBundleStateLock _millBundleStateLock;
     private readonly IPoLifecycleService _poLifecycle;
     private readonly INdtTagPrinter _zplTagPrinter;
+    private readonly IS7ConnectionProviderRegistry _s7Registry;
     private readonly ILogger<SlitMonitoringWorker> _logger;
 
     // Per input path: last LastWriteTimeUtc we treated as fully handled (seed baseline or successful run).
@@ -65,6 +67,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         IMillBundleStateLock millBundleStateLock,
         IPoLifecycleService poLifecycle,
         INdtTagPrinter zplTagPrinter,
+        IS7ConnectionProviderRegistry s7Registry,
         ILogger<SlitMonitoringWorker> logger)
     {
         _optionsMonitor = optionsMonitor;
@@ -83,6 +86,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         _millBundleStateLock = millBundleStateLock;
         _poLifecycle = poLifecycle;
         _zplTagPrinter = zplTagPrinter;
+        _s7Registry = s7Registry;
         _logger = logger;
     }
 
@@ -485,6 +489,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 var fifoSessions = new Dictionary<(string Po, int Mill), List<PlcCsvReconAwaitingBundle>>();
                 var reconTouchedPoMills = new HashSet<(string Po, int Mill)>();
                 var manualReviewFlagged = new HashSet<(string Po, int Mill)>();
+                var openPlcCsvSlitSumByPoMill = new Dictionary<(string Po, int Mill), int>();
                 foreach (var row in rows)
                 {
                     if (row.Record is null)
@@ -685,6 +690,50 @@ public sealed class SlitMonitoringWorker : BackgroundService
                             }
                             else
                             {
+                                var trigger = BundleCloseTriggerParser.Parse(o.CloseTrigger);
+                                var plcHealthy = _s7Registry.TryGet(bundleRecord.MillNo)?.IsHealthy == true;
+                                var plcTraceabilityOnly = PlcOpenCsvIngestPolicy.ShouldIngestTraceabilityOnly(
+                                    trigger,
+                                    plcHealthy);
+
+                                if (plcTraceabilityOnly)
+                                {
+                                    // Open bundle: PLC leads (sizeCounts/MW56); CSV records traceability only.
+                                    var peekBatch = await _batchState
+                                        .GetBatchForRecordAsync(
+                                            bundleRecord.PoNumber,
+                                            bundleRecord.MillNo,
+                                            ndtPipes: 0,
+                                            cancellationToken,
+                                            pipeSize)
+                                        .ConfigureAwait(false);
+                                    ndtBatchNoFormatted = peekBatch.BatchNumber > 0
+                                        ? FormatNdtBatchNo(peekBatch.BatchNumber, bundleRecord.MillNo)
+                                        : string.Empty;
+
+                                    if (bundleRecord.NdtPipes > 0)
+                                    {
+                                        openPlcCsvSlitSumByPoMill.TryGetValue(poMillKey, out var csvSum);
+                                        csvSum += bundleRecord.NdtPipes;
+                                        openPlcCsvSlitSumByPoMill[poMillKey] = csvSum;
+
+                                        var sizeKey = FormationChartLookup.NormalizePipeSizeKey(pipeSize);
+                                        if (string.IsNullOrEmpty(sizeKey))
+                                            sizeKey = "Default";
+                                        var plcRemainder = _runtimeState
+                                            .GetSizeCounts(bundleRecord.PoNumber, bundleRecord.MillNo)
+                                            .GetValueOrDefault(sizeKey);
+                                        PlcOpenCsvReconcile.LogDiscrepancyIfNeeded(
+                                            _logger,
+                                            bundleRecord.PoNumber,
+                                            bundleRecord.MillNo,
+                                            csvSum,
+                                            plcRemainder,
+                                            sizeKey);
+                                    }
+                                }
+                                else
+                                {
                                 var (bn, _, _) = await _batchState
                                     .GetBatchForRecordAsync(
                                         bundleRecord.PoNumber,
@@ -740,6 +789,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                                 ndtBatchNoFormatted = batchForOutput > 0
                                     ? FormatNdtBatchNo(batchForOutput, effectiveRecord.MillNo)
                                     : string.Empty;
+                                }
                             }
                         }
                         finally

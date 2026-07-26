@@ -510,6 +510,10 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
             st.RunningWipStampUtc >= wipStampUtc)
             return false;
 
+        // Monotonic WIP stamp: never regress RunningWipStampUtc (guards periodic rescan replay / stale file flap).
+        if (wipStampUtc <= st.RunningWipStampUtc)
+            return false;
+
         if (IsFileBasedPoEndForMill(millNo) &&
             !string.IsNullOrWhiteSpace(st.RunningPo) &&
             !InputSlitCsvParsing.PoEquals(st.RunningPo, normalizedNew))
@@ -530,9 +534,6 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
                 wipFileName,
                 MillPoEndSourceResolver.ToConfigValue(poEndSource));
         }
-
-        if (st.RunningWipStampUtc >= wipStampUtc && InputSlitCsvParsing.PoEquals(st.RunningPo, normalizedNew))
-            return false;
 
         st.RunningPo = normalizedNew;
         st.RunningWipStampUtc = wipStampUtc;

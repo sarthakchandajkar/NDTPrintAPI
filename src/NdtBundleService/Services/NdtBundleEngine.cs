@@ -25,6 +25,11 @@ public sealed class NdtBundleEngine : IBundleEngine
     /// <summary>UTC when file-side count first reached threshold while PLC path owned closes (grace clock).</summary>
     private readonly Dictionary<string, DateTimeOffset> _plcCloseGraceStartedUtc = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// File-side slit sum for <c>PlcWithFileFallback</c> grace only — never merged into sizeCounts when PLC is healthy.
+    /// </summary>
+    private readonly Dictionary<string, int> _plcCloseGraceFileSum = new(StringComparer.OrdinalIgnoreCase);
+
     public NdtBundleEngine(
         IFormationChartProvider formationChartProvider,
         IPipeSizeProvider pipeSizeProvider,
@@ -76,13 +81,31 @@ public sealed class NdtBundleEngine : IBundleEngine
         if (string.IsNullOrEmpty(sizeKey))
             sizeKey = "Default";
 
+        var trigger = BundleCloseTriggerParser.Parse(_options.Value.CloseTrigger);
+        var plcHealthy = _s7Registry.TryGet(record.MillNo)?.IsHealthy == true;
+
+        // PLC leads open accumulation (sizeCounts/MW56); CSV reconciles only — never adds to the same counters.
+        if (PlcOpenCsvIngestPolicy.ShouldIngestTraceabilityOnly(trigger, plcHealthy))
+        {
+            if (trigger == BundleCloseTrigger.PlcWithFileFallback)
+            {
+                await TryPlcGraceFileSideCloseAsync(
+                        record,
+                        sizeKey,
+                        sizeThreshold,
+                        onBundleClosedAsync,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            return;
+        }
+
         var sizeCounts = _runtimeState.GetSizeCounts(record.PoNumber, record.MillNo);
         if (!sizeCounts.TryGetValue(sizeKey, out var currentSizeCount))
             currentSizeCount = 0;
         currentSizeCount += record.NdtPipes;
 
-        var trigger = BundleCloseTriggerParser.Parse(_options.Value.CloseTrigger);
-        var plcHealthy = _s7Registry.TryGet(record.MillNo)?.IsHealthy == true;
         var allowFileClose = BundleClosePolicy.AllowFileThresholdClose(trigger, plcHealthy);
         var graceKey = GraceKey(record.PoNumber, record.MillNo, sizeKey);
         var missedPlcClose = false;
@@ -90,6 +113,7 @@ public sealed class NdtBundleEngine : IBundleEngine
         if (currentSizeCount < sizeThreshold)
         {
             _plcCloseGraceStartedUtc.Remove(graceKey);
+            _plcCloseGraceFileSum.Remove(graceKey);
         }
         else if (!allowFileClose
                  && trigger == BundleCloseTrigger.PlcWithFileFallback
@@ -110,7 +134,7 @@ public sealed class NdtBundleEngine : IBundleEngine
             }
         }
 
-        // File-driven close is gated by CloseTrigger; when PLC path owns closes, still accumulate for hooter/recon.
+        // File-driven close when PLC path does not own accumulation.
         if (allowFileClose && currentSizeCount >= sizeThreshold && currentSizeCount > 0)
         {
             var totalForBatch = currentSizeCount;
@@ -318,8 +342,75 @@ public sealed class NdtBundleEngine : IBundleEngine
             cancellationToken);
     }
 
-    private void ClearPlcCloseGrace(string poNumber, int millNo, string sizeKey) =>
-        _plcCloseGraceStartedUtc.Remove(GraceKey(poNumber, millNo, sizeKey));
+    private void ClearPlcCloseGrace(string poNumber, int millNo, string sizeKey)
+    {
+        var key = GraceKey(poNumber, millNo, sizeKey);
+        _plcCloseGraceStartedUtc.Remove(key);
+        _plcCloseGraceFileSum.Remove(key);
+    }
+
+    /// <summary>
+    /// PlcWithFileFallback safety-net: track file-side threshold in isolation from PLC sizeCounts.
+    /// </summary>
+    private async Task TryPlcGraceFileSideCloseAsync(
+        InputSlitRecord record,
+        string sizeKey,
+        int sizeThreshold,
+        Func<InputSlitRecord, int, int, Task> onBundleClosedAsync,
+        CancellationToken cancellationToken)
+    {
+        var graceKey = GraceKey(record.PoNumber, record.MillNo, sizeKey);
+        _plcCloseGraceFileSum.TryGetValue(graceKey, out var fileSum);
+        fileSum += record.NdtPipes;
+        _plcCloseGraceFileSum[graceKey] = fileSum;
+
+        if (fileSum < sizeThreshold)
+        {
+            _plcCloseGraceStartedUtc.Remove(graceKey);
+            return;
+        }
+
+        var now = _time.GetUtcNow();
+        if (!_plcCloseGraceStartedUtc.TryGetValue(graceKey, out var started))
+        {
+            started = now;
+            _plcCloseGraceStartedUtc[graceKey] = started;
+        }
+
+        var graceSeconds = Math.Max(0, _options.Value.PlcCloseGraceSeconds);
+        if ((now - started).TotalSeconds < graceSeconds)
+            return;
+
+        _plcCloseGraceStartedUtc.Remove(graceKey);
+        _plcCloseGraceFileSum.Remove(graceKey);
+
+        var totalForBatch = fileSum;
+        var alloc = _runtimeState.CloseBundle(record.PoNumber, record.MillNo, totalForBatch, sizeThreshold);
+        var batchNo = alloc.FinalSequence;
+        await CorrectStampsIfNeededAsync(record.PoNumber, record.MillNo, alloc, cancellationToken)
+            .ConfigureAwait(false);
+
+        _logger.LogWarning(
+            "Missed PLC close for PO {PO} Mill {Mill} Size {Size}: file-side count {Count} ≥ threshold {Threshold} for {GraceSeconds}s with healthy S7; executing file-driven close (PlcCloseGraceSeconds safety-net).",
+            record.PoNumber,
+            record.MillNo,
+            sizeKey,
+            totalForBatch,
+            sizeThreshold,
+            graceSeconds);
+
+        _logger.LogInformation(
+            "Closing size-based bundle {BatchNo} for PO {PO} Mill {Mill} Size {Size} threshold={Threshold} total={Total} (PlcCloseGrace file-side safety-net)",
+            batchNo,
+            record.PoNumber,
+            record.MillNo,
+            sizeKey,
+            sizeThreshold,
+            totalForBatch);
+
+        await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
+        await onBundleClosedAsync(record, batchNo, totalForBatch).ConfigureAwait(false);
+    }
 
     private static string GraceKey(string poNumber, int millNo, string sizeKey) =>
         $"{InputSlitCsvParsing.NormalizePo(poNumber)}|{millNo}|{sizeKey}";

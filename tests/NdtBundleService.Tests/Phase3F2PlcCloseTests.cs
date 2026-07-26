@@ -124,7 +124,7 @@ public sealed class Phase3F2PlcCloseTests
             CancellationToken.None);
 
         Assert.Empty(closed);
-        Assert.Equal(11, runtime.GetSizeCounts("1000060163", 1)["Default"]);
+        Assert.Equal(0, runtime.GetSizeCounts("1000060163", 1).GetValueOrDefault("Default"));
     }
 
     [Fact]

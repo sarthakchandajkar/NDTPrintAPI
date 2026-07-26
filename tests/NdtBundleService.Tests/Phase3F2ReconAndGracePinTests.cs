@@ -147,7 +147,7 @@ public sealed class Phase3F2ReconAndGracePinTests
             OnClose,
             CancellationToken.None);
         Assert.Empty(closed);
-        Assert.Equal(11, runtime.GetSizeCounts("1000060163", 1)["Default"]);
+        Assert.Equal(0, runtime.GetSizeCounts("1000060163", 1).GetValueOrDefault("Default"));
 
         clock.Advance(TimeSpan.FromSeconds(59));
         await engine.ProcessSlitRecordAsync(
@@ -166,6 +166,68 @@ public sealed class Phase3F2ReconAndGracePinTests
         Assert.Equal(13, closed[0]);
         Assert.Contains(logger.Messages, m => m.Contains("Missed PLC close", StringComparison.Ordinal));
         Assert.Equal(0, runtime.GetSizeCounts("1000060163", 1).GetValueOrDefault("Default"));
+    }
+
+    [Fact]
+    public async Task PlcCloseGrace_close_total_is_isolated_file_sum_plc_sizeCounts_never_merged()
+    {
+        const string po = "1000060163";
+        const int mill = 1;
+        const int livePlcRemainder = 25;
+        const int threshold = 80;
+
+        var runtime = new TrackingRuntime();
+        await runtime.EnsureInitializedAsync(CancellationToken.None);
+        runtime.SetSizeCounts(po, mill, new Dictionary<string, int> { ["Default"] = livePlcRemainder });
+
+        var clock = new ManualTimeProvider(new DateTimeOffset(2026, 7, 26, 12, 0, 0, TimeSpan.Zero));
+        var engine = TestEngineFactory.Create(
+            new FormationStub(threshold),
+            new PipeSizeStub(),
+            runtime,
+            closeTrigger: "PlcWithFileFallback",
+            s7Registry: new FixedRegistry(new AlwaysHealthyS7Provider()),
+            plcCloseGraceSeconds: 60,
+            timeProvider: clock);
+
+        var closed = new List<int>();
+        Task OnClose(InputSlitRecord _, int __, int total)
+        {
+            closed.Add(total);
+            return Task.CompletedTask;
+        }
+
+        await engine.ProcessSlitRecordAsync(
+            new InputSlitRecord { PoNumber = po, MillNo = mill, SlitNo = "1", NdtPipes = threshold },
+            OnClose,
+            CancellationToken.None);
+        Assert.Empty(closed);
+        Assert.Equal(livePlcRemainder, runtime.GetSizeCounts(po, mill)["Default"]);
+
+        clock.Advance(TimeSpan.FromSeconds(61));
+        await engine.ProcessSlitRecordAsync(
+            new InputSlitRecord { PoNumber = po, MillNo = mill, SlitNo = "2", NdtPipes = 3 },
+            OnClose,
+            CancellationToken.None);
+
+        Assert.Single(closed);
+        Assert.Equal(threshold + 3, closed[0]);
+        Assert.NotEqual(threshold + 3 + livePlcRemainder, closed[0]);
+    }
+
+    [Fact]
+    public void ApplySlitContribution_zero_ndt_is_peek_only_no_running_total_or_sequence_burn()
+    {
+        var runtime = new TrackingRuntime();
+        runtime.ApplySlitContribution("1000060288", 1, ndtPipes: 17, threshold: 80, out _, out var afterFirst);
+        Assert.Equal(17, afterFirst);
+        Assert.Equal(0, runtime.GetEngineBatchNo("1000060288", 1));
+
+        runtime.ApplySlitContribution("1000060288", 1, ndtPipes: 0, threshold: 80, out var peekBatch, out var peekTotal);
+        Assert.Equal(17, peekTotal);
+        Assert.Equal(1, peekBatch);
+        Assert.Equal(17, runtime.GetRunningTotal("1000060288", 1));
+        Assert.Equal(0, runtime.GetEngineBatchNo("1000060288", 1));
     }
 
     private sealed class ManualTimeProvider : TimeProvider
