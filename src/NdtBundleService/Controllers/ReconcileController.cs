@@ -166,11 +166,13 @@ public sealed class ReconcileController : ControllerBase
         IReadOnlyList<(string SlitNo, int NdtPipes)> slits = Array.Empty<(string, int)>();
         var bundleTotal = fallbackBundleTotal;
         var syncedTotal = 0;
+        var manualReconLocked = false;
         string? warning = null;
 
         try
         {
             slits = await _bundleRepository.GetSlitsForBatchAsync(batchNo, cancellationToken).ConfigureAwait(false);
+            manualReconLocked = await _bundleRepository.IsManualReconLockedAsync(batchNo, cancellationToken).ConfigureAwait(false);
             syncedTotal = await _bundleRepository
                 .TrySyncBundleTotalFromSlitsAsync(batchNo, forceFromSlits: true, cancellationToken)
                 .ConfigureAwait(false);
@@ -207,7 +209,9 @@ public sealed class ReconcileController : ControllerBase
             : "Slit reconciled in SQL (no matching per-slit output CSV row was updated on disk).";
         if (sqlRowsUpdated > 0)
             message += $" {sqlRowsUpdated} Output_Slit_Row row(s) updated.";
-        if (syncedTotal > 0)
+        if (manualReconLocked)
+            message += $" Manual reconcile total remains {bundleTotal} NDT pipe(s).";
+        else if (syncedTotal > 0)
             message += $" Bundle total synced to {syncedTotal} NDT pipe(s) from slit sum.";
         if (!string.IsNullOrWhiteSpace(warning))
             message += " " + warning;
@@ -242,10 +246,6 @@ public sealed class ReconcileController : ControllerBase
             return BadRequest(new { Message = "NdtBatchNo is required." });
         if (request.CorrectedTotal < 0)
             return BadRequest(new { Message = "CorrectedTotal must be non-negative." });
-        if (string.IsNullOrWhiteSpace(request.Reason))
-            return BadRequest(new { Message = "Reason is required." });
-        if (string.IsNullOrWhiteSpace(request.ReconciledBy))
-            return BadRequest(new { Message = "ReconciledBy is required." });
 
         var batchNo = request.NdtBatchNo.Trim();
         ManualBundleReconcileResult? result;
@@ -255,8 +255,8 @@ public sealed class ReconcileController : ControllerBase
                 .ManualReconcileBundleAsync(
                     batchNo,
                     request.CorrectedTotal,
-                    request.Reason,
-                    request.ReconciledBy,
+                    reason: string.Empty,
+                    reconciledBy: string.Empty,
                     cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -395,16 +395,6 @@ public sealed class ReconcileController : ControllerBase
 
         try
         {
-            if (await _bundleRepository.IsManualReconLockedAsync(batchNo, cancellationToken).ConfigureAwait(false))
-            {
-                var locked = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
-                return Conflict(new
-                {
-                    Message = "Bundle is manually reconciled and locked. Slit edits are not allowed.",
-                    ManualReconReason = locked?.ManualReconReason
-                });
-            }
-
             var bundle = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
             if (bundle is null)
                 return NotFound(new { Message = $"Bundle {batchNo} not found." });
@@ -426,6 +416,8 @@ public sealed class ReconcileController : ControllerBase
                         $"No per-slit output CSV row or SQL Output_Slit_Row entry found for bundle {batchNo} and slit {ReconcileCsvParsing.NormalizeSlitKey(slitNo)}."
                 });
             }
+
+            await RefreshPostReconCsvSumIfLockedAsync(batchNo, CancellationToken.None).ConfigureAwait(false);
 
             return await BuildReconcileSlitSuccessResponseAsync(
                 batchNo,
@@ -453,6 +445,14 @@ public sealed class ReconcileController : ControllerBase
         }
     }
 
+    private async Task RefreshPostReconCsvSumIfLockedAsync(string batchNo, CancellationToken cancellationToken)
+    {
+        if (!await _bundleRepository.IsManualReconLockedAsync(batchNo, cancellationToken).ConfigureAwait(false))
+            return;
+
+        await _bundleRepository.TryUpdatePostReconCsvSumAsync(batchNo, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>
     /// Removes selected slit row(s) for a bundle from per-slit output CSVs (deletes the file when no data rows remain),
     /// deletes matching Output_Slit_Row traceability rows when SQL is configured (Input_Slit_Row is unchanged), and recomputes bundle total.
@@ -466,15 +466,6 @@ public sealed class ReconcileController : ControllerBase
             return BadRequest(new { Message = "At least one SlitNo is required." });
 
         var batchNo = request.NdtBatchNo.Trim();
-        if (await _bundleRepository.IsManualReconLockedAsync(batchNo, cancellationToken).ConfigureAwait(false))
-        {
-            var locked = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
-            return Conflict(new
-            {
-                Message = "Bundle is manually reconciled and locked. Slit deletes are not allowed.",
-                ManualReconReason = locked?.ManualReconReason
-            });
-        }
 
         var bundle = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
         if (bundle is null)
@@ -488,12 +479,15 @@ public sealed class ReconcileController : ControllerBase
 
         await _traceability.DeleteOutputSlitRowsForRemovedOutputLinesAsync(batchNo, traceRefs, cancellationToken).ConfigureAwait(false);
 
+        await RefreshPostReconCsvSumIfLockedAsync(batchNo, cancellationToken).ConfigureAwait(false);
+
         var slits = await _bundleRepository.GetSlitsForBatchAsync(batchNo, cancellationToken).ConfigureAwait(false);
         var syncedTotal = await _bundleRepository
             .TrySyncBundleTotalFromSlitsAsync(batchNo, forceFromSlits: true, cancellationToken)
             .ConfigureAwait(false);
         bundle = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
         var bundleTotal = bundle?.TotalNdtPcs ?? syncedTotal;
+        var manualReconLocked = await _bundleRepository.IsManualReconLockedAsync(batchNo, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation(
             "Deleted {RowsRemoved} slit output row(s) for bundle {BatchNo}; trace refs {TraceCount}; bundle total {BundleTotal}.",
@@ -501,9 +495,11 @@ public sealed class ReconcileController : ControllerBase
 
         return Ok(new
         {
-            Message = syncedTotal > 0
-                ? "Selected slit row(s) removed; bundle total synced from remaining slit sum."
-                : "Selected slit row(s) removed from output CSV(s); Output_Slit_Row entries removed where configured (Input_Slit_Row unchanged).",
+            Message = manualReconLocked
+                ? "Selected slit row(s) removed. Manual reconcile total unchanged."
+                : syncedTotal > 0
+                    ? "Selected slit row(s) removed; bundle total synced from remaining slit sum."
+                    : "Selected slit row(s) removed from output CSV(s); Output_Slit_Row entries removed where configured (Input_Slit_Row unchanged).",
             NdtBatchNo = batchNo,
             RowsRemoved = rowsRemoved,
             NewBundleTotalNdtPcs = bundleTotal,

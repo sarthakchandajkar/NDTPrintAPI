@@ -40,8 +40,6 @@ export default function ReconcilePage() {
   const [deletingSlits, setDeletingSlits] = useState(false);
   const [manualReconciling, setManualReconciling] = useState(false);
   const [correctedTotal, setCorrectedTotal] = useState(0);
-  const [reconcileReason, setReconcileReason] = useState("");
-  const [reconciledBy, setReconciledBy] = useState("");
   const [bundleManualRecon, setBundleManualRecon] = useState(false);
   const [bundleManualReconReason, setBundleManualReconReason] = useState<string | null>(null);
   const [bundlePostReconCsvSum, setBundlePostReconCsvSum] = useState<number | null>(null);
@@ -252,25 +250,12 @@ export default function ReconcilePage() {
       setError("Corrected total must be non-negative.");
       return;
     }
-    if (!reconcileReason.trim()) {
-      setError("Reason is required.");
-      return;
-    }
-    if (!reconciledBy.trim()) {
-      setError("Your name/ID is required (Reconciled by).");
-      return;
-    }
 
     setManualReconciling(true);
     setError(null);
     setSuccess(null);
     try {
-      const res = await api.manualBundleReconcile(
-        selectedBatchNo.trim(),
-        correctedTotal,
-        reconcileReason.trim(),
-        reconciledBy.trim()
-      );
+      const res = await api.manualBundleReconcile(selectedBatchNo.trim(), correctedTotal);
       const printNote = res.printSuccess ? " Tag reprinted." : res.printMessage ? ` Print: ${res.printMessage}` : "";
       setSuccess((res.message ?? "Bundle manually reconciled.") + printNote);
       await refresh();
@@ -331,6 +316,9 @@ export default function ReconcilePage() {
       setSlitsLoading(true);
       const details = await api.reconcileBundleSlits(selectedBatchNo.trim());
       setSlits(Array.isArray(details?.slits) ? details.slits : []);
+      setBundlePostReconCsvSum(
+        typeof details?.bundle?.postReconCsvSum === "number" ? details.bundle.postReconCsvSum : null
+      );
       const firstSlit = (Array.isArray(details?.slits) ? details.slits : []).find((x) => (x.slitNo ?? "").trim() !== "");
       if (firstSlit?.slitNo) {
         setSelectedSlitNo(firstSlit.slitNo);
@@ -375,6 +363,9 @@ export default function ReconcilePage() {
       setSlitsLoading(true);
       const details = await api.reconcileBundleSlits(selectedBatchNo.trim());
       setSlits(Array.isArray(details?.slits) ? details.slits : []);
+      setBundlePostReconCsvSum(
+        typeof details?.bundle?.postReconCsvSum === "number" ? details.bundle.postReconCsvSum : null
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : "Slit reconcile failed.");
     } finally {
@@ -403,7 +394,7 @@ export default function ReconcilePage() {
       <h1 className="text-2xl font-bold text-gray-900">Reconcile Bundle</h1>
       <p className="text-gray-600 text-sm">
         Correct a bundle&apos;s total pipe count and reprint its tag in one step — no slit rows required.
-        Slit edit/delete below is for traceability on unlocked bundles only.
+        Use slit traceability below to view or edit individual slit rows on any bundle.
       </p>
 
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-4 max-w-3xl flex items-center justify-between">
@@ -643,26 +634,6 @@ export default function ReconcilePage() {
                   className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50"
                 />
               </div>
-              <div className="sm:col-span-2">
-                <label className="block text-sm font-medium text-gray-700 mb-1">Reason (required)</label>
-                <input
-                  value={reconcileReason}
-                  onChange={(e) => setReconcileReason(e.target.value)}
-                  disabled={!selectedBatchNo.trim()}
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50"
-                  placeholder="e.g. Damaged label; count verified on floor"
-                />
-              </div>
-              <div className="sm:col-span-2">
-                <label className="block text-sm font-medium text-gray-700 mb-1">Reconciled by (required)</label>
-                <input
-                  value={reconciledBy}
-                  onChange={(e) => setReconciledBy(e.target.value)}
-                  disabled={!selectedBatchNo.trim()}
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50 max-w-md"
-                  placeholder="Operator name or ID"
-                />
-              </div>
             </div>
 
             {bundleManualRecon && (
@@ -745,18 +716,20 @@ export default function ReconcilePage() {
 
         <section className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
           <div className="px-5 py-3 bg-gray-100 text-gray-900 font-semibold border-b border-gray-200">
-            Slit traceability (unlocked bundles only)
+            Slit traceability
           </div>
           <div className="p-5 space-y-4">
-            {bundleManualRecon ? (
-              <p className="text-sm text-amber-800">
-                This bundle is manually reconciled. Slit edit/delete is disabled; late CSV rows are recorded for audit
-                only.
-              </p>
-            ) : !selectedBatchNo || !selectedBundle ? (
+            {!selectedBatchNo || !selectedBundle ? (
               <p className="text-sm text-gray-500">Select a bundle to view slit traceability rows.</p>
             ) : (
               <>
+                {bundleManualRecon && (
+                  <p className="text-sm text-amber-800 rounded-md border border-amber-200 bg-amber-50 px-3 py-2">
+                    Manually reconciled bundle — slit rows can be edited below. Corrected total above stays locked until
+                    you reconcile &amp; reprint again.
+                    {bundlePostReconCsvSum != null ? ` Post-recon CSV slit sum: ${bundlePostReconCsvSum}.` : ""}
+                  </p>
+                )}
                 <div className="grid grid-cols-2 gap-4 text-sm border border-gray-200 rounded-md p-3 bg-gray-50">
                   <div>
                     <div className="text-gray-500">Bundle No</div>

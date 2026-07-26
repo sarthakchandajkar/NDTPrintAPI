@@ -518,6 +518,65 @@ WHERE Mill_No = @MillNo
         }
     }
 
+    public async Task<string?> TryFindTraceabilityBundleForPoMillAsync(
+        string poNumber,
+        int millNo,
+        string? pipeSize,
+        CancellationToken cancellationToken)
+    {
+        if (millNo is < 1 or > 4 || string.IsNullOrWhiteSpace(poNumber) || !UseDatabase)
+            return null;
+
+        var normalized = InputSlitCsvParsing.NormalizePo(poNumber);
+        var requested = poNumber.Trim();
+        var pipeSizeNorm = FormationChartLookup.NormalizePipeSizeKey(pipeSize);
+        var hasSizeFilter = !string.IsNullOrEmpty(pipeSizeNorm);
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            const string sql = @"
+SELECT TOP 1 b.Bundle_No
+FROM dbo.NDT_Bundle b
+LEFT JOIN dbo.Bundle_Label bl
+  ON bl.PO_Number = b.PO_Number AND bl.Mill_No = b.Mill_No
+WHERE b.Mill_No = @MillNo
+  AND (b.PO_Number = @Po OR b.PO_Number = @PoNormalized)
+  AND (b.Total_NDT_Pcs > 0 OR b.Manual_Recon = 1)
+  AND (
+    @HasSizeFilter = 0
+    OR bl.Pipe_Size IS NULL
+    OR LTRIM(RTRIM(bl.Pipe_Size)) = @PipeSizeNorm
+    OR LTRIM(RTRIM(bl.Pipe_Size)) = @PipeSizeRaw
+  )
+ORDER BY
+  CASE WHEN b.Manual_Recon = 1 THEN 0 ELSE 1 END,
+  b.PrintedAt DESC;";
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@MillNo", millNo);
+            cmd.Parameters.AddWithValue("@Po", requested);
+            cmd.Parameters.AddWithValue("@PoNormalized", normalized);
+            cmd.Parameters.AddWithValue("@HasSizeFilter", hasSizeFilter);
+            cmd.Parameters.AddWithValue("@PipeSizeNorm", pipeSizeNorm);
+            cmd.Parameters.AddWithValue("@PipeSizeRaw", (object?)pipeSize?.Trim() ?? DBNull.Value);
+            var result = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            return result is string bundleNo && !string.IsNullOrWhiteSpace(bundleNo)
+                ? bundleNo.Trim()
+                : null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Failed to find traceability bundle for Mill {MillNo} PO {Po} size {Size} in database.",
+                millNo,
+                poNumber,
+                pipeSize ?? "(unknown)");
+            return null;
+        }
+    }
+
     public async Task<int> MarkManualReviewAsync(string poNumber, int millNo, CancellationToken cancellationToken)
     {
         if (millNo is < 1 or > 4 || string.IsNullOrWhiteSpace(poNumber) || !UseDatabase)
@@ -1096,6 +1155,7 @@ WHERE Bundle_No = @BundleNo;";
 
         var slits = await GetSlitsForBatchAsync(batchNoTrimmed, cancellationToken).ConfigureAwait(false);
         var slitSum = slits.Sum(s => s.NdtPipes);
+        var lockedTotal = await TryReadLockedTotalNdtPcsAsync(batchNoTrimmed, cancellationToken).ConfigureAwait(false);
 
         try
         {
@@ -1110,12 +1170,50 @@ WHERE Bundle_No = @BatchNo
             cmd.Parameters.AddWithValue("@SlitSum", slitSum);
             cmd.Parameters.AddWithValue("@BatchNo", batchNoTrimmed);
             await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+            if (lockedTotal.HasValue
+                && PostReconCsvSumGuard.ShouldWarn(
+                    lockedTotal.Value,
+                    slitSum,
+                    Opt.PostReconCsvSumWarnMarginPcs))
+            {
+                _logger.LogWarning(
+                    "Post_Recon_Csv_Sum {PostReconSum} exceeds Manual_Recon locked total {LockedTotal} by {Delta} (margin {Margin}) for bundle {BatchNo}; late Closed-PO traceability attach.",
+                    slitSum,
+                    lockedTotal.Value,
+                    slitSum - lockedTotal.Value,
+                    Opt.PostReconCsvSumWarnMarginPcs,
+                    batchNoTrimmed);
+            }
+
             return slitSum;
         }
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Could not update Post_Recon_Csv_Sum for {BatchNo}.", batchNoTrimmed);
             return 0;
+        }
+    }
+
+    private async Task<int?> TryReadLockedTotalNdtPcsAsync(string batchNo, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            const string sql = @"
+SELECT Total_NDT_Pcs
+FROM dbo.NDT_Bundle
+WHERE Bundle_No = @BatchNo AND Manual_Recon = 1;";
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@BatchNo", batchNo);
+            var result = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            return result is int total ? total : null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not read locked Total_NDT_Pcs for {BatchNo}.", batchNo);
+            return null;
         }
     }
 

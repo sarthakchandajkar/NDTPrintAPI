@@ -456,12 +456,7 @@ export const api = {
       { method: "POST" }
     ),
   reconcileBundles: () => fetchApi<ReconcileBundle[]>("/api/Reconcile/bundles"),
-  manualBundleReconcile: (
-    ndtBatchNo: string,
-    correctedTotal: number,
-    reason: string,
-    reconciledBy: string
-  ) =>
+  manualBundleReconcile: (ndtBatchNo: string, correctedTotal: number) =>
     fetchApi<{
       message?: string;
       printSuccess?: boolean;
@@ -472,7 +467,7 @@ export const api = {
       countDiscrepancyLogged?: boolean;
     }>("/api/Reconcile/manual-bundle-reconcile", {
       method: "POST",
-      body: JSON.stringify({ ndtBatchNo, correctedTotal, reason, reconciledBy }),
+      body: JSON.stringify({ ndtBatchNo, correctedTotal }),
     }),
   reconcile: (ndtBatchNo: string, newNdtPipes: number) =>
     fetchApi<{ message?: string; csvFilesUpdated?: number }>("/api/Reconcile/reconcile", {

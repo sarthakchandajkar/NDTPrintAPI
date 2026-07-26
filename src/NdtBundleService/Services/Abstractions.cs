@@ -59,6 +59,18 @@ public interface INdtBundleRepository
     Task<bool> HasPrintedBundleForPoAsync(int millNo, string poNumber, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Best existing bundle for Closed-PO traceability attach (manual-recon locked preferred, then latest printed).
+    /// Scoped to PO+mill+pipe size via <c>Bundle_Label</c> when <paramref name="pipeSize"/> is known.
+    /// Returns formatted <c>Bundle_No</c> or null when SQL is disabled or no row exists.
+    /// </summary>
+    Task<string?> TryFindTraceabilityBundleForPoMillAsync(
+        string poNumber,
+        int millNo,
+        string? pipeSize,
+        CancellationToken cancellationToken) =>
+        Task.FromResult<string?>(null);
+
+    /// <summary>
     /// Sets <c>Manual_Review=1</c> on existing <c>NDT_Bundle</c> rows for the PO/mill (additive column).
     /// Returns rows updated; 0 when SQL disabled, column missing, or no matching rows.
     /// </summary>

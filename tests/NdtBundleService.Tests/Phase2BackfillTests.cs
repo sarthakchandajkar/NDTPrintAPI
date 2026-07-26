@@ -45,25 +45,25 @@ public sealed class Phase2BackfillTests
     }
 
     [Fact]
-    public void Decide_closed_with_auto_close_is_orphan_auto_close()
+    public void Decide_closed_with_auto_close_is_traceability_only()
     {
         var action = InputSlitBackfillPolicy.Decide(
             BackfillCoverageKind.None,
             PoLifecyclePhase.Closed,
             MillPoEndSource.Plc,
             autoCloseOrphanBundles: true);
-        Assert.Equal(BackfillBundlingAction.OrphanAutoClose, action);
+        Assert.Equal(BackfillBundlingAction.TraceabilityOnly, action);
     }
 
     [Fact]
-    public void Decide_closed_without_auto_close_is_manual_review()
+    public void Decide_closed_without_auto_close_is_traceability_only()
     {
         var action = InputSlitBackfillPolicy.Decide(
             BackfillCoverageKind.None,
             PoLifecyclePhase.Closed,
             MillPoEndSource.Plc,
             autoCloseOrphanBundles: false);
-        Assert.Equal(BackfillBundlingAction.ManualReview, action);
+        Assert.Equal(BackfillBundlingAction.TraceabilityOnly, action);
     }
 
     [Fact]

@@ -598,19 +598,81 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     var bundleRecord = CloneRecordWithNdt(effectiveRecord, bundleNdtPipes);
 
                     BackfillBundlingAction backfillAction = BackfillBundlingAction.NormalBundle;
-                    if (isBackfill)
-                    {
-                        var phase = _poLifecycle.GetPhase(bundleRecord.MillNo, bundleRecord.PoNumber);
-                        backfillAction = InputSlitBackfillPolicy.Decide(
-                            backfillCoverage,
-                            phase,
-                            poEndSource,
-                            o.AutoCloseOrphanBundles);
-                    }
+                    var rowPhase = _poLifecycle.GetPhase(bundleRecord.MillNo, bundleRecord.PoNumber);
+                    backfillAction = ClosedPoSlitIngestPolicy.DecideForRow(
+                        isBackfill,
+                        backfillCoverage,
+                        rowPhase,
+                        poEndSource,
+                        o.AutoCloseOrphanBundles);
 
                     if (backfillAction is BackfillBundlingAction.TraceabilityOnly or BackfillBundlingAction.ManualReview)
                     {
-                        if (backfillAction == BackfillBundlingAction.ManualReview)
+                        var closedPoTraceability = ClosedPoSlitIngestPolicy.ShouldRouteTraceabilityOnly(rowPhase, poEndSource);
+                        string? closedPoBatchNo = null;
+
+                        if (closedPoTraceability)
+                        {
+                            var poMillKey = (
+                                InputSlitCsvParsing.NormalizePo(bundleRecord.PoNumber),
+                                bundleRecord.MillNo);
+                            var (_, closedPoPipeSize) = ResolvePipeInfoForPo(
+                                bundleRecord.PoNumber,
+                                wipByPo,
+                                pipeSizeByPo);
+
+                            if (!fifoSessions.TryGetValue(poMillKey, out var awaitingList))
+                            {
+                                var loaded = await _bundleRepository
+                                    .ListAwaitingPlcReconBatchesAsync(
+                                        bundleRecord.PoNumber,
+                                        bundleRecord.MillNo,
+                                        cancellationToken)
+                                    .ConfigureAwait(false);
+                                awaitingList = loaded.Count > 0
+                                    ? loaded.Select(static b => b).ToList()
+                                    : [];
+                                fifoSessions[poMillKey] = awaitingList;
+                            }
+
+                            var route = await ClosedPoTraceabilityBatchResolver
+                                .ResolveAsync(
+                                    _bundleRepository,
+                                    awaitingList,
+                                    bundleRecord,
+                                    bundleRecord.MillNo,
+                                    closedPoPipeSize,
+                                    cancellationToken)
+                                .ConfigureAwait(false);
+
+                            closedPoBatchNo = route.BatchNoFormatted;
+                            if (route.RequiresManualReview)
+                            {
+                                if (manualReviewFlagged.Add(poMillKey))
+                                {
+                                    _logger.LogWarning(
+                                        "Closed PO traceability: no existing bundle for PO {PO} Mill {Mill} file {File}; Manual_Review (no new sequence).",
+                                        poMillKey.Item1,
+                                        poMillKey.Item2,
+                                        Path.GetFileName(fileFull));
+                                    await _bundleRepository
+                                        .MarkManualReviewAsync(poMillKey.Item1, poMillKey.Item2, cancellationToken)
+                                        .ConfigureAwait(false);
+                                }
+                            }
+                            else if (!string.IsNullOrWhiteSpace(closedPoBatchNo))
+                            {
+                                reconTouchedPoMills.Add(poMillKey);
+                                _logger.LogInformation(
+                                    "Closed PO traceability: PO {PO} Mill {Mill} file {File} attached to bundle {Batch}.",
+                                    poMillKey.Item1,
+                                    poMillKey.Item2,
+                                    Path.GetFileName(fileFull),
+                                    closedPoBatchNo);
+                            }
+                        }
+
+                        if (backfillAction == BackfillBundlingAction.ManualReview && !closedPoTraceability)
                         {
                             var key = (InputSlitCsvParsing.NormalizePo(bundleRecord.PoNumber), bundleRecord.MillNo);
                             if (manualReviewFlagged.Add(key))
@@ -637,9 +699,10 @@ public sealed class SlitMonitoringWorker : BackgroundService
                             rawTrace = InputSlitCsvParsing.ReplaceFieldAtIndex(rawTrace, poColumnIndex, effectivePo);
                         }
 
-                        outputLines.Add(rawTrace.TrimEnd() + ",");
+                        outputLines.Add(rawTrace.TrimEnd() + "," + (closedPoBatchNo ?? string.Empty));
                         inputRowsForSql.Add((effectiveRecord, sourceRowNumber));
-                        // Still count as "bundled" for SQL/output write so Input_Slit_Row is recorded.
+                        if (!string.IsNullOrWhiteSpace(closedPoBatchNo))
+                            outputRowsForSql.Add((bundleRecord, closedPoBatchNo, sourceRowNumber));
                         anyRowBundled = true;
                         sourceRowNumber++;
                         continue;

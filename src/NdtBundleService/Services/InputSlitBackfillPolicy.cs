@@ -70,9 +70,9 @@ public static class InputSlitBackfillPolicy
 
         if (phase == PoLifecyclePhase.Closed)
         {
-            return autoCloseOrphanBundles
-                ? BackfillBundlingAction.OrphanAutoClose
-                : BackfillBundlingAction.ManualReview;
+            // Closed PO late files: traceability-only (see ClosedPoSlitIngestPolicy). Orphan flush at PO end
+            // is handled by PoLifecycleSweepWorker, not by opening new bundles on late ingest.
+            return BackfillBundlingAction.TraceabilityOnly;
         }
 
         // Running / Draining + no coverage

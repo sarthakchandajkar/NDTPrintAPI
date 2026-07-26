@@ -156,6 +156,13 @@ public class NdtBundleOptions
     public int ReconWindowMinutes { get; set; } = 180;
 
     /// <summary>
+    /// When <c>Post_Recon_Csv_Sum</c> on a Manual_Recon-locked bundle exceeds <c>Total_NDT_Pcs</c> by more than
+    /// this many pipes after a late Closed-PO attach, emit a single WRN per update so operators see growing CSV drift.
+    /// Default 0 (warn on any exceed).
+    /// </summary>
+    public int PostReconCsvSumWarnMarginPcs { get; set; } = 0;
+
+    /// <summary>
     /// When a PLC-closed bundle is recon-finalized and the eventual slit-file sum differs from the PLC-close
     /// total by more than this percent (relative to the PLC total), set <c>Manual_Review=1</c> on that bundle
     /// and log WRN with both values. Does not rewrite <c>Total_NDT_Pcs</c>. Default 20.
