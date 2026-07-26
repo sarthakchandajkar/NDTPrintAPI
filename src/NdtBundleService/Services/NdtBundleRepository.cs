@@ -346,6 +346,15 @@ WITH Ranked AS (
         Print_Status,
         Print_Attempted_At,
         Print_Error,
+        Close_Source,
+        Awaiting_Csv_Recon,
+        Count_Discrepancy,
+        Manual_Recon,
+        Manual_Recon_By,
+        Manual_Recon_At,
+        Manual_Recon_Reason,
+        Manual_Recon_Original_Total,
+        Post_Recon_Csv_Sum,
         ROW_NUMBER() OVER (PARTITION BY Bundle_No ORDER BY PrintedAt DESC) AS rn
     FROM dbo.NDT_Bundle
 ),
@@ -371,7 +380,16 @@ SELECT
     r.Rejected_Short_Length_Pipe AS RejectedShortLengthPipe,
     r.Print_Status AS PrintStatus,
     r.Print_Attempted_At AS PrintAttemptedAt,
-    r.Print_Error AS PrintError
+    r.Print_Error AS PrintError,
+    r.Close_Source AS CloseSource,
+    r.Awaiting_Csv_Recon AS AwaitingCsvRecon,
+    r.Count_Discrepancy AS CountDiscrepancy,
+    r.Manual_Recon AS ManualRecon,
+    r.Manual_Recon_By AS ManualReconBy,
+    r.Manual_Recon_At AS ManualReconAt,
+    r.Manual_Recon_Reason AS ManualReconReason,
+    r.Manual_Recon_Original_Total AS ManualReconOriginalTotal,
+    r.Post_Recon_Csv_Sum AS PostReconCsvSum
 FROM Ranked r
 LEFT JOIN SlitSum s ON s.NDT_Batch_No = r.Bundle_No
 WHERE r.rn = 1

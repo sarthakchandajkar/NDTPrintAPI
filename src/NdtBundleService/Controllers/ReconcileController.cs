@@ -108,9 +108,17 @@ public sealed class ReconcileController : ControllerBase
                 {
                     var seq = ParseBatchSequence(bundle.BundleNo);
                     var isLatest = seq == maxSeq;
-                    var isOpenPartial = isLatest && bundle.TotalNdtPcs > 0 && bundle.TotalNdtPcs < threshold;
-                    if (!isOpenPartial)
-                        result.Add(bundle);
+                    if (ReconcileBundleListFilter.ShouldExcludeFromList(
+                            isLatest,
+                            bundle.TotalNdtPcs,
+                            threshold,
+                            bundle.ManualRecon,
+                            bundle.PrintStatus))
+                    {
+                        continue;
+                    }
+
+                    result.Add(bundle);
                 }
             }
 
