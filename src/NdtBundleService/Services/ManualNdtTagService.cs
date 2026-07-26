@@ -523,7 +523,8 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             date,
             pcs,
             isReprint,
-            StationTextForZpl(station, operatorStationNumber));
+            StationTextForZpl(station, operatorStationNumber),
+            ZplNdtLabelBuilder.NdtTagLabelSize.FromOptions(Options, millNo));
 
         await TrySaveZplPreviewAsync(station, operatorStationNumber, ndtBatchNo, zplBytes, cancellationToken).ConfigureAwait(false);
         var sendResult = await _sender.SendAsync(address, printerPort, zplBytes, cancellationToken).ConfigureAwait(false);

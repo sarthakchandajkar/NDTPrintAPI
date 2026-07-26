@@ -95,7 +95,8 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
             pipeType,
             date,
             totalNdtPcs,
-            isReprint);
+            isReprint,
+            labelSize: ZplNdtLabelBuilder.NdtTagLabelSize.FromOptions(opt, record.MillNo));
 
         // Always save a ZPL preview file alongside bundle output so the layout
         // can be visualized in an external ZPL viewer without depending on the printer.

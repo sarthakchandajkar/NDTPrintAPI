@@ -69,6 +69,15 @@ public class NdtBundleOptions
     /// <summary>Port for direct network printing when NdtTagPrinterAddress is set (e.g. 9100 for many label printers). Ignored if using NdtTagPrinterName.</summary>
     public int NdtTagPrinterPort { get; set; } = 9100;
 
+    /// <summary>Physical tag width in mm (Honeywell PD45S default stock: 100 mm).</summary>
+    public int NdtTagLabelWidthMm { get; set; } = 100;
+
+    /// <summary>Physical tag length in mm. Use 100 for 10 cm × 10 cm square tags; 50 for legacy compact tags.</summary>
+    public int NdtTagLabelLengthMm { get; set; } = 100;
+
+    /// <summary>Optional per-mill tag length override (keys <c>"1"</c>–<c>"4"</c>). Width uses <see cref="NdtTagLabelWidthMm"/>.</summary>
+    public Dictionary<string, int> NdtTagLabelLengthMmByMill { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>When true, the service writes ZPL preview files to output folders and sends tags to NdtTagPrinterAddress. When false, only CSV outputs are produced (bundle CSV, slit CSV, manual station CSV); no ZPL files and no network print.</summary>
     public bool EnableNdtTagZplAndPrint { get; set; }
 

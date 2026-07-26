@@ -94,7 +94,8 @@ public sealed class ReconcileBundleTagService : IReconcileBundleTagService
             pipeType,
             labelDate,
             bundle.TotalNdtPcs,
-            isReprint: true);
+            isReprint: true,
+            labelSize: ZplNdtLabelBuilder.NdtTagLabelSize.FromOptions(_options, bundle.MillNo));
 
         _logger.LogInformation(
             "Printing bundle {BatchNo} (Reprint) with {NdtPcs} pcs.",
