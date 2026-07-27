@@ -7,6 +7,19 @@ using NdtBundleService.Models;
 
 namespace NdtBundleService.Services;
 
+/// <summary>
+/// Outcome of an <c>Output_Slit_Row</c> batch renumber. When <see cref="Succeeded"/> is false the
+/// rows in SQL still reference the old batch number and reconcile/SAP totals will be wrong until remediated.
+/// </summary>
+public sealed record OutputSlitBatchCorrectionResult(
+    bool Succeeded,
+    int RowsUpdated,
+    IReadOnlyList<string> SourceFiles)
+{
+    public static OutputSlitBatchCorrectionResult NoOp { get; } =
+        new(true, 0, Array.Empty<string>());
+}
+
 public interface ITraceabilityRepository
 {
     Task RecordInputSlitRowsAsync(
@@ -41,9 +54,10 @@ public interface ITraceabilityRepository
 
     /// <summary>
     /// Updates <c>Output_Slit_Row.NDT_Batch_No</c> from provisional to final for the PO/mill.
-    /// Returns distinct source file paths that were updated (for per-slit CSV rewrite).
+    /// Ensures the target <c>NDT_Bundle</c> parent row exists first (FK safety). The result reports
+    /// whether the SQL rename actually succeeded — callers must not claim correction on failure.
     /// </summary>
-    Task<IReadOnlyList<string>> UpdateOutputSlitBatchNoAsync(
+    Task<OutputSlitBatchCorrectionResult> UpdateOutputSlitBatchNoAsync(
         string poNumber,
         int millNo,
         string oldBatchNo,
@@ -448,7 +462,7 @@ END";
         }
     }
 
-    public async Task<IReadOnlyList<string>> UpdateOutputSlitBatchNoAsync(
+    public async Task<OutputSlitBatchCorrectionResult> UpdateOutputSlitBatchNoAsync(
         string poNumber,
         int millNo,
         string oldBatchNo,
@@ -460,71 +474,144 @@ END";
             || string.IsNullOrWhiteSpace(newBatchNo)
             || string.Equals(oldBatchNo, newBatchNo, StringComparison.OrdinalIgnoreCase))
         {
-            return Array.Empty<string>();
+            return OutputSlitBatchCorrectionResult.NoOp;
         }
 
         var po = InputSlitCsvParsing.NormalizePo(poNumber);
         var files = new List<string>();
-        try
-        {
-            await using var conn = SqlTraceabilityConnection.Create(Opt);
-            await OpenConnectionAsync(conn, "Output_Slit_Row batch correct", cancellationToken).ConfigureAwait(false);
+        const int maxAttempts = 3;
+        Exception? lastError = null;
 
-            const string selectSql = @"
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                await using var conn = SqlTraceabilityConnection.Create(Opt);
+                await OpenConnectionAsync(conn, "Output_Slit_Row batch correct", cancellationToken).ConfigureAwait(false);
+
+                files.Clear();
+                const string selectSql = @"
 SELECT DISTINCT Source_File
 FROM dbo.Output_Slit_Row
 WHERE NDT_Batch_No = @OldBatch
   AND Mill_No = @Mill
   AND PO_Number = @Po;";
-            await using (var sel = new SqlCommand(selectSql, conn))
-            {
-                sel.Parameters.AddWithValue("@OldBatch", oldBatchNo.Trim());
-                sel.Parameters.AddWithValue("@Mill", millNo);
-                sel.Parameters.AddWithValue("@Po", po);
-                await using var reader = await sel.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                await using (var sel = new SqlCommand(selectSql, conn))
                 {
-                    if (!reader.IsDBNull(0))
-                        files.Add(reader.GetString(0));
+                    sel.Parameters.AddWithValue("@OldBatch", oldBatchNo.Trim());
+                    sel.Parameters.AddWithValue("@Mill", millNo);
+                    sel.Parameters.AddWithValue("@Po", po);
+                    await using var reader = await sel.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                    while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                    {
+                        if (!reader.IsDBNull(0))
+                            files.Add(reader.GetString(0));
+                    }
                 }
-            }
 
-            const string updateSql = @"
+                if (files.Count == 0)
+                    return new OutputSlitBatchCorrectionResult(true, 0, Array.Empty<string>());
+
+                // FK safety: the final bundle row is inserted by the close/print flow AFTER stamp
+                // correction, so create the parent row here if missing (placeholder Total 0 — the
+                // close upsert overwrites it moments later). Without this the UPDATE hits
+                // FK_Output_Slit_Row_Bundle and rows silently stay on the provisional number
+                // (2026-07-26 bundle 1226100002/1226100003 incident).
+                await EnsureBundleParentRowAsync(conn, po, millNo, newBatchNo.Trim(), cancellationToken).ConfigureAwait(false);
+
+                const string updateSql = @"
 UPDATE dbo.Output_Slit_Row
 SET NDT_Batch_No = @NewBatch
 WHERE NDT_Batch_No = @OldBatch
   AND Mill_No = @Mill
   AND PO_Number = @Po;";
-            await using var upd = new SqlCommand(updateSql, conn);
-            upd.Parameters.AddWithValue("@NewBatch", newBatchNo.Trim());
-            upd.Parameters.AddWithValue("@OldBatch", oldBatchNo.Trim());
-            upd.Parameters.AddWithValue("@Mill", millNo);
-            upd.Parameters.AddWithValue("@Po", po);
-            var updated = await upd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            if (updated > 0)
+                await using var upd = new SqlCommand(updateSql, conn);
+                upd.Parameters.AddWithValue("@NewBatch", newBatchNo.Trim());
+                upd.Parameters.AddWithValue("@OldBatch", oldBatchNo.Trim());
+                upd.Parameters.AddWithValue("@Mill", millNo);
+                upd.Parameters.AddWithValue("@Po", po);
+                var updated = await upd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                if (updated > 0)
+                {
+                    _writeTracker.RecordSuccess("Output_Slit_Row", $"batch {oldBatchNo}→{newBatchNo} ({updated})");
+                    _logger.LogInformation(
+                        "Corrected {Count} Output_Slit_Row row(s) batch {OldBatch} → {NewBatch} for PO {PO} Mill {Mill}.",
+                        updated,
+                        oldBatchNo,
+                        newBatchNo,
+                        po,
+                        millNo);
+                }
+
+                return new OutputSlitBatchCorrectionResult(true, updated, files);
+            }
+            catch (Exception ex)
             {
-                _writeTracker.RecordSuccess("Output_Slit_Row", $"batch {oldBatchNo}→{newBatchNo} ({updated})");
-                _logger.LogInformation(
-                    "Corrected {Count} Output_Slit_Row row(s) batch {OldBatch} → {NewBatch} for PO {PO} Mill {Mill}.",
-                    updated,
-                    oldBatchNo,
-                    newBatchNo,
-                    po,
-                    millNo);
+                lastError = ex;
+                if (attempt < maxAttempts)
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "Output_Slit_Row batch correct {OldBatch} → {NewBatch} for PO {PO} Mill {Mill} failed (attempt {Attempt}/{Max}); retrying.",
+                        oldBatchNo,
+                        newBatchNo,
+                        po,
+                        millNo,
+                        attempt,
+                        maxAttempts);
+                    await Task.Delay(TimeSpan.FromMilliseconds(400 * attempt), cancellationToken).ConfigureAwait(false);
+                }
             }
         }
-        catch (Exception ex)
+
+        _writeTracker.RecordFailure("Output_Slit_Row", lastError?.Message ?? "batch correct failed", $"{oldBatchNo}→{newBatchNo}");
+        _logger.LogError(
+            lastError,
+            "FAILED to correct Output_Slit_Row batch {OldBatch} → {NewBatch} for PO {PO} Mill {Mill} after {Max} attempts. "
+            + "SQL rows still reference the old batch; reconcile slit sums and SAP traceability are wrong for this bundle until remediated.",
+            oldBatchNo,
+            newBatchNo,
+            po,
+            millNo,
+            maxAttempts);
+        return new OutputSlitBatchCorrectionResult(false, 0, files);
+    }
+
+    /// <summary>
+    /// Inserts a placeholder <c>NDT_Bundle</c> row (Total 0) for the batch when none exists,
+    /// so <c>Output_Slit_Row</c> FK writes cannot fail on a missing parent.
+    /// </summary>
+    private async Task EnsureBundleParentRowAsync(
+        SqlConnection conn,
+        string po,
+        int millNo,
+        string batchNo,
+        CancellationToken cancellationToken)
+    {
+        const string sql = @"
+IF NOT EXISTS (SELECT 1 FROM dbo.NDT_Bundle WHERE Bundle_No = @BundleNo)
+BEGIN
+    INSERT INTO dbo.NDT_Bundle
+        (PO_Number, Mill_No, Bundle_No, Total_NDT_Pcs, Rejected_P, IsReprint)
+    VALUES
+        (@PoNumber, @MillNo, @BundleNo, 0, 0, 0);
+    SELECT CAST(1 AS INT);
+END
+ELSE
+    SELECT CAST(0 AS INT);";
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@PoNumber", po);
+        cmd.Parameters.AddWithValue("@MillNo", millNo is >= 1 and <= 4 ? millNo : 1);
+        cmd.Parameters.AddWithValue("@BundleNo", batchNo);
+        var created = (int?)await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) ?? 0;
+        if (created == 1)
         {
-            _logger.LogWarning(
-                ex,
-                "Failed to correct Output_Slit_Row batch {OldBatch} → {NewBatch} for PO {PO} Mill {Mill}.",
-                oldBatchNo,
-                newBatchNo,
+            _logger.LogInformation(
+                "Created placeholder NDT_Bundle row for batch {Batch} (PO {PO}, Mill {Mill}, Total_NDT_Pcs=0) ahead of Output_Slit_Row batch correction.",
+                batchNo,
                 po,
                 millNo);
         }
-
-        return files;
     }
 
     private static bool IsMissingInputSlitFileSeenTable(SqlException ex)
@@ -573,6 +660,24 @@ WHERE NDT_Batch_No = @OldBatch
         {
             await using var conn = SqlTraceabilityConnection.Create(Opt);
             await OpenConnectionAsync(conn, "Output_Slit_Row insert", cancellationToken).ConfigureAwait(false);
+
+            // Idempotent per source file: a re-dropped/re-processed file REPLACES its earlier rows.
+            // Blind appends double-count slit sums (2026-07-26: same late file attached 3× to a
+            // closed bundle inflated Post_Recon_Csv_Sum 76 → 108).
+            if (!string.IsNullOrWhiteSpace(sourceFile))
+            {
+                const string deleteSql = "DELETE FROM dbo.Output_Slit_Row WHERE Source_File = @SourceFile;";
+                await using var del = new SqlCommand(deleteSql, conn);
+                del.Parameters.AddWithValue("@SourceFile", sourceFile);
+                var removed = await del.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                if (removed > 0)
+                {
+                    _logger.LogInformation(
+                        "Replacing {Removed} existing Output_Slit_Row row(s) for re-processed file {File}.",
+                        removed,
+                        sourceFile);
+                }
+            }
 
             const string sql = @"
 INSERT INTO dbo.Output_Slit_Row
@@ -1216,7 +1321,7 @@ END";
     private static string? NullIfEmpty(string? s) =>
         string.IsNullOrWhiteSpace(s) ? null : s.Trim();
 
-    private static async Task EnsureBundleRowExistsAsync(
+    private async Task EnsureBundleRowExistsAsync(
         SqlConnection conn,
         InputSlitRecord record,
         string batchNo,
@@ -1229,7 +1334,10 @@ BEGIN
         (PO_Number, Mill_No, Bundle_No, Total_NDT_Pcs, Context_Slit_No, Slit_Start_Time, Slit_Finish_Time, Rejected_P, NDT_Short_Length_Pipe, Rejected_Short_Length_Pipe, IsReprint)
     VALUES
         (@PoNumber, @MillNo, @BundleNo, 0, @SlitNo, @SlitStartTime, @SlitFinishTime, @RejectedPipes, @NdtShortLengthPipe, @RejectedShortLengthPipe, 0);
-END";
+    SELECT CAST(1 AS INT);
+END
+ELSE
+    SELECT CAST(0 AS INT);";
 
         await using var cmd = new SqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("@PoNumber", InputSlitCsvParsing.NormalizePo(record.PoNumber));
@@ -1241,7 +1349,17 @@ END";
         cmd.Parameters.AddWithValue("@RejectedPipes", record.RejectedPipes);
         cmd.Parameters.AddWithValue("@NdtShortLengthPipe", (object?)NullIfEmpty(record.NdtShortLengthPipe) ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@RejectedShortLengthPipe", (object?)NullIfEmpty(record.RejectedShortLengthPipe) ?? DBNull.Value);
-        await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        var created = (int?)await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) ?? 0;
+        if (created == 1)
+        {
+            // Also fires when a deleted/remediated bundle number is resurrected by a late slit row —
+            // the PO on this log line is the slit row's PO, which may differ from the original bundle owner.
+            _logger.LogInformation(
+                "Created NDT_Bundle parent row for batch {Batch} (PO {PO}, Mill {Mill}, Total_NDT_Pcs=0) from Output_Slit_Row write (forming bundle or missing/deleted parent).",
+                batchNo,
+                InputSlitCsvParsing.NormalizePo(record.PoNumber),
+                record.MillNo);
+        }
     }
 }
 

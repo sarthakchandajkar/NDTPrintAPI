@@ -153,10 +153,61 @@ public sealed class WipBundleReconciliationTests : IDisposable
         Assert.Equal(0, enqueued);
     }
 
+    [Fact]
+    public async Task ReconcileAsync_orders_by_embedded_production_time_not_write_stamp()
+    {
+        // 2026-07-27 Mill-4 churn pin: a 24-Jul file whose write stamp was refreshed by a backlog copy
+        // must not become "latest" and flip-flop PO ends 537 ↔ 446.
+        WriteWipFile("WIP_04_1000060537_2604039295_260727_033749.csv", DateTime.UtcNow.AddHours(-3));
+        WriteWipFile("WIP_04_1000060446_2604039120_260724_051622.csv", DateTime.UtcNow.AddMinutes(-3));
+
+        var sut = CreateService(
+            mills:
+            [
+                new MillConfig { MillNo = 1, PoEndSource = "Plc" },
+                new MillConfig { MillNo = 2, PoEndSource = "Plc" },
+                new MillConfig { MillNo = 3, PoEndSource = "Plc" },
+                new MillConfig { MillNo = 4, PoEndSource = "File" }
+            ],
+            runningPoByMill: new Dictionary<int, string> { [4] = "1000060537" },
+            hasPrintedBundleForPo: (_, _) => Task.FromResult(false));
+
+        var enqueued = await sut.ReconcileAsync(CancellationToken.None);
+
+        Assert.Equal(0, enqueued);
+        Assert.True(_queue.TryEnqueue(new FileBasedPoChangeRequest { MillNo = 4, NewPo = "probe" }));
+        _queue.MarkCompleted(4);
+    }
+
+    [Fact]
+    public async Task ReconcileAsync_uses_legacy_write_stamp_ordering_when_option_disabled()
+    {
+        WriteWipFile("WIP_04_1000060537_2604039295_260727_033749.csv", DateTime.UtcNow.AddHours(-3));
+        WriteWipFile("WIP_04_1000060446_2604039120_260724_051622.csv", DateTime.UtcNow.AddMinutes(-3));
+
+        var sut = CreateService(
+            mills:
+            [
+                new MillConfig { MillNo = 1, PoEndSource = "Plc" },
+                new MillConfig { MillNo = 2, PoEndSource = "Plc" },
+                new MillConfig { MillNo = 3, PoEndSource = "Plc" },
+                new MillConfig { MillNo = 4, PoEndSource = "File" }
+            ],
+            runningPoByMill: new Dictionary<int, string> { [4] = "1000060537" },
+            hasPrintedBundleForPo: (_, _) => Task.FromResult(false),
+            useEmbeddedTimestamp: false);
+
+        var enqueued = await sut.ReconcileAsync(CancellationToken.None);
+
+        Assert.Equal(1, enqueued); // refreshed-write-stamp 24-Jul file wins under legacy ordering
+        _queue.MarkCompleted(4);
+    }
+
     private WipBundleReconciliationService CreateService(
         IReadOnlyList<MillConfig> mills,
         IReadOnlyDictionary<int, string> runningPoByMill,
-        Func<int, string, Task<bool>> hasPrintedBundleForPo)
+        Func<int, string, Task<bool>> hasPrintedBundleForPo,
+        bool useEmbeddedTimestamp = true)
     {
         var millConfigs = mills.Count > 0
             ? mills.ToList()
@@ -172,6 +223,7 @@ public sealed class WipBundleReconciliationTests : IDisposable
         {
             UseSqlServerForBundles = true,
             ConnectionString = "Server=.;Database=test;",
+            WipOrderingUseEmbeddedTimestamp = useEmbeddedTimestamp,
             MillSlitLive = new MillSlitLiveOptions
             {
                 WipBundleFolder = _wipFolder,

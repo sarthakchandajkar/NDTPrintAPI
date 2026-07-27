@@ -102,6 +102,9 @@ public static class NdtBundleServiceCollectionExtensions
         services.AddSingleton<IManualNdtTagService, ManualNdtTagService>();
         services.AddSingleton<IUploadNdtBundleFileService, UploadNdtBundleFileService>();
         services.AddSingleton<ITraceabilityRepository, TraceabilityRepository>();
+        services.AddSingleton<IOutputSlitSapStatusRepository, OutputSlitSapStatusRepository>();
+        services.AddSingleton<IPpcCorrectionRepository, PpcCorrectionRepository>();
+        services.AddSingleton<IResubmitDriftService, ResubmitDriftService>();
         services.AddSingleton<IReconcileSyncService, ReconcileSyncService>();
         services.AddSingleton<IReconcileBundleTagService, ReconcileBundleTagService>();
         services.AddSingleton<ISqlTraceabilityWriteTracker, SqlTraceabilityWriteTracker>();
@@ -118,6 +121,7 @@ public static class NdtBundleServiceCollectionExtensions
         services.AddHostedService<WipBundleFileReconciliationWorker>();
         services.AddHostedService<PoLifecycleSweepWorker>();
         services.AddHostedService<SlitMonitoringWorker>();
+        services.AddHostedService<NdtInputSlitSapStatusWorker>();
         services.AddHostedService<UploadNdtBundleSchedulerWorker>();
 
         return services;

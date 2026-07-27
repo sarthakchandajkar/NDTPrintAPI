@@ -50,7 +50,10 @@ public sealed class SqlTraceabilityHealth : ISqlTraceabilityHealth
         "Bundle_Label",
         "Manual_Station_Run",
         "NDT_Process_Consolidated",
-        "Input_Slit_File_Seen"
+        "Input_Slit_File_Seen",
+        "Output_Slit_Sap_Status",
+        "Output_Slit_Sap_Status_Event",
+        "Ppc_Correction_Item"
     };
 
     private readonly IOptionsMonitor<NdtBundleOptions> _optionsMonitor;

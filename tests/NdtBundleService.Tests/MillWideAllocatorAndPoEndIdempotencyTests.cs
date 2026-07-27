@@ -101,7 +101,7 @@ public sealed class MillWideAllocatorAndPoEndIdempotencyTests : IDisposable
     public async Task StampCorrector_rewrites_csv_when_sql_returns_no_file_refs()
     {
         var csvPath = Path.Combine(_tempDir, "slit_out.csv");
-        await File.WriteAllTextAsync(csvPath, "a,b,c\n1,2,1226100008\n");
+        await File.WriteAllTextAsync(csvPath, "a,PO-A,c\n1,PO-A,1226100008\n");
 
         var opts = new TestOptionsMonitor<NdtBundleOptions>(new NdtBundleOptions
         {
@@ -117,6 +117,102 @@ public sealed class MillWideAllocatorAndPoEndIdempotencyTests : IDisposable
         var text = await File.ReadAllTextAsync(csvPath);
         Assert.Contains("1226100007", text);
         Assert.DoesNotContain("1226100008", text);
+    }
+
+    [Fact]
+    public async Task StampCorrector_fallback_scan_does_not_rewrite_other_pos_csv()
+    {
+        // PO-B legitimately owns 1226100008 (collision) — its CSV must not be touched when PO-A is corrected.
+        var otherPoCsv = Path.Combine(_tempDir, "other_po.csv");
+        await File.WriteAllTextAsync(otherPoCsv, "a,PO-B,c\n1,PO-B,1226100008\n");
+
+        var opts = new TestOptionsMonitor<NdtBundleOptions>(new NdtBundleOptions
+        {
+            OutputBundleFolder = _tempDir
+        });
+        var corrector = new BundleProvisionalStampCorrector(
+            new EmptyTraceability(),
+            opts,
+            NullLogger<BundleProvisionalStampCorrector>.Instance);
+
+        await corrector.CorrectAsync("PO-A", 1, provisionalSequence: 8, finalSequence: 7, CancellationToken.None);
+
+        var text = await File.ReadAllTextAsync(otherPoCsv);
+        Assert.Contains("1226100008", text);
+        Assert.DoesNotContain("1226100007", text);
+    }
+
+    [Fact]
+    public async Task Close_reassigns_other_pos_colliding_provisional_and_next_close_needs_no_correction()
+    {
+        var store = CreateStore();
+        await store.EnsureInitializedAsync(CancellationToken.None);
+
+        // PO-A opens with provisional 1 (mill floor 0).
+        store.ApplySlitContribution("1000060520", 1, 5, threshold: 15, out var aProvisional, out _);
+        Assert.Equal(1, aProvisional);
+        store.SetSizeCounts("1000060520", 1, new Dictionary<string, int> { ["Default"] = 5 });
+
+        // PO-B closes and takes final 1 — the number PO-A holds provisionally.
+        var bClose = store.CloseBundle("1000060288", 1, 17, 15);
+        Assert.Equal(1, bClose.FinalSequence);
+
+        var reassignments = store.ReassignCollidingProvisionals(1, bClose.FinalSequence, "1000060288");
+        var r = Assert.Single(reassignments);
+        Assert.Equal("1000060520", r.PoNumber);
+        Assert.Equal(1, r.OldProvisional);
+        Assert.Equal(2, r.NewProvisional);
+
+        // PO-A's slot now stamps new rows with the reassigned provisional…
+        store.ApplySlitContribution("1000060520", 1, 3, threshold: 15, out var aNext, out _);
+        Assert.Equal(2, aNext);
+
+        // …and its close allocates the same number: no further stamp correction needed.
+        var aClose = store.CloseBundle("1000060520", 1, 8, 15);
+        Assert.Equal(2, aClose.FinalSequence);
+        Assert.Equal(2, aClose.ProvisionalSequence);
+        Assert.False(aClose.NeedsStampCorrection);
+    }
+
+    [Fact]
+    public async Task ReassignCollidingProvisionals_ignores_closed_po_and_higher_provisionals()
+    {
+        var store = CreateStore();
+        await store.EnsureInitializedAsync(CancellationToken.None);
+
+        store.ApplySlitContribution("PO-A", 1, 5, threshold: 15, out _, out _);
+        var close = store.CloseBundle("PO-B", 1, 15, 15);
+        Assert.Equal(1, close.FinalSequence);
+
+        // PO-A collides (provisional 1 == allocated 1); reassign moves it to 2.
+        Assert.Single(store.ReassignCollidingProvisionals(1, close.FinalSequence, "PO-B"));
+        // Second sweep: nothing left to reassign (provisional 2 > allocated 1).
+        Assert.Empty(store.ReassignCollidingProvisionals(1, close.FinalSequence, "PO-B"));
+    }
+
+    [Fact]
+    public void PoLifecycle_phases_survive_restart_via_persistence()
+    {
+        var options = CreatePlcOptions();
+        options.OutputBundleFolder = _tempDir;
+        var monitor = new TestOptionsMonitor<NdtBundleOptions>(options);
+
+        var first = new PoLifecycleService(monitor);
+        Assert.True(first.TryMarkDraining(1, "1000060288", new DateTime(2026, 7, 26, 12, 33, 0, DateTimeKind.Utc)));
+        Assert.True(first.TryMarkClosed(1, "1000060288"));
+        Assert.True(first.TryMarkDraining(1, "1000060520", new DateTime(2026, 7, 26, 16, 29, 0, DateTimeKind.Utc)));
+
+        // Simulate service restart: fresh instance reading the same state file.
+        var second = new PoLifecycleService(monitor);
+        Assert.Equal(PoLifecyclePhase.Closed, second.GetPhase(1, "1000060288"));
+        Assert.Equal(PoLifecyclePhase.Draining, second.GetPhase(1, "1000060520"));
+        Assert.Equal(PoLifecyclePhase.Running, second.GetPhase(1, "1000060999"));
+
+        // Draining entry keeps its original EndedAtUtc so the sweep can expire it after restart.
+        var drains = second.GetExpiredDrains(new DateTime(2026, 7, 26, 17, 0, 0, DateTimeKind.Utc), TimeSpan.FromMinutes(7));
+        var drain = Assert.Single(drains);
+        Assert.Equal("1000060520", drain.PoNumber);
+        Assert.Equal(new DateTime(2026, 7, 26, 16, 29, 0, DateTimeKind.Utc), drain.EndedAtUtc);
     }
 
     [Fact]
@@ -291,13 +387,13 @@ public sealed class MillWideAllocatorAndPoEndIdempotencyTests : IDisposable
             string reason,
             CancellationToken cancellationToken) => Task.CompletedTask;
 
-        public Task<IReadOnlyList<string>> UpdateOutputSlitBatchNoAsync(
+        public Task<OutputSlitBatchCorrectionResult> UpdateOutputSlitBatchNoAsync(
             string poNumber,
             int millNo,
             string oldBatchNo,
             string newBatchNo,
             CancellationToken cancellationToken) =>
-            Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
+            Task.FromResult(OutputSlitBatchCorrectionResult.NoOp);
 
         public Task RecordOutputSlitRowsAsync(
             string sourceFile,

@@ -32,6 +32,23 @@ public static class InputSlitBackfillCoverage
                 return BackfillCoverageKind.ExactMatch;
         }
 
+        // Exact: output already pulled by SAP into the Accepted folder (posted, frozen). Re-emitting
+        // would double-post; treat as covered. Rejected is intentionally NOT coverage — rejected data
+        // never posted, so the normal resubmit/backfill flow must stay open for it.
+        var acceptedFolder = (options.NdtInputSlitAcceptedFolder ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(acceptedFolder))
+        {
+            var acceptedOut = Path.Combine(acceptedFolder, Path.GetFileName(sourceFileFullPath));
+            if (File.Exists(acceptedOut) && PerSlitOutputHasBatchNumbers(acceptedOut, logger))
+            {
+                logger?.LogInformation(
+                    "Backfill coverage: {File} found SAP-Accepted at {Path}; treating as ExactMatch (no re-emit).",
+                    Path.GetFileName(sourceFileFullPath),
+                    acceptedOut);
+                return BackfillCoverageKind.ExactMatch;
+            }
+        }
+
         var poMills = eligibleRows
             .Where(r => !string.IsNullOrWhiteSpace(r.PoNumber) && r.MillNo is >= 1 and <= 4)
             .Select(r => (Po: InputSlitCsvParsing.NormalizePo(r.PoNumber), r.MillNo))

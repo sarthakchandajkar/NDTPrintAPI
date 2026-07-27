@@ -325,21 +325,48 @@ public sealed class NdtBundleEngine : IBundleEngine
         await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private Task CorrectStampsIfNeededAsync(
+    private async Task CorrectStampsIfNeededAsync(
         string poNumber,
         int millNo,
         BundleCloseAllocation alloc,
         CancellationToken cancellationToken)
     {
-        if (!alloc.NeedsStampCorrection)
-            return Task.CompletedTask;
+        if (alloc.NeedsStampCorrection)
+        {
+            await _stampCorrector.CorrectAsync(
+                    poNumber,
+                    millNo,
+                    alloc.ProvisionalSequence,
+                    alloc.FinalSequence,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
 
-        return _stampCorrector.CorrectAsync(
-            poNumber,
-            millNo,
-            alloc.ProvisionalSequence,
-            alloc.FinalSequence,
-            cancellationToken);
+        if (alloc.FinalSequence <= 0)
+            return;
+
+        // Another PO's open bundle may hold the just-allocated number as its provisional stamp
+        // (provisionals are unreserved guesses). Re-stamp its rows NOW — before any reconcile
+        // screen can show mixed-PO rows under one bundle number (2026-07-26 incident:
+        // PO 1000060288's trickle close took 1226100002 while PO 1000060520 held it provisionally).
+        var reassignments = _runtimeState.ReassignCollidingProvisionals(millNo, alloc.FinalSequence, poNumber);
+        foreach (var r in reassignments)
+        {
+            _logger.LogWarning(
+                "Provisional stamp collision on Mill {Mill}: open bundle for PO {OtherPo} held provisional sequence {OldProvisional} just allocated to PO {ClosedPo}; re-stamping its rows to {NewProvisional}.",
+                millNo,
+                r.PoNumber,
+                r.OldProvisional,
+                poNumber,
+                r.NewProvisional);
+            await _stampCorrector.CorrectAsync(
+                    r.PoNumber,
+                    millNo,
+                    r.OldProvisional,
+                    r.NewProvisional,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
     }
 
     private void ClearPlcCloseGrace(string poNumber, int millNo, string sizeKey)

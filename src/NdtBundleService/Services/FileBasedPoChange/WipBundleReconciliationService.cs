@@ -73,10 +73,17 @@ public sealed class WipBundleReconciliationService : IWipBundleReconciliationSer
         bool sqlEnabled,
         CancellationToken cancellationToken)
     {
-        var millCandidates = candidates
-            .Where(c => c.MillNo == millNo)
-            .OrderByDescending(c => c.StampUtc)
-            .ThenByDescending(c => c.SortKey, StringComparer.OrdinalIgnoreCase)
+        // Embedded production time is the primary ordering key: backlog copies refresh write stamps,
+        // which made a 24-Jul file the "latest" on 27-Jul and churned spurious PO ends (Mill-4 537↔446).
+        var millCandidates = (_options.Value.WipOrderingUseEmbeddedTimestamp
+                ? candidates
+                    .Where(c => c.MillNo == millNo)
+                    .OrderByDescending(c => c.SortKey, StringComparer.Ordinal)
+                    .ThenByDescending(c => c.StampUtc)
+                : candidates
+                    .Where(c => c.MillNo == millNo)
+                    .OrderByDescending(c => c.StampUtc)
+                    .ThenByDescending(c => c.SortKey, StringComparer.OrdinalIgnoreCase))
             .ToList();
 
         if (millCandidates.Count == 0)
@@ -143,11 +150,12 @@ public sealed class WipBundleReconciliationService : IWipBundleReconciliationSer
                 return 0;
 
             _logger.LogWarning(
-                "Mill {Mill}: reconciliation caught missed file-based PO change {OldPo} → {NewPo} from {File} (age {AgeMinutes:F1} min, latestPrintedPo {LatestPrintedPo}, latestPrintedAt {LatestPrintedAt}) — enqueued, CorrelationId {CorrelationId}.",
+                "Mill {Mill}: reconciliation caught missed file-based PO change {OldPo} → {NewPo} from {File} (embedded {SortKey}, age {AgeMinutes:F1} min, latestPrintedPo {LatestPrintedPo}, latestPrintedAt {LatestPrintedAt}) — enqueued, CorrelationId {CorrelationId}.",
                 millNo,
                 endedPo,
                 newPo,
                 latest.FileName,
+                latest.SortKey,
                 ageMinutes,
                 latestPrinted?.PoNumber ?? "(none)",
                 latestPrinted?.PrintedAt,

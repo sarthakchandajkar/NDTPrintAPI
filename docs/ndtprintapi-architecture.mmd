@@ -1,0 +1,93 @@
+graph TD
+    subgraph ext [External Systems]
+        SAP_IN[SAP file shares Input Slit PO WIP]
+        PLC1[S7 PLC Mill-1]
+        PLC2[S7 PLC Mill-2]
+        PLC3[S7 PLC Mill-3]
+        PLC4[S7 PLC Mill-4]
+        SQL[SQL Server JazeeraMES_Prod]
+        ZPL[ZPL printer port 9100]
+    end
+
+    subgraph ui [Presentation]
+        DASH[ndtbundle-dashboard]
+        API[ASP.NET REST API]
+    end
+
+    subgraph workers [Background Workers]
+        PHW[PlcHandshakeWorker]
+        SMW[SlitMonitoringWorker]
+        FBPW[FileBasedPoChangeWorker]
+        UPL[UploadNdtBundleScheduler]
+        POIMP[PoPlanWipImport]
+    end
+
+    subgraph domain [Business Logic]
+        ENG[NdtBundleEngine]
+        POWF[PoEndWorkflowService]
+        BATCH[NdtBatchStateService]
+        STATE[NdtBundleRuntimeStateStore]
+        WIPPO[WipBundleRunningPoProvider]
+    end
+
+    subgraph infra [Infrastructure]
+        S7HS[PlcHandshakeService]
+        S7NDT[S7MillNdtCountReader]
+        CSVW[CsvBundleOutputWriter]
+        ZPLP[NdtZplTagPrinter]
+        NETP[NetworkPrinterSender]
+        TRACE[TraceabilityRepository]
+        BREPO[NdtBundleRepository]
+        POPLAN[PoPlanWipRepository]
+    end
+
+    subgraph legacy [Legacy NDTPrintApi]
+        LAPI[NDTPrintApi]
+        LDB[Legacy bundle tables]
+    end
+
+    SAP_IN --> SMW
+    SAP_IN --> WIPPO
+    SAP_IN --> POIMP
+
+    WIPPO --> FBPW
+    FBPW --> POWF
+    SMW --> ENG
+    POWF --> ENG
+    ENG --> STATE
+    ENG --> BATCH
+    ENG --> CSVW
+
+    CSVW --> SAP_IN
+    CSVW --> BREPO
+    CSVW --> ZPLP
+    ZPLP --> NETP
+    NETP --> ZPL
+
+    SMW --> TRACE
+    CSVW --> TRACE
+    POIMP --> POPLAN
+    POPLAN --> SQL
+    BREPO --> SQL
+    TRACE --> SQL
+
+    PLC1 --> S7HS
+    PLC2 --> S7HS
+    PLC3 --> S7HS
+    PLC4 --> S7HS
+    S7HS --> PLC1
+    S7HS --> PLC2
+    S7HS --> PLC3
+    S7HS --> PLC4
+    S7NDT --> PLC3
+    PLC3 --> S7NDT
+    SMW --> S7NDT
+
+    PHW --> S7HS
+
+    DASH --> API
+    API --> DASH
+    API --> ENG
+    API --> TRACE
+
+    LAPI --> LDB

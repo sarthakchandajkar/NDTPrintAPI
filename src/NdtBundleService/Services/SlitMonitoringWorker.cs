@@ -26,6 +26,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
     private readonly INdtBundleRuntimeStateStore _runtimeState;
     private readonly PlcPoEndPollHandler _plcPoEndPollHandler;
     private readonly ITraceabilityRepository _traceability;
+    private readonly IOutputSlitSapStatusRepository _sapStatus;
     private readonly INdtBundleRepository _bundleRepository;
     private readonly ISqlTraceabilityWriteTracker _sqlWriteTracker;
     private readonly IWipBundleRunningPoProvider _wipRunningPo;
@@ -58,6 +59,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         INdtBundleRuntimeStateStore runtimeState,
         PlcPoEndPollHandler plcPoEndPollHandler,
         ITraceabilityRepository traceability,
+        IOutputSlitSapStatusRepository sapStatus,
         INdtBundleRepository bundleRepository,
         ISqlTraceabilityWriteTracker sqlWriteTracker,
         IWipBundleRunningPoProvider wipRunningPo,
@@ -77,6 +79,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         _runtimeState = runtimeState;
         _plcPoEndPollHandler = plcPoEndPollHandler;
         _traceability = traceability;
+        _sapStatus = sapStatus;
         _bundleRepository = bundleRepository;
         _sqlWriteTracker = sqlWriteTracker;
         _wipRunningPo = wipRunningPo;
@@ -929,6 +932,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 // Write one output file under OutputBundleFolder using the same name as the input inbox file.
                 var outputFolder = (o.OutputBundleFolder ?? string.Empty).Trim();
                 string? outputPath = null;
+                var sapIngestGate = OutputSlitIngestGate.None;
                 if (!anyRowBundled)
                 {
                     if (!anyEligibleMillRow)
@@ -976,7 +980,34 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     Directory.CreateDirectory(outputFolder);
                     var outputFileName = Path.GetFileName(fileFull);
                     outputPath = Path.Combine(outputFolder, outputFileName);
-                    if (isBackfill
+                    sapIngestGate = await GetSapIngestGateAsync(outputFileName, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (sapIngestGate == OutputSlitIngestGate.Accepted)
+                    {
+                        _logger.LogWarning(
+                            "SAP-Accepted gate: output {File} is already Accepted in SAP — skipping output CSV re-emit "
+                            + "and Output_Slit_Row insert to prevent double-posting. Corrections for this data must go "
+                            + "through PPC.",
+                            outputFileName);
+                    }
+                    else if (sapIngestGate == OutputSlitIngestGate.RejectedInFlight)
+                    {
+                        _logger.LogWarning(
+                            "SAP-Rejected gate: output {File} is currently Rejected in SAP — the operator "
+                            + "copy-edit-resubmit flow owns this basename; skipping output CSV re-emit and "
+                            + "Output_Slit_Row insert so an unedited copy is not auto-resubmitted.",
+                            outputFileName);
+                    }
+                    else if (sapIngestGate == OutputSlitIngestGate.Resubmitted)
+                    {
+                        _logger.LogWarning(
+                            "SAP-resubmit gate (ExactMatch bypass): output {File} was resubmitted after a SAP "
+                            + "rejection — the operator-edited pending copy is authoritative; skipping output CSV "
+                            + "re-emit and Output_Slit_Row insert. Drift against SQL is reconciled by the SAP "
+                            + "status watcher.",
+                            outputFileName);
+                    }
+                    else if (isBackfill
                         && backfillCoverage == BackfillCoverageKind.ExactMatch
                         && File.Exists(outputPath))
                     {
@@ -988,6 +1019,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     {
                         await File.WriteAllLinesAsync(outputPath, outputLines, cancellationToken).ConfigureAwait(false);
                         _logger.LogInformation("Wrote bundle CSV: {Path}", outputPath);
+                        await SeedSapStatusPendingAsync(outputPath, cancellationToken).ConfigureAwait(false);
                     }
                 }
 
@@ -997,17 +1029,24 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     await _traceability
                         .RecordInputSlitRowsAsync(fileFull, inputRowsForSql, cancellationToken, lwUtc)
                         .ConfigureAwait(false);
-                    if (outputRowsForSql.Count > 0)
+                    // The SAP ingest gate also covers the SQL side: no Output_Slit_Row inserts or
+                    // slit-sum total syncs for an Accepted / Rejected-in-flight / resubmitted
+                    // basename (input-side traceability above is unaffected — it records what the
+                    // mill produced, not what goes to SAP).
+                    if (outputRowsForSql.Count > 0 && sapIngestGate == OutputSlitIngestGate.None)
                     {
                         await _traceability
                             .RecordOutputSlitRowsAsync(outputPath ?? fileFull, outputRowsForSql, cancellationToken)
                             .ConfigureAwait(false);
                     }
 
-                    foreach (var batchNo in outputRowsForSql
-                                 .Select(r => r.NdtBatchNo)
-                                 .Where(static b => !string.IsNullOrWhiteSpace(b))
-                                 .Distinct(StringComparer.OrdinalIgnoreCase))
+                    var batchNosToSync = sapIngestGate != OutputSlitIngestGate.None
+                        ? Enumerable.Empty<string>()
+                        : outputRowsForSql
+                            .Select(r => r.NdtBatchNo)
+                            .Where(static b => !string.IsNullOrWhiteSpace(b))
+                            .Distinct(StringComparer.OrdinalIgnoreCase);
+                    foreach (var batchNo in batchNosToSync)
                     {
                         try
                         {
@@ -1365,6 +1404,52 @@ public sealed class SlitMonitoringWorker : BackgroundService
         }
 
         return (headerLine, rows, ndtIndex, poIndex);
+    }
+
+    /// <summary>
+    /// Ingest-path SAP gate (hard requirement 3 + Phase 4 ExactMatch bypass): decides whether the
+    /// output CSV / Output_Slit_Row may be written for this basename — see
+    /// <see cref="OutputSlitSapStatusPolicy.DecideIngestGate"/>. Best-effort read — SQL
+    /// unavailability never blocks the CSV flow (returns <see cref="OutputSlitIngestGate.None"/>).
+    /// </summary>
+    private async Task<OutputSlitIngestGate> GetSapIngestGateAsync(string outputFileName, CancellationToken cancellationToken)
+    {
+        if (!_sapStatus.Enabled)
+            return OutputSlitIngestGate.None;
+
+        var statuses = await _sapStatus
+            .GetStatusesForFilesAsync(new[] { outputFileName }, cancellationToken)
+            .ConfigureAwait(false);
+        return OutputSlitSapStatusPolicy.DecideIngestGate(
+            statuses.TryGetValue(outputFileName, out var status) ? status : null);
+    }
+
+    /// <summary>
+    /// Seed-on-write: records the freshly written NDT Input Slit output CSV as SAP-status Pending
+    /// so a status row exists before SAP pulls the file. Best-effort (repository never throws on SQL).
+    /// </summary>
+    private async Task SeedSapStatusPendingAsync(string outputPath, CancellationToken cancellationToken)
+    {
+        if (!_sapStatus.Enabled)
+            return;
+
+        DateTime? lwUtc = null;
+        try
+        {
+            lwUtc = File.GetLastWriteTimeUtc(outputPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not read LastWriteTimeUtc for SAP status seed: {Path}", outputPath);
+        }
+
+        await _sapStatus
+            .RecordOutputFileWrittenAsync(
+                Path.GetFileName(outputPath),
+                lwUtc,
+                Path.GetDirectoryName(outputPath) ?? string.Empty,
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <summary>

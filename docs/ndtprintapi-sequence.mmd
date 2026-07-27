@@ -1,0 +1,85 @@
+sequenceDiagram
+    autonumber
+    participant WIP as TM Bundle Folder<br/>WIP_MM_* file
+    participant WIPProv as WipBundleRunningPoProvider
+    participant Q as FileBasedPoChangeQueue
+    participant FBW as FileBasedPoChangeWorker
+    participant POWF as PoEndWorkflowService
+    participant ENG as NdtBundleEngine
+    participant STATE as NdtBundleRuntimeStateStore
+    participant CSV as CsvBundleOutputWriter
+    participant REPO as NdtBundleRepository
+    participant TRACE as TraceabilityRepository
+    participant ZPL as NdtZplTagPrinter
+    participant PRN as NetworkPrinterSender
+    participant SQL as SQL Server
+
+    participant SMW as SlitMonitoringWorker
+    participant S7NDT as S7MillNdtCountReader
+    participant PLC3 as S7 PLC Mill-3
+
+    participant PHW as PlcHandshakeWorker
+    participant HS as PlcHandshakeService<br/>(per mill)
+
+    Note over WIP,PRN: Path A — File-based PO change (FileBasedPoEnd.Enabled=true)
+
+    WIP->>WIPProv: FileSystemWatcher Created/Renamed<br/>OnFsEvent (WipBundleFileName.TryParse)
+    WIPProv->>WIPProv: TryApplyRunningPoUpdateUnsafe<br/>PO A → PO B detected
+    WIPProv->>Q: TryEnqueue(FileBasedPoChangeRequest)<br/>one in-flight per mill
+    Q-->>FBW: Channel ReadAllAsync
+
+    FBW->>FBW: ProcessRequestAsync<br/>ResolveEndedPoFallbackAsync if needed
+    FBW->>POWF: ExecuteAsync(endedPo, millNo)
+    POWF->>ENG: HandlePoEndAsync(po, mill, onBundleClosed)
+    ENG->>STATE: EnsureInitializedAsync / GetSizeCounts
+    loop each partial size count
+        ENG->>STATE: CloseBundle(po, mill, count)
+        ENG->>CSV: onBundleClosed → WriteBundleAsync
+    end
+    POWF->>STATE: SaveAsync (JSON state file)
+    POWF->>WIPProv: NotifyPoEndForMill → WaitingForNewWip=true
+
+    CSV->>CSV: File.WriteAllLinesAsync<br/>NDT_Bundle_{batch}.csv
+    CSV->>REPO: RecordBundleAsync (3 retries)
+    REPO->>SQL: Upsert NDT_Bundle
+    CSV->>ZPL: PrintBundleTagAsync
+    ZPL->>ZPL: ZplNdtLabelBuilder.BuildNdtTagZpl
+    ZPL->>PRN: SendAsync(host, 9100, zplBytes)
+    PRN->>PRN: TcpClient.ConnectAsync (10s timeout)
+
+    FBW->>WIPProv: TrySetRunningPoFromWipFile(newPo)
+    FBW->>Q: MarkCompleted(millNo)
+
+    Note over SMW,SQL: Path B — Input Slit bundle (every PollIntervalSeconds=5)
+
+    loop every 5s
+        SMW->>SMW: ProcessNewSlitFilesAsync<br/>LastWriteTimeUtc dedup
+        alt Mill-3 single slit row + MillSlitLive
+            SMW->>S7NDT: TryReadNdtPipesCountAsync
+            S7NDT->>PLC3: plc.Open() sync S7 read DB251@6
+            S7NDT-->>SMW: plcNdt (display column only)
+        end
+        SMW->>ENG: ProcessSlitRecordAsync(bundleRecord)
+        ENG->>STATE: GetSizeCounts → mutate → SetSizeCounts → SaveAsync
+        alt count >= formation threshold
+            ENG->>CSV: WriteBundleAsync (bundle close)
+            CSV->>REPO: RecordBundleAsync
+            CSV->>ZPL: PrintBundleTagAsync
+        end
+        SMW->>CSV: Write output slit CSV + NDT Batch No column
+        SMW->>TRACE: RecordInputSlitRowsAsync / RecordOutputSlitRowsAsync
+        TRACE->>SQL: per-row INSERT (no transaction)
+    end
+
+    Note over PHW,HS: Path C — PLC telemetry (TelemetryOnly=true, poll 500ms)
+
+    loop each mill task
+        PHW->>HS: RunAsync loop
+        HS->>HS: EnsureConnectedAsync (S7 reconnect + backoff)
+        HS->>HS: TryUpdateDb251Counts<br/>OK/NOK/NDT/PO_Id/Slit_Id
+        alt Mill-1 hooter enabled
+            HS->>HS: TryUpdateMillSignalsAsync<br/>ProcessHooterPulse → Q6.7
+        end
+        Note right of HS: Rising-edge PO trigger ignored<br/>when FileBasedPoEnd enabled
+        HS->>HS: Task.Delay(PollIntervalMs)
+    end

@@ -49,17 +49,33 @@ public sealed class BundleProvisionalStampCorrector : IBundleProvisionalStampCor
         var newBatch = NdtBundleSequence.Format(finalSequence, millNo);
         var po = InputSlitCsvParsing.NormalizePo(poNumber);
 
-        var files = await _traceability
+        var result = await _traceability
             .UpdateOutputSlitBatchNoAsync(po, millNo, oldBatch, newBatch, cancellationToken)
             .ConfigureAwait(false);
+        var files = result.SourceFiles;
 
-        _logger.LogInformation(
-            "Corrected Output_Slit_Row batch {OldBatch} → {NewBatch} for PO {PO} Mill {Mill} ({FileCount} file ref(s)).",
-            oldBatch,
-            newBatch,
-            po,
-            millNo,
-            files.Count);
+        if (result.Succeeded)
+        {
+            _logger.LogInformation(
+                "Corrected Output_Slit_Row batch {OldBatch} → {NewBatch} for PO {PO} Mill {Mill} ({RowCount} row(s), {FileCount} file ref(s)).",
+                oldBatch,
+                newBatch,
+                po,
+                millNo,
+                result.RowsUpdated,
+                files.Count);
+        }
+        else
+        {
+            _logger.LogError(
+                "Provisional stamp correction {OldBatch} → {NewBatch} for PO {PO} Mill {Mill} FAILED in SQL: "
+                + "Output_Slit_Row still references the old batch while the printed tag says the new one. "
+                + "Reconcile slit sums for both bundles are wrong until remediated. Rewriting per-slit CSVs to match the tag anyway.",
+                oldBatch,
+                newBatch,
+                po,
+                millNo);
+        }
 
         var outputFolder = (_options.CurrentValue.OutputBundleFolder ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(outputFolder))
@@ -87,8 +103,13 @@ public sealed class BundleProvisionalStampCorrector : IBundleProvisionalStampCor
                 try
                 {
                     var text = await File.ReadAllTextAsync(path, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
-                    if (text.Contains(oldBatch, StringComparison.OrdinalIgnoreCase))
+                    // Require the PO too: another PO's bundle may legitimately own oldBatch
+                    // (provisional collision) and its CSVs must not be rewritten.
+                    if (text.Contains(oldBatch, StringComparison.OrdinalIgnoreCase)
+                        && (string.IsNullOrEmpty(po) || text.Contains(po, StringComparison.OrdinalIgnoreCase)))
+                    {
                         targets.Add(Path.GetFileName(path));
+                    }
                 }
                 catch
                 {

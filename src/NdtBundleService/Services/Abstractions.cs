@@ -23,6 +23,23 @@ public interface INdtBundleRepository
     Task<IReadOnlyList<NdtBundleRecord>> GetStuckPrintsAsync(TimeSpan olderThan, CancellationToken cancellationToken);
 
     Task<IReadOnlyList<NdtBundleRecord>> GetBundlesAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Batches present in <c>Output_Slit_Row</c> but not yet in <c>NDT_Bundle</c> (accumulating toward print).
+    /// </summary>
+    Task<IReadOnlyList<NdtBundleRecord>> GetFormingBundlesFromSqlAsync(CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<NdtBundleRecord>>(Array.Empty<NdtBundleRecord>());
+
+    /// <summary>Sum of <c>Output_Slit_Row.NDT_Pipes</c> per batch (empty when SQL disabled).</summary>
+    Task<IReadOnlyDictionary<string, int>> GetSlitTotalsByBatchAsync(CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyDictionary<string, int>>(new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// <see cref="GetByBatchNoAsync"/> or, when missing, a synthetic row from <c>Output_Slit_Row</c> slit sum.
+    /// </summary>
+    Task<NdtBundleRecord?> TryGetBundleForReconcileAsync(string batchNo, CancellationToken cancellationToken) =>
+        GetByBatchNoAsync(batchNo, cancellationToken);
+
     Task<NdtBundleRecord?> GetByBatchNoAsync(string batchNo, CancellationToken cancellationToken);
     Task UpdateBundlePipesAsync(string batchNo, int newPipes, CancellationToken cancellationToken);
     /// <summary>Finds all output CSVs containing the given NDT Batch No, updates the NDT Pipes column to newPipes, and overwrites the files. Returns the number of files updated.</summary>
@@ -148,6 +165,32 @@ public interface INdtBundleRepository
         Task.FromResult(false);
 
     /// <summary>
+    /// True when <c>Manual_Review=1</c> for the bundle (Closed-PO attach flag). False when SQL is
+    /// disabled or the column has not been migrated.
+    /// </summary>
+    Task<bool> IsManualReviewFlaggedAsync(string batchNo, CancellationToken cancellationToken) =>
+        Task.FromResult(false);
+
+    /// <summary>
+    /// Distinct (normalized slit key, source file basename) pairs from <c>Output_Slit_Row</c> for the
+    /// batch. Slit keys use the same normalization as <see cref="GetSlitsForBatchAsync"/> (empty → "—").
+    /// Empty when SQL is disabled — SAP status enrichment is SQL-only.
+    /// </summary>
+    Task<IReadOnlyList<(string SlitNo, string SourceFileName)>> GetSlitSourceFileNamesForBatchAsync(
+        string batchNo,
+        CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<(string, string)>>(Array.Empty<(string, string)>());
+
+    /// <summary>
+    /// <c>Output_Slit_Row.NDT_Pipes</c> sums per (batch, normalized slit key) for one source file
+    /// basename (Phase 4 resubmit drift detection). Empty when SQL is disabled.
+    /// </summary>
+    Task<IReadOnlyList<(string BatchNo, string SlitNo, int NdtPipes)>> GetOutputSlitRowSumsForSourceFileAsync(
+        string sourceFileBaseName,
+        CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<(string, string, int)>>(Array.Empty<(string, string, int)>());
+
+    /// <summary>
     /// Atomically force-finalizes PLC awaiting recon (when applicable), sets manual lock + audit fields,
     /// and writes <c>Total_NDT_Pcs</c>. Returns null when bundle not found or SQL disabled.
     /// </summary>
@@ -165,6 +208,14 @@ public interface INdtBundleRepository
     /// </summary>
     Task<int> TryUpdatePostReconCsvSumAsync(string batchNo, CancellationToken cancellationToken) =>
         Task.FromResult(0);
+
+    /// <summary>
+    /// Bundle numbers whose <c>Output_Slit_Row</c> rows span multiple POs or a PO different from the
+    /// bundle row — indicates provisional-stamp collision contamination; operators should verify
+    /// before reconciling such bundles.
+    /// </summary>
+    Task<IReadOnlyList<string>> GetBatchesWithPoMismatchedSlitRowsAsync(CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
 }
 
 /// <summary>Result of operator manual bundle reconcile (count correction + lock).</summary>

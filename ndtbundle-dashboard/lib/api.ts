@@ -178,16 +178,58 @@ export interface ReconcileBundle {
   manualReconOriginalTotal?: number | null;
   postReconCsvSum?: number | null;
   awaitingCsvRecon?: boolean;
+  /** Manual_Review flag (Closed-PO traceability attach) — distinct from manualRecon and ppcCorrectionPending. */
+  manualReview?: boolean;
+  /** Derived: true while any open Ppc_Correction_Item exists for this bundle (SAP-side fix still owed by PPC). */
+  ppcCorrectionPending?: boolean;
+  ppcOpenCorrectionCount?: number;
+  /** Open bundle accumulating slit rows (Reconcile list with includeForming). */
+  isForming?: boolean;
+  /** Live sum from Output_Slit_Row when includeForming is set. */
+  slitSum?: number | null;
+}
+
+export interface ReconcileSlitSourceFile {
+  fileName?: string;
+  sapStatus?: string | null;
 }
 
 export interface ReconcileSlitItem {
   slitNo?: string;
   ndtPipes?: number;
+  /** SAP lifecycle of the contributing input-slit output file(s): "Pending" | "Accepted" | "Rejected"; null/absent when untracked. */
+  sapStatus?: string | null;
+  sapStatusAtUtc?: string | null;
+  resubmitCount?: number;
+  sourceFiles?: ReconcileSlitSourceFile[];
 }
 
 export interface ReconcileBundleSlitsResponse {
   bundle?: ReconcileBundle;
   slits?: ReconcileSlitItem[];
+}
+
+/** Tracked "PPC must fix this in SAP" correction for a slit backed by a SAP-Accepted file. */
+export interface PpcCorrectionItem {
+  id?: number;
+  ndtBatchNo?: string;
+  fileName?: string;
+  slitNo?: string;
+  oldNdtPipes?: number | null;
+  correctedNdtPipes?: number;
+  status?: string; // "Open" | "Cleared"
+  createdAtUtc?: string;
+  updatedAtUtc?: string | null;
+  clearedAtUtc?: string | null;
+  clearedBy?: string | null;
+  clearedNote?: string | null;
+}
+
+export interface PpcCorrectionsResponse {
+  ndtBatchNo?: string;
+  ppcCorrectionPending?: boolean;
+  openCount?: number;
+  items?: PpcCorrectionItem[];
 }
 
 export interface InputSlitFile {
@@ -455,7 +497,8 @@ export const api = {
       `/api/Test/resume-wip/${millNo}`,
       { method: "POST" }
     ),
-  reconcileBundles: () => fetchApi<ReconcileBundle[]>("/api/Reconcile/bundles"),
+  reconcileBundles: () =>
+    fetchApi<ReconcileBundle[]>("/api/Reconcile/bundles?includeForming=true"),
   manualBundleReconcile: (ndtBatchNo: string, correctedTotal: number) =>
     fetchApi<{
       message?: string;
@@ -500,6 +543,15 @@ export const api = {
     }>("/api/Reconcile/delete-slits", {
       method: "POST",
       body: JSON.stringify({ ndtBatchNo, slitNos }),
+    }),
+  reconcilePpcCorrections: (ndtBatchNo: string, includeCleared = false) =>
+    fetchApi<PpcCorrectionsResponse>(
+      `/api/Reconcile/bundles/${encodeURIComponent(ndtBatchNo)}/ppc-corrections${includeCleared ? "?includeCleared=true" : ""}`
+    ),
+  clearPpcCorrection: (id: number, clearedBy?: string, note?: string) =>
+    fetchApi<{ message?: string; id?: number }>(`/api/Reconcile/ppc-corrections/${id}/clear`, {
+      method: "POST",
+      body: JSON.stringify({ clearedBy, note }),
     }),
   printReconciledBundle: (ndtBatchNo: string) =>
     fetchApi<{ message?: string; ndtBatchNo?: string; ndtPcs?: number }>("/api/Reconcile/print-bundle", {

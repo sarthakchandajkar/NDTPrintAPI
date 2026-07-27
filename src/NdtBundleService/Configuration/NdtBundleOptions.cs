@@ -19,10 +19,30 @@ public class NdtBundleOptions
   public bool PreferInputSlitFilesForRunningPo { get; set; } = true;
 
   /// <summary>
-  /// Folder for NDT Input Slit output CSVs: same columns as input plus <c>NDT Batch No</c> (written by <c>SlitMonitoringWorker</c>).
+    /// Folder for NDT Input Slit output CSVs: same columns as input plus <c>NDT Batch No</c> (written by <c>SlitMonitoringWorker</c>).
     /// Production example: <c>Z:\To SAP\TM\NDT\NDT Input Slit\Input Slit</c>. When empty, those files are not written.
     /// </summary>
     public string OutputBundleFolder { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Folder where SAP moves NDT Input Slit output CSVs after posting (read-only for this system; filenames are unchanged).
+    /// Production example: <c>Z:\To SAP\TM\NDT\NDT Input Slit\NDT Input Slit Accepted</c>. Watched by
+    /// <c>NdtInputSlitSapStatusWorker</c> to record per-file SAP status. When empty (with <see cref="NdtInputSlitRejectedFolder"/>
+    /// also empty), SAP status tracking is disabled.
+    /// </summary>
+    public string NdtInputSlitAcceptedFolder { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Folder where SAP moves rejected NDT Input Slit output CSVs (read-only; operators edit and resubmit rejected files
+    /// to <see cref="OutputBundleFolder"/>). Production example: <c>Z:\To SAP\TM\NDT\NDT Input Slit\NDT Input Slit Rejected</c>.
+    /// </summary>
+    public string NdtInputSlitRejectedFolder { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Poll interval (seconds) for the NDT Input Slit SAP status watcher. When 0 (default), falls back to
+    /// <see cref="PollIntervalSeconds"/>.
+    /// </summary>
+    public int NdtInputSlitSapStatusPollSeconds { get; set; }
 
     /// <summary>
     /// Folder for the single consolidated NDT process CSV (written after Revisual completes) and optional ZPL previews.
@@ -136,6 +156,16 @@ public class NdtBundleOptions
     /// even while <see cref="WaitForWipBundleAfterPoEnd"/> is active. File mills keep the historical hard-stop.
     /// </summary>
     public bool BundleSlitRowsWithFilePoDuringWipWait { get; set; } = true;
+
+    /// <summary>
+    /// When true (default), WIP bundle running-PO ordering uses the filename-embedded <c>yyMMdd_HHmmss</c>
+    /// production timestamp as the primary key: per-mill monotonic floor for running-PO updates, and
+    /// post–PO-end acceptance requires the candidate's production time to be after the ended PO's last WIP.
+    /// File write stamps remain a secondary guard (backlog copies refresh them, interleaving POs out of
+    /// production order — 2026-07-27 Mill-1 06:16 cross-PO bounce). When false, legacy write-stamp-only
+    /// ordering applies.
+    /// </summary>
+    public bool WipOrderingUseEmbeddedTimestamp { get; set; } = true;
 
     /// <summary>
     /// Per-file retry backoff steps in seconds for deferrable Input Slit outcomes on <c>PoEndSource=Plc</c> mills

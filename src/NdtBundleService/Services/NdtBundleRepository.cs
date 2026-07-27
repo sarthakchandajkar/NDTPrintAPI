@@ -405,6 +405,174 @@ ORDER BY r.PrintedAt DESC";
         return list;
     }
 
+    public async Task<IReadOnlyList<NdtBundleRecord>> GetFormingBundlesFromSqlAsync(CancellationToken cancellationToken)
+    {
+        if (!UseDatabase)
+            return Array.Empty<NdtBundleRecord>();
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            const string sql = @"
+SELECT
+    o.NDT_Batch_No AS BundleNo,
+    MAX(o.PO_Number) AS PoNumber,
+    MAX(o.Mill_No) AS MillNo,
+    SUM(o.NDT_Pipes) AS TotalNdtPcs,
+    MAX(o.WrittenAtUtc) AS PrintedAt
+FROM dbo.Output_Slit_Row o
+WHERE o.NDT_Batch_No IS NOT NULL
+  AND LTRIM(RTRIM(o.NDT_Batch_No)) <> N''
+  AND NOT EXISTS (
+      SELECT 1 FROM dbo.NDT_Bundle b WHERE b.Bundle_No = o.NDT_Batch_No)
+GROUP BY o.NDT_Batch_No
+ORDER BY MAX(o.WrittenAtUtc) DESC";
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+            var list = new List<NdtBundleRecord>();
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                list.Add(new NdtBundleRecord
+                {
+                    BundleNo = reader.IsDBNull(0) ? string.Empty : reader.GetString(0),
+                    PoNumber = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                    MillNo = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+                    TotalNdtPcs = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+                    PrintedAt = reader.IsDBNull(4) ? null : reader.GetDateTime(4),
+                    PrintStatus = BundlePrintStatus.Pending
+                });
+            }
+
+            return list;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to load forming bundles from Output_Slit_Row.");
+            return Array.Empty<NdtBundleRecord>();
+        }
+    }
+
+    public async Task<IReadOnlyDictionary<string, int>> GetSlitTotalsByBatchAsync(CancellationToken cancellationToken)
+    {
+        if (!UseDatabase)
+            return new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            const string sql = @"
+SELECT NDT_Batch_No, SUM(NDT_Pipes) AS SlitTotal
+FROM dbo.Output_Slit_Row
+WHERE NDT_Batch_No IS NOT NULL AND LTRIM(RTRIM(NDT_Batch_No)) <> N''
+GROUP BY NDT_Batch_No";
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+            var totals = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (reader.IsDBNull(0))
+                    continue;
+                var batch = reader.GetString(0).Trim();
+                if (batch.Length == 0)
+                    continue;
+                totals[batch] = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
+            }
+
+            return totals;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to load slit totals by batch from Output_Slit_Row.");
+            return new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    public async Task<IReadOnlyList<string>> GetBatchesWithPoMismatchedSlitRowsAsync(CancellationToken cancellationToken)
+    {
+        if (!UseDatabase)
+            return Array.Empty<string>();
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            const string sql = @"
+SELECT b.Bundle_No
+FROM dbo.NDT_Bundle b
+JOIN dbo.Output_Slit_Row osr ON osr.NDT_Batch_No = b.Bundle_No
+GROUP BY b.Bundle_No, b.PO_Number
+HAVING COUNT(DISTINCT osr.PO_Number) > 1
+    OR MAX(CASE WHEN osr.PO_Number <> b.PO_Number THEN 1 ELSE 0 END) = 1";
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+            var batches = new List<string>();
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (!reader.IsDBNull(0))
+                    batches.Add(reader.GetString(0).Trim());
+            }
+
+            return batches;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to load PO-mismatched slit row batches from Output_Slit_Row.");
+            return Array.Empty<string>();
+        }
+    }
+
+    public async Task<NdtBundleRecord?> TryGetBundleForReconcileAsync(string batchNo, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(batchNo))
+            return null;
+
+        var existing = await GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
+        if (existing is not null)
+            return existing;
+
+        if (!UseDatabase)
+            return null;
+
+        var trimmed = batchNo.Trim();
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            const string sql = @"
+SELECT TOP 1
+    o.NDT_Batch_No AS BundleNo,
+    MAX(o.PO_Number) AS PoNumber,
+    MAX(o.Mill_No) AS MillNo,
+    SUM(o.NDT_Pipes) AS TotalNdtPcs,
+    MAX(o.WrittenAtUtc) AS PrintedAt
+FROM dbo.Output_Slit_Row o
+WHERE o.NDT_Batch_No = @BatchNo
+GROUP BY o.NDT_Batch_No";
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@BatchNo", trimmed);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                return null;
+
+            return new NdtBundleRecord
+            {
+                BundleNo = reader.IsDBNull(0) ? trimmed : reader.GetString(0),
+                PoNumber = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                MillNo = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+                TotalNdtPcs = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+                PrintedAt = reader.IsDBNull(4) ? null : reader.GetDateTime(4),
+                PrintStatus = BundlePrintStatus.Pending
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to resolve forming bundle {BatchNo} from Output_Slit_Row.", trimmed);
+            return null;
+        }
+    }
+
     public async Task<NdtBundleRecord?> GetByBatchNoAsync(string batchNo, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(batchNo))
@@ -1646,6 +1814,127 @@ ORDER BY SlitNo";
 
         _logger.LogDebug("Loaded {Count} slit row(s) for batch {BatchNo} from Output_Slit_Row.", list.Count, batchNoTrimmed);
         return list;
+    }
+
+    public async Task<IReadOnlyList<(string SlitNo, string SourceFileName)>> GetSlitSourceFileNamesForBatchAsync(
+        string batchNo,
+        CancellationToken cancellationToken)
+    {
+        if (!UseDatabase || string.IsNullOrWhiteSpace(batchNo))
+            return Array.Empty<(string, string)>();
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+            const string sql = @"
+SELECT DISTINCT
+    COALESCE(NULLIF(LTRIM(RTRIM(Slit_No)), N''), N'—') AS SlitNo,
+    LTRIM(RTRIM(Source_File)) AS SourceFile
+FROM dbo.Output_Slit_Row
+WHERE NDT_Batch_No = @BatchNo
+  AND Source_File IS NOT NULL
+  AND LTRIM(RTRIM(Source_File)) <> N'';";
+
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@BatchNo", batchNo.Trim());
+
+            var list = new List<(string, string)>();
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var slit = reader.IsDBNull(0) ? "—" : reader.GetString(0);
+                var sourceFile = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
+                // Source_File historically stores full paths; SAP status is keyed by basename.
+                var baseName = Path.GetFileName(sourceFile.Trim());
+                if (!string.IsNullOrWhiteSpace(baseName))
+                    list.Add((slit, baseName));
+            }
+
+            return list;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to load slit source files for batch {BatchNo}.", batchNo);
+            return Array.Empty<(string, string)>();
+        }
+    }
+
+    public async Task<IReadOnlyList<(string BatchNo, string SlitNo, int NdtPipes)>> GetOutputSlitRowSumsForSourceFileAsync(
+        string sourceFileBaseName,
+        CancellationToken cancellationToken)
+    {
+        if (!UseDatabase || string.IsNullOrWhiteSpace(sourceFileBaseName))
+            return Array.Empty<(string, string, int)>();
+
+        var baseName = Path.GetFileName(sourceFileBaseName.Trim());
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+            // Source_File historically stores full paths; match by basename (both separators).
+            const string sql = @"
+SELECT
+    LTRIM(RTRIM(NDT_Batch_No)) AS BatchNo,
+    COALESCE(NULLIF(LTRIM(RTRIM(Slit_No)), N''), N'—') AS SlitNo,
+    SUM(NDT_Pipes) AS NdtPipes
+FROM dbo.Output_Slit_Row
+WHERE (Source_File = @BaseName OR Source_File LIKE @LikeWin OR Source_File LIKE @LikeUnix)
+  AND NDT_Batch_No IS NOT NULL
+  AND LTRIM(RTRIM(NDT_Batch_No)) <> N''
+GROUP BY LTRIM(RTRIM(NDT_Batch_No)), COALESCE(NULLIF(LTRIM(RTRIM(Slit_No)), N''), N'—');";
+
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@BaseName", baseName);
+            cmd.Parameters.AddWithValue("@LikeWin", "%\\" + baseName);
+            cmd.Parameters.AddWithValue("@LikeUnix", "%/" + baseName);
+
+            var list = new List<(string, string, int)>();
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var batch = reader.IsDBNull(0) ? string.Empty : reader.GetString(0);
+                var slit = reader.IsDBNull(1) ? "—" : reader.GetString(1);
+                var pipes = ReadSqlInt32(reader, 2);
+                if (!string.IsNullOrWhiteSpace(batch))
+                    list.Add((batch, slit, pipes));
+            }
+
+            return list;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to load Output_Slit_Row sums for source file {File}.", baseName);
+            return Array.Empty<(string, string, int)>();
+        }
+    }
+
+    public async Task<bool> IsManualReviewFlaggedAsync(string batchNo, CancellationToken cancellationToken)
+    {
+        if (!UseDatabase || string.IsNullOrWhiteSpace(batchNo))
+            return false;
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            const string sql = @"
+SELECT TOP 1 Manual_Review
+FROM dbo.NDT_Bundle
+WHERE Bundle_No = @BatchNo
+ORDER BY PrintedAt DESC;";
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@BatchNo", batchNo.Trim());
+            var scalar = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            return scalar is bool b && b || scalar is 1 or (byte)1;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not read Manual_Review for {BatchNo} (column may be missing).", batchNo);
+            return false;
+        }
     }
 
     public async Task<int> UpdateOutputCsvFilesForSlitAsync(string batchNo, string slitNo, int newPipes, CancellationToken cancellationToken)

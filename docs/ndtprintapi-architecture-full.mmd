@@ -1,0 +1,88 @@
+flowchart TD
+    subgraph External["External Systems"]
+        SAP_IN["SAP / File Shares<br/>Input Slit, PO Accepted,<br/>WIP Bundle, FG Bundle"]
+        PLC1["S7 PLC Mill-1<br/>192.168.0.13"]
+        PLC2["S7 PLC Mill-2<br/>192.168.0.60"]
+        PLC3["S7 PLC Mill-3<br/>192.168.0.17"]
+        PLC4["S7 PLC Mill-4<br/>192.168.0.19"]
+        SQL[("SQL Server<br/>JazeeraMES_Prod<br/>NDT_Bundle, Input/Output_Slit_Row,<br/>PO_Plan_WIP, Bundle_Label")]
+        ZPL["Honeywell PD45S<br/>TCP port 9100 ZPL"]
+    end
+
+    subgraph UI["Presentation"]
+        DASH["ndtbundle-dashboard<br/>Next.js"]
+        API["ASP.NET Controllers<br/>Reconcile, Status, Settings,<br/>Test, ManualTags, UploadNdtBundle"]
+    end
+
+    subgraph BGWorkers["Background Workers / Timers"]
+        PHW["PlcHandshakeWorker<br/>4x PlcHandshakeService<br/>poll 500ms"]
+        SMW["SlitMonitoringWorker<br/>poll 5s"]
+        FBPW["FileBasedPoChangeWorker<br/>Channel queue"]
+        UPL["UploadNdtBundleSchedulerWorker<br/>PeriodicTimer 12h"]
+        POIMP["PoPlanWipImportHostedService<br/>poll 5m"]
+    end
+
+    subgraph Domain["Domain / Business Logic"]
+        ENG["NdtBundleEngine<br/>ProcessSlitRecordAsync<br/>HandlePoEndAsync"]
+        POWF["PoEndWorkflowService<br/>ExecuteAsync"]
+        BATCH["NdtBatchStateService"]
+        STATE["NdtBundleRuntimeStateStore<br/>JSON state file"]
+        WIPPO["WipBundleRunningPoProvider<br/>FileSystemWatcher"]
+    end
+
+    subgraph Infra["Infrastructure / I/O"]
+        S7HS["PlcHandshakeService<br/>S7netplus"]
+        S7NDT["S7MillNdtCountReader<br/>ephemeral S7 connect"]
+        CSVW["CsvBundleOutputWriter<br/>WriteBundleAsync"]
+        ZPLP["NdtZplTagPrinter<br/>ZplNdtLabelBuilder"]
+        NETP["NetworkPrinterSender"]
+        TRACE["TraceabilityRepository<br/>ADO.NET"]
+        BREPO["NdtBundleRepository"]
+        POPLAN["PoPlanWipRepository"]
+    end
+
+    subgraph Legacy["Legacy separate deploy"]
+        LAPI["NDTPrintApi<br/>POST /api/NdtPrint/print"]
+        LDB[("M1-M4 NDTBundles tables")]
+    end
+
+    SAP_IN -->|Input Slit CSV| SMW
+    SAP_IN -->|WIP bundle files| WIPPO
+    SAP_IN -->|PO Accepted CSV| POIMP
+
+    WIPPO -->|TryEnqueue| FBPW
+    FBPW --> POWF
+    SMW --> ENG
+    POWF --> ENG
+    ENG --> STATE
+    ENG --> BATCH
+    ENG -->|onBundleClosed| CSVW
+
+    CSVW -->|NDT_Bundle CSV| SAP_IN
+    CSVW --> BREPO
+    CSVW --> ZPLP
+    ZPLP --> NETP
+    NETP --> ZPL
+
+    SMW --> TRACE
+    CSVW --> TRACE
+    POIMP --> POPLAN
+    POPLAN --> SQL
+    BREPO --> SQL
+    TRACE --> SQL
+
+    PLC1 <-->|S7 DB251 counts| S7HS
+    PLC2 <-->|S7 DB251 counts| S7HS
+    PLC3 <-->|S7 DB251 counts| S7HS
+    PLC4 <-->|S7 DB251 counts| S7HS
+    S7NDT <-->|DB251 byte 6| PLC3
+    SMW --> S7NDT
+
+    PHW --> S7HS
+    S7HS -->|TelemetryOnly| PHW
+
+    DASH <-->|REST| API
+    API --> ENG
+    API --> TRACE
+
+    LAPI --> LDB

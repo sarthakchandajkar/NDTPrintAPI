@@ -16,10 +16,21 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
     {
         public string? RunningPo;
         public DateTime RunningWipStampUtc;
+
+        /// <summary>Production-time floor: embedded <c>yyMMdd_HHmmss</c> of the last applied WIP file. Never regresses.</summary>
+        public string LastAppliedWipSortKey = string.Empty;
+
         public bool WaitingForNewWip;
         public string? EndedPo;
         public DateTime PoEndUtc;
         public DateTime BaselineWipStampUtc;
+
+        /// <summary>Ended PO's last known embedded key at PO-end time; post–PO-end acceptance floor.</summary>
+        public string EndedPoLastWipSortKey = string.Empty;
+
+        /// <summary>Log dedup for the current wait (rescans re-observe the same candidates every few seconds).</summary>
+        public readonly HashSet<string> WaitRejectLoggedFiles = new(StringComparer.OrdinalIgnoreCase);
+        public string LastTrailingLoggedSortKey = string.Empty;
     }
 
     private readonly IOptions<NdtBundleOptions> _options;
@@ -29,6 +40,7 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
 
     private readonly object _lock = new();
     private readonly MillState[] _mills = { new(), new(), new(), new() };
+    private readonly HashSet<string> _sortKeyWarnedFiles = new(StringComparer.OrdinalIgnoreCase);
     private DateTime _lastRescanUtc = DateTime.MinValue;
 
     private FileSystemWatcher? _watchBundle;
@@ -87,16 +99,50 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
         }
 
         var normalizedEnded = InputSlitCsvParsing.NormalizePo(endedPo);
-        var baseline = FindLatestWipStampUtcForMill(millNo);
+        var poEndUtc = DateTime.UtcNow;
+        var candidates = ScanAllWipCandidates();
+        var baseline = candidates
+            .Where(c => c.MillNo == millNo)
+            .Select(c => c.StampUtc)
+            .DefaultIfEmpty(DateTime.MinValue)
+            .Max();
+
+        var useSortKeys = _options.Value.WipOrderingUseEmbeddedTimestamp;
+        var endedPoFloor = useSortKeys
+            ? candidates
+                .Where(c => c.MillNo == millNo && InputSlitCsvParsing.PoEquals(c.PoNumber, normalizedEnded))
+                .Select(c => c.SortKey)
+                .DefaultIfEmpty(string.Empty)
+                .Max(StringComparer.Ordinal) ?? string.Empty
+            : string.Empty;
 
         lock (_lock)
         {
             var st = _mills[millNo - 1];
             st.WaitingForNewWip = true;
             st.EndedPo = normalizedEnded;
-            st.PoEndUtc = DateTime.UtcNow;
+            st.PoEndUtc = poEndUtc;
             st.BaselineWipStampUtc = baseline;
             st.RunningPo = null;
+            st.WaitRejectLoggedFiles.Clear();
+            st.LastTrailingLoggedSortKey = string.Empty;
+
+            if (useSortKeys)
+            {
+                if (endedPoFloor.Length == 0)
+                    endedPoFloor = st.LastAppliedWipSortKey;
+                if (endedPoFloor.Length == 0)
+                {
+                    endedPoFloor = WipSortKey.FromUtc(poEndUtc);
+                    _logger.LogWarning(
+                        "Mill {Mill}: no WIP file found for ended PO {EndedPo} and no applied WIP sort key; production-time floor falls back to PO-end time {Floor} (write-stamp baseline remains the secondary guard).",
+                        millNo,
+                        normalizedEnded,
+                        endedPoFloor);
+                }
+            }
+
+            st.EndedPoLastWipSortKey = endedPoFloor;
         }
 
         _logger.LogInformation(
@@ -151,17 +197,19 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
             st.EndedPo = null;
             st.PoEndUtc = default;
 
-            var best = ScanAllWipCandidates()
-                .Where(c => c.MillNo == millNo)
-                .OrderByDescending(c => c.StampUtc)
-                .ThenByDescending(c => c.SortKey, StringComparer.OrdinalIgnoreCase)
+            var best = OrderCandidatesNewestFirst(ScanAllWipCandidates().Where(c => c.MillNo == millNo))
                 .FirstOrDefault();
 
             if (best.MillNo != 0)
             {
                 st.RunningPo = InputSlitCsvParsing.NormalizePo(best.PoNumber);
                 st.RunningWipStampUtc = best.StampUtc;
+                AdvanceAppliedSortKeyUnsafe(st, string.IsNullOrEmpty(best.SortKey) ? null : best.SortKey);
             }
+
+            st.EndedPoLastWipSortKey = string.Empty;
+            st.LastTrailingLoggedSortKey = string.Empty;
+            st.WaitRejectLoggedFiles.Clear();
 
             TryNotifyWipConfirmedRunningPo(millNo, st.RunningPo);
 
@@ -315,10 +363,7 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
                     continue;
                 }
 
-                var best = candidates
-                    .Where(c => c.MillNo == millNo)
-                    .OrderByDescending(c => c.StampUtc)
-                    .ThenByDescending(c => c.SortKey, StringComparer.OrdinalIgnoreCase)
+                var best = OrderCandidatesNewestFirst(candidates.Where(c => c.MillNo == millNo))
                     .FirstOrDefault();
 
                 if (best.MillNo == 0)
@@ -339,10 +384,7 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
         {
             for (var millNo = 1; millNo <= 4; millNo++)
             {
-                var best = candidates
-                    .Where(c => c.MillNo == millNo)
-                    .OrderByDescending(c => c.StampUtc)
-                    .ThenByDescending(c => c.SortKey, StringComparer.OrdinalIgnoreCase)
+                var best = OrderCandidatesNewestFirst(candidates.Where(c => c.MillNo == millNo))
                     .FirstOrDefault();
 
                 if (best.MillNo == 0)
@@ -351,6 +393,7 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
                 var st = _mills[millNo - 1];
                 st.RunningPo = best.PoNumber;
                 st.RunningWipStampUtc = best.StampUtc;
+                AdvanceAppliedSortKeyUnsafe(st, string.IsNullOrEmpty(best.SortKey) ? null : best.SortKey);
             }
         }
     }
@@ -369,10 +412,7 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
         if (!st.WaitingForNewWip)
             return;
 
-        foreach (var c in candidates
-                     .Where(x => x.MillNo == millNo)
-                     .OrderByDescending(x => x.StampUtc)
-                     .ThenByDescending(x => x.SortKey, StringComparer.OrdinalIgnoreCase))
+        foreach (var c in OrderCandidatesNewestFirst(candidates.Where(x => x.MillNo == millNo)))
         {
             if (TryAcceptCandidateUnsafe(millNo, c.PoNumber, c.StampUtc, c.FileName))
                 return;
@@ -389,16 +429,80 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
         if (string.IsNullOrWhiteSpace(normalized))
             return false;
 
-        if (stampUtc <= st.BaselineWipStampUtc)
-            return false;
+        var sortKey = TryResolveSortKeyForOrderingUnsafe(millNo, fileName);
 
         if (!string.IsNullOrWhiteSpace(st.EndedPo) && InputSlitCsvParsing.PoEquals(normalized, st.EndedPo))
+        {
+            // Trailing WIP emission for the ended PO (embedded time after its pre-end floor). SAP emits
+            // these for genuinely ended POs, so they never re-adopt the PO here — resume goes through the
+            // slit + reopen path. Logged once per key so the backlog is visible.
+            if (sortKey is not null &&
+                st.EndedPoLastWipSortKey.Length > 0 &&
+                string.CompareOrdinal(sortKey, st.EndedPoLastWipSortKey) > 0 &&
+                string.CompareOrdinal(sortKey, st.LastTrailingLoggedSortKey) > 0)
+            {
+                st.LastTrailingLoggedSortKey = sortKey;
+                _logger.LogInformation(
+                    "Mill {Mill}: trailing WIP file {File} for ended PO {EndedPo} observed (embedded {SortKey} after last pre-end WIP {Floor}); still waiting for a new PO.",
+                    millNo,
+                    fileName,
+                    st.EndedPo,
+                    sortKey,
+                    st.EndedPoLastWipSortKey);
+            }
+
             return false;
+        }
+
+        // Production-time floor: the next PO's WIP must be emitted after the ended PO's last pre-end WIP.
+        // The write-stamp baseline alone accepted refreshed backlog copies of an earlier PO (2026-07-27
+        // Mill-1 06:15:50 — PO 1000060522 backlog re-accepted after PO 1000060546 ended).
+        if (sortKey is not null &&
+            st.EndedPoLastWipSortKey.Length > 0 &&
+            string.CompareOrdinal(sortKey, st.EndedPoLastWipSortKey) <= 0)
+        {
+            if (st.WaitRejectLoggedFiles.Add(fileName))
+            {
+                _logger.LogInformation(
+                    "Mill {Mill}: WIP candidate {File} rejected after PO end — embedded production time {SortKey} is not after ended PO {EndedPo} last WIP {Floor} (backlog replay).",
+                    millNo,
+                    fileName,
+                    sortKey,
+                    st.EndedPo ?? "(unknown)",
+                    st.EndedPoLastWipSortKey);
+            }
+
+            return false;
+        }
+
+        if (stampUtc <= st.BaselineWipStampUtc)
+        {
+            if (sortKey is not null &&
+                st.EndedPoLastWipSortKey.Length > 0 &&
+                string.CompareOrdinal(sortKey, st.EndedPoLastWipSortKey) > 0 &&
+                st.WaitRejectLoggedFiles.Add(fileName))
+            {
+                _logger.LogWarning(
+                    "Mill {Mill}: ordering evidence disagrees for {File} after PO end — embedded production time {SortKey} is after ended PO last WIP {Floor} but write stamp {Stamp:o} is not newer than baseline {Baseline:o}; rejecting (write-stamp guard).",
+                    millNo,
+                    fileName,
+                    sortKey,
+                    st.EndedPoLastWipSortKey,
+                    stampUtc,
+                    st.BaselineWipStampUtc);
+            }
+
+            return false;
+        }
 
         st.WaitingForNewWip = false;
         st.RunningPo = normalized;
         st.RunningWipStampUtc = stampUtc;
+        AdvanceAppliedSortKeyUnsafe(st, sortKey);
         st.EndedPo = null;
+        st.EndedPoLastWipSortKey = string.Empty;
+        st.LastTrailingLoggedSortKey = string.Empty;
+        st.WaitRejectLoggedFiles.Clear();
 
         _logger.LogInformation(
             "Mill {Mill}: new running PO {Po} accepted from WIP bundle file {File} after PO change.",
@@ -426,14 +530,42 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
             if (string.IsNullOrWhiteSpace(normalized))
                 return false;
 
-            if (st.RunningWipStampUtc >= wipStampUtc &&
-                InputSlitCsvParsing.PoEquals(st.RunningPo, normalized))
+            // Same gates as TryApplyRunningPoUpdateUnsafe (P1): SortKey primary, write stamp secondary.
+            var sortKey = TryResolveSortKeyForOrderingUnsafe(millNo, wipFileName);
+            var sortKeyIsForward = IsSortKeyForwardOfFloor(sortKey, st.LastAppliedWipSortKey);
+            if (sortKey is not null && st.LastAppliedWipSortKey.Length > 0 && !sortKeyIsForward)
+            {
+                _logger.LogDebug(
+                    "Mill {Mill}: WIP file {File} ignored for running PO set — embedded production time {SortKey} not newer than last applied {Floor}.",
+                    millNo,
+                    wipFileName,
+                    sortKey,
+                    st.LastAppliedWipSortKey);
                 return false;
+            }
+
+            if (st.RunningWipStampUtc != default && wipStampUtc <= st.RunningWipStampUtc)
+            {
+                if (sortKeyIsForward && st.LastAppliedWipSortKey.Length > 0)
+                {
+                    _logger.LogWarning(
+                        "Mill {Mill}: ordering evidence disagrees for {File} — embedded production time {SortKey} is newer than {Floor} but write stamp {Stamp:o} regresses; rejecting (write-stamp guard).",
+                        millNo,
+                        wipFileName,
+                        sortKey,
+                        st.LastAppliedWipSortKey,
+                        wipStampUtc);
+                }
+
+                return false;
+            }
 
             st.RunningPo = normalized;
             st.RunningWipStampUtc = wipStampUtc;
+            AdvanceAppliedSortKeyUnsafe(st, sortKey);
             st.WaitingForNewWip = false;
             st.EndedPo = null;
+            st.EndedPoLastWipSortKey = string.Empty;
             TryNotifyWipConfirmedRunningPo(millNo, normalized);
             return true;
         }
@@ -510,9 +642,38 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
             st.RunningWipStampUtc >= wipStampUtc)
             return false;
 
-        // Monotonic WIP stamp: never regress RunningWipStampUtc (guards periodic rescan replay / stale file flap).
-        if (wipStampUtc <= st.RunningWipStampUtc)
+        // Production-time floor: the embedded filename timestamp is the primary ordering key. Backlog
+        // copies refresh write stamps and can interleave POs out of production order (2026-07-27 Mill-1
+        // 06:16 cross-PO bounce); the embedded key is copy-invariant.
+        var sortKey = TryResolveSortKeyForOrderingUnsafe(millNo, wipFileName);
+        var sortKeyIsForward = IsSortKeyForwardOfFloor(sortKey, st.LastAppliedWipSortKey);
+        if (sortKey is not null && st.LastAppliedWipSortKey.Length > 0 && !sortKeyIsForward)
+        {
+            _logger.LogDebug(
+                "Mill {Mill}: WIP file {File} ignored — embedded production time {SortKey} not newer than last applied {Floor}.",
+                millNo,
+                wipFileName,
+                sortKey,
+                st.LastAppliedWipSortKey);
             return false;
+        }
+
+        // Monotonic WIP stamp: never regress RunningWipStampUtc (secondary guard alongside the production-time floor).
+        if (wipStampUtc <= st.RunningWipStampUtc)
+        {
+            if (sortKeyIsForward && st.LastAppliedWipSortKey.Length > 0)
+            {
+                _logger.LogWarning(
+                    "Mill {Mill}: ordering evidence disagrees for {File} — embedded production time {SortKey} is newer than {Floor} but write stamp {Stamp:o} regresses; rejecting (write-stamp guard).",
+                    millNo,
+                    wipFileName,
+                    sortKey,
+                    st.LastAppliedWipSortKey,
+                    wipStampUtc);
+            }
+
+            return false;
+        }
 
         if (IsFileBasedPoEndForMill(millNo) &&
             !string.IsNullOrWhiteSpace(st.RunningPo) &&
@@ -537,6 +698,7 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
 
         st.RunningPo = normalizedNew;
         st.RunningWipStampUtc = wipStampUtc;
+        AdvanceAppliedSortKeyUnsafe(st, sortKey);
         _logger.LogInformation(
             "Mill {Mill}: running PO updated from WIP bundle file {File} → PO {Po}.",
             millNo,
@@ -554,14 +716,65 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
         _wipConfirmedNotifier.NotifyWipConfirmed(millNo, runningPo);
     }
 
-    private DateTime FindLatestWipStampUtcForMill(int millNo)
+    /// <summary>
+    /// Embedded production timestamp for ordering, or null to fall back to write-stamp-only rules
+    /// (feature disabled, or the filename matches no WIP pattern). Callers hold <see cref="_lock"/>.
+    /// </summary>
+    private string? TryResolveSortKeyForOrderingUnsafe(int millNo, string wipFileName)
     {
-        return ScanAllWipCandidates()
-            .Where(c => c.MillNo == millNo)
-            .Select(c => c.StampUtc)
-            .DefaultIfEmpty(DateTime.MinValue)
-            .Max();
+        if (!_options.Value.WipOrderingUseEmbeddedTimestamp)
+            return null;
+
+        var sortKey = WipSortKey.TryGetFromFileName(wipFileName);
+        if (sortKey is null)
+        {
+            if (_sortKeyWarnedFiles.Add(wipFileName))
+            {
+                _logger.LogWarning(
+                    "Mill {Mill}: WIP file {File} has no parseable embedded timestamp; using write-stamp ordering only for this file.",
+                    millNo,
+                    wipFileName);
+            }
+
+            return null;
+        }
+
+        if (!WipSortKey.IsValid(sortKey) && _sortKeyWarnedFiles.Add(wipFileName))
+        {
+            _logger.LogWarning(
+                "WIP file {File} embedded timestamp {SortKey} is not a valid yyMMdd_HHmmss value; ordinal ordering still applied.",
+                wipFileName,
+                sortKey);
+        }
+
+        return sortKey;
     }
+
+    private static bool IsSortKeyForwardOfFloor(string? sortKey, string floor) =>
+        sortKey is not null && (floor.Length == 0 || string.CompareOrdinal(sortKey, floor) > 0);
+
+    private static void AdvanceAppliedSortKeyUnsafe(MillState st, string? sortKey)
+    {
+        if (sortKey is not null &&
+            (st.LastAppliedWipSortKey.Length == 0 || string.CompareOrdinal(sortKey, st.LastAppliedWipSortKey) > 0))
+        {
+            st.LastAppliedWipSortKey = sortKey;
+        }
+    }
+
+    /// <summary>
+    /// Newest-first candidate ordering: embedded production time primary (copy-invariant), write stamp
+    /// tiebreaker. Legacy write-stamp-primary when the embedded-timestamp option is disabled.
+    /// </summary>
+    private IOrderedEnumerable<WipBundleFolderScanner.WipBundleFileCandidate> OrderCandidatesNewestFirst(
+        IEnumerable<WipBundleFolderScanner.WipBundleFileCandidate> candidates) =>
+        _options.Value.WipOrderingUseEmbeddedTimestamp
+            ? candidates
+                .OrderByDescending(c => c.SortKey, StringComparer.Ordinal)
+                .ThenByDescending(c => c.StampUtc)
+            : candidates
+                .OrderByDescending(c => c.StampUtc)
+                .ThenByDescending(c => c.SortKey, StringComparer.OrdinalIgnoreCase);
 
     private List<WipBundleFolderScanner.WipBundleFileCandidate> ScanAllWipCandidates() =>
         WipBundleFolderScanner.Scan(_options.Value).ToList();

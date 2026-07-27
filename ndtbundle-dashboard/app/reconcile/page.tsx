@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { api, type ReconcileBundle, type ReconcileSlitItem } from "@/lib/api";
+import { api, type PpcCorrectionItem, type ReconcileBundle, type ReconcileSlitItem } from "@/lib/api";
 import { DateRangeFilter } from "@/components/DateRangeFilter";
 import { MillFilter } from "@/components/MillFilter";
 import {
@@ -42,6 +42,10 @@ export default function ReconcilePage() {
   const [correctedTotal, setCorrectedTotal] = useState(0);
   const [bundleManualRecon, setBundleManualRecon] = useState(false);
   const [bundleManualReconReason, setBundleManualReconReason] = useState<string | null>(null);
+  const [bundleManualReview, setBundleManualReview] = useState(false);
+  const [bundlePpcPending, setBundlePpcPending] = useState(false);
+  const [ppcItems, setPpcItems] = useState<PpcCorrectionItem[]>([]);
+  const [clearingPpcId, setClearingPpcId] = useState<number | null>(null);
   const [bundlePostReconCsvSum, setBundlePostReconCsvSum] = useState<number | null>(null);
   const [reconcileEnabled, setReconcileEnabled] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -108,6 +112,9 @@ export default function ReconcilePage() {
       setCorrectedTotal(0);
       setBundleManualRecon(false);
       setBundleManualReconReason(null);
+      setBundleManualReview(false);
+      setBundlePpcPending(false);
+      setPpcItems([]);
       setBundlePostReconCsvSum(null);
       return;
     }
@@ -124,6 +131,17 @@ export default function ReconcilePage() {
         setCorrectedTotal(bundleTotal);
         setBundleManualRecon(Boolean(res?.bundle?.manualRecon));
         setBundleManualReconReason(res?.bundle?.manualReconReason ?? null);
+        setBundleManualReview(Boolean(res?.bundle?.manualReview));
+        const ppcPending = Boolean(res?.bundle?.ppcCorrectionPending);
+        setBundlePpcPending(ppcPending);
+        if (ppcPending) {
+          api
+            .reconcilePpcCorrections(selectedBatchNo)
+            .then((r) => setPpcItems(Array.isArray(r?.items) ? r.items : []))
+            .catch(() => setPpcItems([]));
+        } else {
+          setPpcItems([]);
+        }
         setBundlePostReconCsvSum(
           typeof res?.bundle?.postReconCsvSum === "number" ? res.bundle.postReconCsvSum : null
         );
@@ -280,9 +298,71 @@ export default function ReconcilePage() {
     return n === "" ? "—" : n;
   };
 
+  const slitSapStatus = (s: ReconcileSlitItem) => (s.sapStatus ?? "").trim().toLowerCase();
+  const slitIsSapAccepted = (s: ReconcileSlitItem) => slitSapStatus(s) === "accepted";
+
+  const sapStatusBadge = (s: ReconcileSlitItem) => {
+    const status = slitSapStatus(s);
+    if (status === "") return <span className="text-gray-400">—</span>;
+    const files = (s.sourceFiles ?? [])
+      .map((f) => f.fileName)
+      .filter(Boolean)
+      .join(", ");
+    const title = `SAP ${s.sapStatus}${s.sapStatusAtUtc ? ` since ${new Date(s.sapStatusAtUtc).toLocaleString()}` : ""}${files ? ` — ${files}` : ""}`;
+    const style =
+      status === "accepted"
+        ? "bg-green-100 text-green-800 border-green-200"
+        : status === "rejected"
+          ? "bg-red-100 text-red-800 border-red-200"
+          : "bg-gray-100 text-gray-700 border-gray-200";
+    return (
+      <span
+        title={title}
+        className={`inline-block px-2 py-0.5 rounded-full border text-xs font-medium ${style}`}
+      >
+        {s.sapStatus}
+        {status === "rejected" && (s.resubmitCount ?? 0) > 0 ? ` ×${s.resubmitCount}` : ""}
+      </span>
+    );
+  };
+
   const toggleSlitDeleteMark = (s: ReconcileSlitItem) => {
+    if (slitIsSapAccepted(s)) return; // deletion blocked server-side too (409)
     const v = slitValueForApi(s);
     setSlitsMarkedForDelete((prev) => (prev.includes(v) ? prev.filter((k) => k !== v) : [...prev, v]));
+  };
+
+  const refreshPpcCorrections = async (batch: string) => {
+    try {
+      const r = await api.reconcilePpcCorrections(batch);
+      setBundlePpcPending(Boolean(r?.ppcCorrectionPending));
+      setPpcItems(Array.isArray(r?.items) ? r.items : []);
+    } catch {
+      setPpcItems([]);
+    }
+  };
+
+  const clearPpcItem = async (item: PpcCorrectionItem) => {
+    if (typeof item.id !== "number") return;
+    if (
+      !window.confirm(
+        `Mark the PPC correction for file ${item.fileName ?? "?"} / slit ${item.slitNo ?? "—"} as cleared?\n\nOnly do this after PPC confirms the change was applied in SAP.`
+      )
+    ) {
+      return;
+    }
+    setClearingPpcId(item.id);
+    setError(null);
+    setSuccess(null);
+    try {
+      const res = await api.clearPpcCorrection(item.id);
+      setSuccess(res.message ?? "PPC correction item cleared.");
+      await refreshPpcCorrections(selectedBatchNo.trim());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to clear PPC correction item.");
+    } finally {
+      setClearingPpcId(null);
+    }
   };
 
   const deleteMarkedSlits = async () => {
@@ -366,6 +446,14 @@ export default function ReconcilePage() {
       setBundlePostReconCsvSum(
         typeof details?.bundle?.postReconCsvSum === "number" ? details.bundle.postReconCsvSum : null
       );
+      // A save touching SAP-Accepted data auto-creates a PPC correction item — refresh the status.
+      setBundleManualReview(Boolean(details?.bundle?.manualReview));
+      if (details?.bundle?.ppcCorrectionPending) {
+        await refreshPpcCorrections(selectedBatchNo.trim());
+      } else {
+        setBundlePpcPending(false);
+        setPpcItems([]);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Slit reconcile failed.");
     } finally {
@@ -699,9 +787,20 @@ export default function ReconcilePage() {
                         active ? "bg-primary-50 border-l-4 border-primary-500 pl-3" : ""
                       }`}
                     >
-                      <div className="font-semibold text-gray-900">{b.bundleNo}</div>
+                      <div className="font-semibold text-gray-900 flex items-center gap-2">
+                        <span>{b.bundleNo}</span>
+                        {b.isForming ? (
+                          <span className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-sky-100 text-sky-800">
+                            Forming
+                          </span>
+                        ) : null}
+                      </div>
                       <div className="text-xs text-gray-600 pt-1">
-                        PO: {b.poNumber ?? "—"} | Mill: {b.millNo ?? "—"} | Current: {b.totalNdtPcs ?? 0}
+                        PO: {b.poNumber ?? "—"} | Mill: {b.millNo ?? "—"} | Current:{" "}
+                        {b.slitSum != null && b.slitSum > 0 ? b.slitSum : b.totalNdtPcs ?? 0}
+                        {b.isForming && b.slitSum != null && b.totalNdtPcs != null && b.slitSum > b.totalNdtPcs
+                          ? ` (tag ${b.totalNdtPcs})`
+                          : ""}
                       </div>
                       <div className="text-xs text-gray-400 pt-0.5">
                         {formatDisplayDate(b.slitFinishTime || b.slitStartTime || b.printedAt)}
@@ -730,6 +829,64 @@ export default function ReconcilePage() {
                     {bundlePostReconCsvSum != null ? ` Post-recon CSV slit sum: ${bundlePostReconCsvSum}.` : ""}
                   </p>
                 )}
+                {bundleManualReview && (
+                  <p className="text-sm text-purple-900 rounded-md border border-purple-300 bg-purple-50 px-3 py-2">
+                    <span className="inline-block mr-2 px-2 py-0.5 rounded-full bg-purple-200 text-purple-900 text-xs font-semibold uppercase">
+                      Manual review
+                    </span>
+                    This bundle was flagged during Closed-PO slit attach — verify slit rows and totals against the
+                    physical bundle before reconciling.
+                  </p>
+                )}
+                {bundlePpcPending && (
+                  <div className="rounded-md border border-orange-300 bg-orange-50 px-3 py-2 space-y-2">
+                    <p className="text-sm text-orange-900">
+                      <span className="inline-block mr-2 px-2 py-0.5 rounded-full bg-orange-200 text-orange-900 text-xs font-semibold uppercase">
+                        PPC correction pending
+                      </span>
+                      Local correction(s) touched SAP-Accepted file(s): MES is updated, but SAP still holds the old
+                      value. Email PPC with the details below, then mark each item cleared once PPC confirms the SAP
+                      change.
+                    </p>
+                    {ppcItems.length > 0 && (
+                      <table className="min-w-full text-sm">
+                        <thead>
+                          <tr className="text-left text-xs uppercase text-orange-800">
+                            <th className="pr-3 py-1 font-medium">File</th>
+                            <th className="pr-3 py-1 font-medium">Slit</th>
+                            <th className="pr-3 py-1 font-medium">SAP value → Corrected</th>
+                            <th className="pr-3 py-1 font-medium">Created</th>
+                            <th className="py-1" />
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {ppcItems.map((item) => (
+                            <tr key={item.id} className="border-t border-orange-200 text-orange-950">
+                              <td className="pr-3 py-1 font-mono text-xs">{item.fileName ?? "—"}</td>
+                              <td className="pr-3 py-1">{item.slitNo ?? "—"}</td>
+                              <td className="pr-3 py-1">
+                                {item.oldNdtPipes ?? "?"} → <span className="font-semibold">{item.correctedNdtPipes ?? "?"}</span>
+                              </td>
+                              <td className="pr-3 py-1">
+                                {item.createdAtUtc ? new Date(item.createdAtUtc).toLocaleString() : "—"}
+                              </td>
+                              <td className="py-1 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => clearPpcItem(item)}
+                                  disabled={clearingPpcId === item.id}
+                                  className="px-2 py-1 border border-orange-400 rounded-md text-xs font-medium text-orange-900 bg-white hover:bg-orange-100 disabled:opacity-50"
+                                >
+                                  {clearingPpcId === item.id ? "Clearing…" : "PPC confirmed — clear"}
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                )}
                 <div className="grid grid-cols-2 gap-4 text-sm border border-gray-200 rounded-md p-3 bg-gray-50">
                   <div>
                     <div className="text-gray-500">Bundle No</div>
@@ -755,6 +912,7 @@ export default function ReconcilePage() {
                           </th>
                           <th className="px-3 py-2 text-left font-medium text-gray-500 uppercase text-xs">Slit No</th>
                           <th className="px-3 py-2 text-left font-medium text-gray-500 uppercase text-xs">NDT Pipes</th>
+                          <th className="px-3 py-2 text-left font-medium text-gray-500 uppercase text-xs">SAP Status</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-200">
@@ -771,14 +929,21 @@ export default function ReconcilePage() {
                             <td className="px-2 py-2 align-middle" onClick={(e) => e.stopPropagation()}>
                               <input
                                 type="checkbox"
-                                className="h-4 w-4 rounded border-gray-300"
+                                className="h-4 w-4 rounded border-gray-300 disabled:opacity-40"
                                 checked={slitsMarkedForDelete.includes(slitValueForApi(s))}
                                 onChange={() => toggleSlitDeleteMark(s)}
+                                disabled={slitIsSapAccepted(s)}
+                                title={
+                                  slitIsSapAccepted(s)
+                                    ? "Delete blocked: this slit's data is already posted in SAP (Accepted). Corrections go through PPC."
+                                    : undefined
+                                }
                                 aria-label={`Mark slit ${slitValueForApi(s)} for deletion`}
                               />
                             </td>
                             <td className="px-3 py-2 text-gray-900 font-medium">{s.slitNo ?? "—"}</td>
                             <td className="px-3 py-2 text-gray-700">{s.ndtPipes ?? 0}</td>
+                            <td className="px-3 py-2">{sapStatusBadge(s)}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -789,6 +954,16 @@ export default function ReconcilePage() {
                 {!slitsLoading && slits.length > 0 && (
                   <div className="border-t border-gray-200 pt-4 space-y-3">
                     <div className="text-sm font-semibold text-gray-900">Edit slit</div>
+                    {(() => {
+                      const current = slits.find((x) => (x.slitNo ?? "") === selectedSlitNo);
+                      return current && slitIsSapAccepted(current) ? (
+                        <p className="text-sm text-blue-900 rounded-md border border-blue-200 bg-blue-50 px-3 py-2">
+                          This slit&apos;s file is <span className="font-semibold">SAP Accepted</span>: saving updates
+                          MES data only — the SAP-side correction must be requested from PPC. Deleting this slit is
+                          blocked.
+                        </p>
+                      ) : null;
+                    })()}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">Slit No</label>

@@ -32,6 +32,17 @@ public interface INdtBundleRuntimeStateStore
     /// </summary>
     BundleCloseAllocation CloseBundle(string poNumber, int millNo, int closedTotalPcs, int threshold);
 
+    /// <summary>
+    /// After a close allocates <paramref name="allocatedSequence"/>, re-provisions other open slots
+    /// on the mill whose provisional stamp is now stale (≤ allocated) and returns the reassignments
+    /// so callers can correct the already-stamped slit rows/CSVs immediately.
+    /// </summary>
+    IReadOnlyList<ProvisionalStampReassignment> ReassignCollidingProvisionals(
+        int millNo,
+        int allocatedSequence,
+        string closedPoNumber) =>
+        Array.Empty<ProvisionalStampReassignment>();
+
     void AdvanceOnPoEnd(string poNumber, int millNo, int threshold);
 
     /// <summary>Raises PO/mill and mill-wide sequence counters to match printed bundles in SQL/CSV.</summary>
@@ -238,6 +249,42 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
 
             return new BundleCloseAllocation(final, provisional);
         }
+    }
+
+    public IReadOnlyList<ProvisionalStampReassignment> ReassignCollidingProvisionals(
+        int millNo,
+        int allocatedSequence,
+        string closedPoNumber)
+    {
+        if (allocatedSequence <= 0)
+            return Array.Empty<ProvisionalStampReassignment>();
+
+        var closedPo = InputSlitCsvParsing.NormalizePo(closedPoNumber);
+        List<ProvisionalStampReassignment>? reassigned = null;
+        lock (_stateLock)
+        {
+            foreach (var slot in _root.Mills.Values)
+            {
+                if (slot.MillNo != millNo
+                    || string.Equals(slot.PoNumber, closedPo, StringComparison.OrdinalIgnoreCase)
+                    || slot.ProvisionalBatchNo <= 0
+                    || slot.ProvisionalBatchNo > allocatedSequence)
+                {
+                    continue;
+                }
+
+                var newProvisional = Math.Max(allocatedSequence, GetMillMaxSequence(millNo)) + 1;
+                reassigned ??= new List<ProvisionalStampReassignment>();
+                reassigned.Add(new ProvisionalStampReassignment(
+                    slot.PoNumber,
+                    millNo,
+                    slot.ProvisionalBatchNo,
+                    newProvisional));
+                slot.ProvisionalBatchNo = newProvisional;
+            }
+        }
+
+        return reassigned ?? (IReadOnlyList<ProvisionalStampReassignment>)Array.Empty<ProvisionalStampReassignment>();
     }
 
     public void AdvanceOnPoEnd(string poNumber, int millNo, int threshold)
