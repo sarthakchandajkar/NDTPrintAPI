@@ -64,6 +64,17 @@ public interface ITraceabilityRepository
         string newBatchNo,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Batch number already recorded in <c>Output_Slit_Row</c> for this source file basename
+    /// (PO/mill guarded), or <c>null</c> when the file has no rows yet. Re-processed files must
+    /// keep their original bundle instead of re-routing to the newest printed one.
+    /// </summary>
+    Task<string?> TryGetExistingOutputSlitBatchAsync(
+        string sourceFileFullPath,
+        string poNumber,
+        int millNo,
+        CancellationToken cancellationToken);
+
     Task RecordOutputSlitRowsAsync(string sourceFile, IReadOnlyList<(InputSlitRecord Record, string NdtBatchNo, int SourceRowNumber)> rows, CancellationToken cancellationToken);
     Task RecordManualStationRunAsync(
         string poNumber,
@@ -512,6 +523,26 @@ WHERE NDT_Batch_No = @OldBatch
                 if (files.Count == 0)
                     return new OutputSlitBatchCorrectionResult(true, 0, Array.Empty<string>());
 
+                // SAP-accepted freeze (hard requirement 3): rows whose output CSV was already
+                // posted to SAP keep the batch SAP accepted them under. Renumbering them silently
+                // desynced MES from SAP (2026-07-28 incident: slit 2603491_03 posted under
+                // 1226100001 was swept to 1226100013 by successive provisional corrections).
+                var frozenFiles = await GetSapFrozenSourceFilesAsync(conn, files, cancellationToken).ConfigureAwait(false);
+                if (frozenFiles.Count > 0)
+                {
+                    _logger.LogWarning(
+                        "Batch renumber {OldBatch} → {NewBatch} for PO {PO} Mill {Mill}: {Count} SAP-accepted file(s) stay frozen on the old batch: {Files}. Corrections for posted data must go through PPC.",
+                        oldBatchNo,
+                        newBatchNo,
+                        po,
+                        millNo,
+                        frozenFiles.Count,
+                        string.Join(", ", frozenFiles.Select(Path.GetFileName)));
+                    files.RemoveAll(frozenFiles.Contains);
+                    if (files.Count == 0)
+                        return new OutputSlitBatchCorrectionResult(true, 0, Array.Empty<string>());
+                }
+
                 // FK safety: the final bundle row is inserted by the close/print flow AFTER stamp
                 // correction, so create the parent row here if missing (placeholder Total 0 — the
                 // close upsert overwrites it moments later). Without this the UPDATE hits
@@ -519,17 +550,29 @@ WHERE NDT_Batch_No = @OldBatch
                 // (2026-07-26 bundle 1226100002/1226100003 incident).
                 await EnsureBundleParentRowAsync(conn, po, millNo, newBatchNo.Trim(), cancellationToken).ConfigureAwait(false);
 
-                const string updateSql = @"
+                var updateSql = @"
 UPDATE dbo.Output_Slit_Row
 SET NDT_Batch_No = @NewBatch
 WHERE NDT_Batch_No = @OldBatch
   AND Mill_No = @Mill
-  AND PO_Number = @Po;";
-                await using var upd = new SqlCommand(updateSql, conn);
+  AND PO_Number = @Po";
+                await using var upd = new SqlCommand();
+                upd.Connection = conn;
                 upd.Parameters.AddWithValue("@NewBatch", newBatchNo.Trim());
                 upd.Parameters.AddWithValue("@OldBatch", oldBatchNo.Trim());
                 upd.Parameters.AddWithValue("@Mill", millNo);
                 upd.Parameters.AddWithValue("@Po", po);
+                if (frozenFiles.Count > 0)
+                {
+                    var frozenList = frozenFiles.ToList();
+                    var frozenParams = frozenList.Select(static (_, i) => $"@Fz{i}").ToList();
+                    updateSql += $@"
+  AND (Source_File IS NULL OR Source_File NOT IN ({string.Join(", ", frozenParams)}))";
+                    for (var i = 0; i < frozenList.Count; i++)
+                        upd.Parameters.AddWithValue(frozenParams[i], frozenList[i]);
+                }
+
+                upd.CommandText = updateSql + ";";
                 var updated = await upd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
                 if (updated > 0)
                 {
@@ -612,6 +655,147 @@ ELSE
                 po,
                 millNo);
         }
+    }
+
+    /// <summary>
+    /// Source files (full paths as stored on <c>Output_Slit_Row.Source_File</c>) whose data SAP
+    /// already accepted — their rows are frozen on the batch SAP posted them under. Detected via
+    /// <c>Output_Slit_Sap_Status</c> (Status=Accepted, terminal) plus the NDT Input Slit Accepted
+    /// folder on disk (covers deployments where the status table is not migrated yet).
+    /// </summary>
+    private async Task<HashSet<string>> GetSapFrozenSourceFilesAsync(
+        SqlConnection conn,
+        IReadOnlyList<string> sourceFiles,
+        CancellationToken cancellationToken)
+    {
+        var frozen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (sourceFiles.Count == 0)
+            return frozen;
+
+        var pathsByBaseName = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in sourceFiles)
+        {
+            var baseName = Path.GetFileName(path);
+            if (string.IsNullOrEmpty(baseName))
+                continue;
+            if (!pathsByBaseName.TryGetValue(baseName, out var list))
+                pathsByBaseName[baseName] = list = new List<string>();
+            list.Add(path);
+        }
+
+        if (pathsByBaseName.Count == 0)
+            return frozen;
+
+        var acceptedFolder = (Opt.NdtInputSlitAcceptedFolder ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(acceptedFolder))
+        {
+            foreach (var (baseName, paths) in pathsByBaseName)
+            {
+                try
+                {
+                    if (File.Exists(Path.Combine(acceptedFolder, baseName)))
+                        paths.ForEach(p => frozen.Add(p));
+                }
+                catch
+                {
+                    // best-effort disk probe; SQL status check below still applies
+                }
+            }
+        }
+
+        try
+        {
+            var names = pathsByBaseName.Keys.ToList();
+            var parameters = names.Select(static (_, i) => $"@B{i}").ToList();
+            var sql = $@"
+SELECT File_Name
+FROM dbo.Output_Slit_Sap_Status
+WHERE Status = 'Accepted'
+  AND File_Name IN ({string.Join(", ", parameters)});";
+            await using var cmd = new SqlCommand(sql, conn);
+            for (var i = 0; i < names.Count; i++)
+                cmd.Parameters.AddWithValue(parameters[i], names[i]);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (reader.IsDBNull(0))
+                    continue;
+                if (pathsByBaseName.TryGetValue(reader.GetString(0).Trim(), out var paths))
+                    paths.ForEach(p => frozen.Add(p));
+            }
+        }
+        catch (SqlException ex) when (IsMissingSapStatusTable(ex))
+        {
+            // Status table not migrated; the Accepted-folder probe above still protects posted files.
+        }
+
+        return frozen;
+    }
+
+    public async Task<string?> TryGetExistingOutputSlitBatchAsync(
+        string sourceFileFullPath,
+        string poNumber,
+        int millNo,
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled || string.IsNullOrWhiteSpace(sourceFileFullPath) || millNo is < 1 or > 4)
+            return null;
+
+        var baseName = Path.GetFileName(sourceFileFullPath);
+        if (string.IsNullOrEmpty(baseName))
+            return null;
+
+        var po = InputSlitCsvParsing.NormalizePo(poNumber);
+        if (string.IsNullOrWhiteSpace(po))
+            return null;
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await OpenConnectionAsync(conn, "Output_Slit_Row existing batch lookup", cancellationToken).ConfigureAwait(false);
+
+            // Rows are keyed on the output path (same basename as the input file); match either.
+            var esc = SqlLikeEscape(baseName);
+            const string sql = @"
+SELECT TOP 1 NDT_Batch_No
+FROM dbo.Output_Slit_Row
+WHERE PO_Number = @Po
+  AND Mill_No = @Mill
+  AND NDT_Batch_No IS NOT NULL
+  AND LTRIM(RTRIM(NDT_Batch_No)) <> N''
+  AND (Source_File = @BaseName OR Source_File LIKE @LikeWin OR Source_File LIKE @LikeUnix);";
+            await using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@Po", po);
+            cmd.Parameters.AddWithValue("@Mill", millNo);
+            cmd.Parameters.AddWithValue("@BaseName", baseName);
+            cmd.Parameters.AddWithValue("@LikeWin", "%\\" + esc);
+            cmd.Parameters.AddWithValue("@LikeUnix", "%/" + esc);
+            var scalar = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            return scalar is string batch && !string.IsNullOrWhiteSpace(batch) ? batch.Trim() : null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Existing Output_Slit_Row batch lookup failed for {File} (PO {PO} Mill {Mill}).",
+                baseName,
+                poNumber,
+                millNo);
+            return null;
+        }
+    }
+
+    private static bool IsMissingSapStatusTable(SqlException ex)
+    {
+        // 208 = invalid object name
+        foreach (SqlError err in ex.Errors)
+        {
+            if (err.Number == 208
+                && err.Message.Contains("Output_Slit_Sap_Status", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return ex.Message.Contains("Output_Slit_Sap_Status", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsMissingInputSlitFileSeenTable(SqlException ex)

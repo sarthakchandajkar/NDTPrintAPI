@@ -624,54 +624,79 @@ public sealed class SlitMonitoringWorker : BackgroundService
                                 wipByPo,
                                 pipeSizeByPo);
 
-                            if (!fifoSessions.TryGetValue(poMillKey, out var awaitingList))
-                            {
-                                var loaded = await _bundleRepository
-                                    .ListAwaitingPlcReconBatchesAsync(
-                                        bundleRecord.PoNumber,
-                                        bundleRecord.MillNo,
-                                        cancellationToken)
-                                    .ConfigureAwait(false);
-                                awaitingList = loaded.Count > 0
-                                    ? loaded.Select(static b => b).ToList()
-                                    : [];
-                                fifoSessions[poMillKey] = awaitingList;
-                            }
-
-                            var route = await ClosedPoTraceabilityBatchResolver
-                                .ResolveAsync(
-                                    _bundleRepository,
-                                    awaitingList,
-                                    bundleRecord,
+                            // Sticky attach: a re-processed file keeps the bundle its rows already
+                            // live on. Re-routing on every rescan made rows drift to the newest
+                            // printed bundle (2026-07-28: 2604773_03 moved 1226100011 → 1226100012
+                            // on three consecutive 30-min backfill passes).
+                            var existingBatch = await _traceability
+                                .TryGetExistingOutputSlitBatchAsync(
+                                    fileFull,
+                                    bundleRecord.PoNumber,
                                     bundleRecord.MillNo,
-                                    closedPoPipeSize,
                                     cancellationToken)
                                 .ConfigureAwait(false);
-
-                            closedPoBatchNo = route.BatchNoFormatted;
-                            if (route.RequiresManualReview)
+                            if (!string.IsNullOrWhiteSpace(existingBatch))
                             {
-                                if (manualReviewFlagged.Add(poMillKey))
-                                {
-                                    _logger.LogWarning(
-                                        "Closed PO traceability: no existing bundle for PO {PO} Mill {Mill} file {File}; Manual_Review (no new sequence).",
-                                        poMillKey.Item1,
-                                        poMillKey.Item2,
-                                        Path.GetFileName(fileFull));
-                                    await _bundleRepository
-                                        .MarkManualReviewAsync(poMillKey.Item1, poMillKey.Item2, cancellationToken)
-                                        .ConfigureAwait(false);
-                                }
-                            }
-                            else if (!string.IsNullOrWhiteSpace(closedPoBatchNo))
-                            {
+                                closedPoBatchNo = existingBatch;
                                 reconTouchedPoMills.Add(poMillKey);
                                 _logger.LogInformation(
-                                    "Closed PO traceability: PO {PO} Mill {Mill} file {File} attached to bundle {Batch}.",
+                                    "Closed PO traceability: PO {PO} Mill {Mill} file {File} keeps existing bundle {Batch} (already recorded; no re-route).",
                                     poMillKey.Item1,
                                     poMillKey.Item2,
                                     Path.GetFileName(fileFull),
                                     closedPoBatchNo);
+                            }
+                            else
+                            {
+                                if (!fifoSessions.TryGetValue(poMillKey, out var awaitingList))
+                                {
+                                    var loaded = await _bundleRepository
+                                        .ListAwaitingPlcReconBatchesAsync(
+                                            bundleRecord.PoNumber,
+                                            bundleRecord.MillNo,
+                                            cancellationToken)
+                                        .ConfigureAwait(false);
+                                    awaitingList = loaded.Count > 0
+                                        ? loaded.Select(static b => b).ToList()
+                                        : [];
+                                    fifoSessions[poMillKey] = awaitingList;
+                                }
+
+                                var route = await ClosedPoTraceabilityBatchResolver
+                                    .ResolveAsync(
+                                        _bundleRepository,
+                                        awaitingList,
+                                        bundleRecord,
+                                        bundleRecord.MillNo,
+                                        closedPoPipeSize,
+                                        cancellationToken)
+                                    .ConfigureAwait(false);
+
+                                closedPoBatchNo = route.BatchNoFormatted;
+                                if (route.RequiresManualReview)
+                                {
+                                    if (manualReviewFlagged.Add(poMillKey))
+                                    {
+                                        _logger.LogWarning(
+                                            "Closed PO traceability: no existing bundle for PO {PO} Mill {Mill} file {File}; Manual_Review (no new sequence).",
+                                            poMillKey.Item1,
+                                            poMillKey.Item2,
+                                            Path.GetFileName(fileFull));
+                                        await _bundleRepository
+                                            .MarkManualReviewAsync(poMillKey.Item1, poMillKey.Item2, cancellationToken)
+                                            .ConfigureAwait(false);
+                                    }
+                                }
+                                else if (!string.IsNullOrWhiteSpace(closedPoBatchNo))
+                                {
+                                    reconTouchedPoMills.Add(poMillKey);
+                                    _logger.LogInformation(
+                                        "Closed PO traceability: PO {PO} Mill {Mill} file {File} attached to bundle {Batch}.",
+                                        poMillKey.Item1,
+                                        poMillKey.Item2,
+                                        Path.GetFileName(fileFull),
+                                        closedPoBatchNo);
+                                }
                             }
                         }
 

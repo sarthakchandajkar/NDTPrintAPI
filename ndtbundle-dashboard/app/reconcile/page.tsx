@@ -797,9 +797,9 @@ export default function ReconcilePage() {
                       </div>
                       <div className="text-xs text-gray-600 pt-1">
                         PO: {b.poNumber ?? "—"} | Mill: {b.millNo ?? "—"} | Current:{" "}
-                        {b.slitSum != null && b.slitSum > 0 ? b.slitSum : b.totalNdtPcs ?? 0}
-                        {b.isForming && b.slitSum != null && b.totalNdtPcs != null && b.slitSum > b.totalNdtPcs
-                          ? ` (tag ${b.totalNdtPcs})`
+                        {b.totalNdtPcs ?? (b.slitSum != null && b.slitSum > 0 ? b.slitSum : 0)}
+                        {!b.isForming && b.slitSum != null && b.totalNdtPcs != null && b.slitSum > b.totalNdtPcs
+                          ? ` (slits ${b.slitSum})`
                           : ""}
                       </div>
                       <div className="text-xs text-gray-400 pt-0.5">
