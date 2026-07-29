@@ -184,11 +184,16 @@ function MillHooterVerificationPanel({
       setOverrideError("Enter a non-negative whole number.");
       return;
     }
+    const millNo = mill.millNo;
+    if (millNo == null || millNo < 1 || millNo > 4) {
+      setOverrideError("Invalid mill number.");
+      return;
+    }
     setApplying(true);
     setOverrideError(null);
     setOverrideSuccess(null);
     try {
-      const res = await api.settingsSetOpenAccumulation(t, mill.millNo, n);
+      const res = await api.settingsSetOpenAccumulation(t, millNo, n);
       setOverrideSuccess(res.message ?? "Open accumulation updated.");
       onApplied?.();
     } catch (e) {
