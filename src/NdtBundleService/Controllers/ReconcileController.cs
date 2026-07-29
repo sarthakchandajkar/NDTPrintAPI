@@ -412,8 +412,13 @@ public sealed class ReconcileController : ControllerBase
             .UpdateBundleSummaryCsvAsync(batchNo, request.CorrectedTotal, CancellationToken.None)
             .ConfigureAwait(false);
 
+        var bundleForPrint = await _bundleRepository
+            .GetByBatchNoAsync(batchNo, cancellationToken)
+            .ConfigureAwait(false)
+            ?? result.Bundle;
+
         var printResult = await _reconcileTagService
-            .ReprintAsync(result.Bundle, cancellationToken)
+            .ReprintAsync(bundleForPrint, cancellationToken)
             .ConfigureAwait(false);
 
         return Ok(new

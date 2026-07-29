@@ -401,6 +401,11 @@ public sealed class MillWideAllocatorAndPoEndIdempotencyTests : IDisposable
             int millNo,
             CancellationToken cancellationToken) => Task.FromResult<string?>(null);
 
+        public Task<IReadOnlyList<string>> GetSapFrozenSourceFilesAsync(
+            IReadOnlyList<string> sourceFiles,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
+
         public Task RecordOutputSlitRowsAsync(
             string sourceFile,
             IReadOnlyList<(InputSlitRecord Record, string NdtBatchNo, int SourceRowNumber)> rows,

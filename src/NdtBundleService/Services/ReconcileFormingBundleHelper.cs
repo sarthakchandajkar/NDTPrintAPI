@@ -17,6 +17,10 @@ public static class ReconcileFormingBundleHelper
     /// </summary>
     public static bool IsForming(NdtBundleRecord bundle, int slitSum, bool slitOnlyInDatabase)
     {
+        // Operator-locked total from manual bundle reconcile — never treat as forming.
+        if (bundle.ManualRecon)
+            return false;
+
         if (slitOnlyInDatabase)
             return true;
 
@@ -32,5 +36,7 @@ public static class ReconcileFormingBundleHelper
     /// Forming bundles show live slit accumulation; formed bundles show the printed tag total.
     /// </summary>
     public static int ResolveDisplayTotal(NdtBundleRecord bundle, int slitSum, bool isForming) =>
-        isForming ? Math.Max(bundle.TotalNdtPcs, slitSum) : bundle.TotalNdtPcs;
+        bundle.ManualRecon || !isForming
+            ? bundle.TotalNdtPcs
+            : Math.Max(bundle.TotalNdtPcs, slitSum);
 }

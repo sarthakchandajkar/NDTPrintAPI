@@ -147,7 +147,13 @@ function BundleProgressBar({
   );
 }
 
-function MillHooterVerificationPanel({ mill }: { mill: SettingsPlcMill }) {
+function MillHooterVerificationPanel({
+  mill,
+  onApplied,
+}: {
+  mill: SettingsPlcMill;
+  onApplied?: () => void;
+}) {
   const mes = mill.mesHooter;
   const plcAcc = mill.accumulatedValue ?? null;
   const plcThr = mill.thresholdValue ?? null;
@@ -155,6 +161,42 @@ function MillHooterVerificationPanel({ mill }: { mill: SettingsPlcMill }) {
   const mesThr = mes?.threshold ?? null;
   const accMatch = mesAcc != null && plcAcc != null && mesAcc === plcAcc;
   const thrMatch = mesThr != null && plcThr != null && mesThr === plcThr;
+  const [overrideValue, setOverrideValue] = useState(
+    mesAcc != null ? String(mesAcc) : plcAcc != null ? String(plcAcc) : "0"
+  );
+  const [applying, setApplying] = useState(false);
+  const [overrideError, setOverrideError] = useState<string | null>(null);
+  const [overrideSuccess, setOverrideSuccess] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (mesAcc != null) setOverrideValue(String(mesAcc));
+    else if (plcAcc != null) setOverrideValue(String(plcAcc));
+  }, [mesAcc, plcAcc]);
+
+  const applyOverride = async () => {
+    const t = getSettingsToken();
+    if (!t) {
+      setOverrideError("Settings login required.");
+      return;
+    }
+    const n = parseInt(overrideValue, 10);
+    if (Number.isNaN(n) || n < 0) {
+      setOverrideError("Enter a non-negative whole number.");
+      return;
+    }
+    setApplying(true);
+    setOverrideError(null);
+    setOverrideSuccess(null);
+    try {
+      const res = await api.settingsSetOpenAccumulation(t, mill.millNo, n);
+      setOverrideSuccess(res.message ?? "Open accumulation updated.");
+      onApplied?.();
+    } catch (e) {
+      setOverrideError(e instanceof Error ? e.message : "Failed to update open accumulation.");
+    } finally {
+      setApplying(false);
+    }
+  };
 
   return (
     <section className="bg-white rounded-lg border border-violet-200 shadow-sm overflow-hidden">
@@ -222,6 +264,41 @@ function MillHooterVerificationPanel({ mill }: { mill: SettingsPlcMill }) {
             <BundleProgressBar accumulated={plcAcc} threshold={plcThr} />
           )}
         </div>
+      </div>
+      <div className="px-5 pb-5 border-t border-violet-100 pt-4 space-y-3">
+        <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+          Manual open accumulation override
+        </h4>
+        <p className="text-xs text-gray-600">
+          After a service restart, MES may lose slit-edge counting state while production continues. Set the
+          open remainder (pipes toward the next bundle close) to match actual production, then verify MW56
+          matches below.
+        </p>
+        <div className="flex flex-wrap items-end gap-3">
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Open accumulated (NDT pipes)</label>
+            <input
+              type="number"
+              min={0}
+              value={overrideValue}
+              onChange={(e) => setOverrideValue(e.target.value)}
+              className="w-32 border border-gray-300 rounded-md px-3 py-2 text-sm font-mono tabular-nums"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => void applyOverride()}
+            disabled={applying || !mes?.poNumber?.trim()}
+            className="px-4 py-2 rounded-md bg-violet-700 text-white text-sm font-medium hover:bg-violet-800 disabled:opacity-50"
+          >
+            {applying ? "Applying…" : "Apply override"}
+          </button>
+          {!mes?.poNumber?.trim() && (
+            <span className="text-xs text-amber-700">No running PO on this mill.</span>
+          )}
+        </div>
+        {overrideError && <p className="text-sm text-red-700">{overrideError}</p>}
+        {overrideSuccess && <p className="text-sm text-green-800">{overrideSuccess}</p>}
       </div>
       <p className="px-5 pb-4 text-xs text-gray-500">
         After <strong>Test PO change</strong>, MW56 should reset to 0 and MW58 should update for the new running PO&apos;s
@@ -689,7 +766,11 @@ export default function SettingsPage() {
           {(plc?.mills ?? [])
             .filter((m) => m.hooterEnabled)
             .map((m) => (
-              <MillHooterVerificationPanel key={`hooter-${m.millNo}`} mill={m} />
+              <MillHooterVerificationPanel
+                key={`hooter-${m.millNo}`}
+                mill={m}
+                onApplied={() => void loadTabData({ plcFull: true })}
+              />
             ))}
 
           {poChangeTestResult && (

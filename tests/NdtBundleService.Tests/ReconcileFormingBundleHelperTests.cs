@@ -92,4 +92,21 @@ public sealed class ReconcileFormingBundleHelperTests
 
         Assert.False(ReconcileFormingBundleHelper.IsForming(bundle, slitSum: 9, slitOnlyInDatabase: false));
     }
+
+    [Fact]
+    public void Manual_recon_pending_bundle_uses_locked_total_not_slit_sum()
+    {
+        // After manual bundle reconcile, Print_Status may still be Pending (reprint disabled/failed).
+        // UI must show the operator-locked total, not max(tag, slitSum).
+        var bundle = new NdtBundleRecord
+        {
+            BundleNo = "1226100020",
+            PrintStatus = BundlePrintStatus.Pending,
+            ManualRecon = true,
+            TotalNdtPcs = 75
+        };
+
+        Assert.False(ReconcileFormingBundleHelper.IsForming(bundle, slitSum: 85, slitOnlyInDatabase: false));
+        Assert.Equal(75, ReconcileFormingBundleHelper.ResolveDisplayTotal(bundle, 85, isForming: false));
+    }
 }

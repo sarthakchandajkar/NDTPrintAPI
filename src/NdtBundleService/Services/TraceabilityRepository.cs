@@ -75,6 +75,14 @@ public interface ITraceabilityRepository
         int millNo,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Source files whose <c>Output_Slit_Row</c> rows must not be renumbered — SAP Accepted on disk
+    /// or in <c>Output_Slit_Sap_Status</c>.
+    /// </summary>
+    Task<IReadOnlyList<string>> GetSapFrozenSourceFilesAsync(
+        IReadOnlyList<string> sourceFiles,
+        CancellationToken cancellationToken);
+
     Task RecordOutputSlitRowsAsync(string sourceFile, IReadOnlyList<(InputSlitRecord Record, string NdtBatchNo, int SourceRowNumber)> rows, CancellationToken cancellationToken);
     Task RecordManualStationRunAsync(
         string poNumber,
@@ -523,11 +531,15 @@ WHERE NDT_Batch_No = @OldBatch
                 if (files.Count == 0)
                     return new OutputSlitBatchCorrectionResult(true, 0, Array.Empty<string>());
 
-                // SAP-accepted freeze (hard requirement 3): rows whose output CSV was already
-                // posted to SAP keep the batch SAP accepted them under. Renumbering them silently
-                // desynced MES from SAP (2026-07-28 incident: slit 2603491_03 posted under
-                // 1226100001 was swept to 1226100013 by successive provisional corrections).
                 var frozenFiles = await GetSapFrozenSourceFilesAsync(conn, files, cancellationToken).ConfigureAwait(false);
+                await AugmentSapFrozenFromBatchRowsAsync(
+                        conn,
+                        oldBatchNo.Trim(),
+                        millNo,
+                        po,
+                        frozenFiles,
+                        cancellationToken)
+                    .ConfigureAwait(false);
                 if (frozenFiles.Count > 0)
                 {
                     _logger.LogWarning(
@@ -539,7 +551,7 @@ WHERE NDT_Batch_No = @OldBatch
                         frozenFiles.Count,
                         string.Join(", ", frozenFiles.Select(Path.GetFileName)));
                     files.RemoveAll(frozenFiles.Contains);
-                    if (files.Count == 0)
+                    if (files.Count == 0 && frozenFiles.Count > 0)
                         return new OutputSlitBatchCorrectionResult(true, 0, Array.Empty<string>());
                 }
 
@@ -555,7 +567,16 @@ UPDATE dbo.Output_Slit_Row
 SET NDT_Batch_No = @NewBatch
 WHERE NDT_Batch_No = @OldBatch
   AND Mill_No = @Mill
-  AND PO_Number = @Po";
+  AND PO_Number = @Po
+  AND NOT EXISTS (
+    SELECT 1 FROM dbo.Output_Slit_Sap_Status s
+    WHERE s.Status = N'Accepted'
+      AND (
+        Output_Slit_Row.Source_File = s.File_Name
+        OR Output_Slit_Row.Source_File LIKE N'%\' + s.File_Name
+        OR Output_Slit_Row.Source_File LIKE N'%/' + s.File_Name
+      )
+  )";
                 await using var upd = new SqlCommand();
                 upd.Connection = conn;
                 upd.Parameters.AddWithValue("@NewBatch", newBatchNo.Trim());
@@ -573,7 +594,15 @@ WHERE NDT_Batch_No = @OldBatch
                 }
 
                 upd.CommandText = updateSql + ";";
-                var updated = await upd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                var updated = await ExecuteBatchRenumberAsync(
+                        upd,
+                        oldBatchNo,
+                        newBatchNo,
+                        po,
+                        millNo,
+                        frozenFiles,
+                        cancellationToken)
+                    .ConfigureAwait(false);
                 if (updated > 0)
                 {
                     _writeTracker.RecordSuccess("Output_Slit_Row", $"batch {oldBatchNo}→{newBatchNo} ({updated})");
@@ -663,6 +692,113 @@ ELSE
     /// <c>Output_Slit_Sap_Status</c> (Status=Accepted, terminal) plus the NDT Input Slit Accepted
     /// folder on disk (covers deployments where the status table is not migrated yet).
     /// </summary>
+    public async Task<IReadOnlyList<string>> GetSapFrozenSourceFilesAsync(
+        IReadOnlyList<string> sourceFiles,
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled || sourceFiles.Count == 0)
+            return Array.Empty<string>();
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await OpenConnectionAsync(conn, "Output_Slit_Row SAP freeze lookup", cancellationToken).ConfigureAwait(false);
+            var frozen = await GetSapFrozenSourceFilesAsync(conn, sourceFiles, cancellationToken).ConfigureAwait(false);
+            return frozen.ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "SAP frozen source-file lookup failed; proceeding without freeze list.");
+            return Array.Empty<string>();
+        }
+    }
+
+    /// <summary>
+    /// Adds SAP-Accepted rows on <paramref name="oldBatchNo"/> to <paramref name="frozen"/> by
+    /// joining <c>Output_Slit_Row</c> to <c>Output_Slit_Sap_Status</c> (covers basename/path drift).
+    /// </summary>
+    private async Task AugmentSapFrozenFromBatchRowsAsync(
+        SqlConnection conn,
+        string oldBatchNo,
+        int millNo,
+        string po,
+        HashSet<string> frozen,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            const string sql = @"
+SELECT DISTINCT o.Source_File
+FROM dbo.Output_Slit_Row o
+INNER JOIN dbo.Output_Slit_Sap_Status s ON s.Status = N'Accepted'
+  AND (
+    o.Source_File = s.File_Name
+    OR o.Source_File LIKE N'%\' + s.File_Name
+    OR o.Source_File LIKE N'%/' + s.File_Name
+  )
+WHERE o.NDT_Batch_No = @OldBatch
+  AND o.Mill_No = @Mill
+  AND o.PO_Number = @Po
+  AND o.Source_File IS NOT NULL;";
+            await using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@OldBatch", oldBatchNo);
+            cmd.Parameters.AddWithValue("@Mill", millNo);
+            cmd.Parameters.AddWithValue("@Po", po);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (!reader.IsDBNull(0))
+                    frozen.Add(reader.GetString(0));
+            }
+        }
+        catch (SqlException ex) when (IsMissingSapStatusTable(ex))
+        {
+            // Status table not migrated; Accepted-folder probe on the file list still applies.
+        }
+    }
+
+    private async Task<int> ExecuteBatchRenumberAsync(
+        SqlCommand upd,
+        string oldBatchNo,
+        string newBatchNo,
+        string po,
+        int millNo,
+        HashSet<string> frozenFiles,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await upd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (SqlException ex) when (IsMissingSapStatusTable(ex))
+        {
+            _logger.LogWarning(
+                "Output_Slit_Sap_Status missing — batch renumber {OldBatch} → {NewBatch} for PO {PO} Mill {Mill} "
+                + "falls back to Accepted-folder freeze only (run docs/Output_Slit_Sap_Status_AddTable.sql).",
+                oldBatchNo,
+                newBatchNo,
+                po,
+                millNo);
+
+            var fallbackSql = @"
+UPDATE dbo.Output_Slit_Row
+SET NDT_Batch_No = @NewBatch
+WHERE NDT_Batch_No = @OldBatch
+  AND Mill_No = @Mill
+  AND PO_Number = @Po";
+            if (frozenFiles.Count > 0)
+            {
+                var frozenList = frozenFiles.ToList();
+                var frozenParams = frozenList.Select(static (_, i) => $"@Fz{i}").ToList();
+                fallbackSql += $@"
+  AND (Source_File IS NULL OR Source_File NOT IN ({string.Join(", ", frozenParams)}))";
+            }
+
+            upd.CommandText = fallbackSql + ";";
+            return await upd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     private async Task<HashSet<string>> GetSapFrozenSourceFilesAsync(
         SqlConnection conn,
         IReadOnlyList<string> sourceFiles,
@@ -696,11 +832,19 @@ ELSE
                     if (File.Exists(Path.Combine(acceptedFolder, baseName)))
                         paths.ForEach(p => frozen.Add(p));
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // best-effort disk probe; SQL status check below still applies
+                    _logger.LogWarning(
+                        ex,
+                        "Could not probe SAP Accepted folder for {File}; SQL status check still applies.",
+                        baseName);
                 }
             }
+        }
+        else if (sourceFiles.Count > 0)
+        {
+            _logger.LogDebug(
+                "NdtInputSlitAcceptedFolder is not configured; SAP Accepted freeze relies on Output_Slit_Sap_Status only.");
         }
 
         try

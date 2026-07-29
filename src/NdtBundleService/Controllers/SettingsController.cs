@@ -25,6 +25,7 @@ public sealed class SettingsController : ControllerBase
     private readonly PlcHandshakeStatusRegistry _handshakeStatus;
     private readonly PlcHandshakeCoordinator _handshakeCoordinator;
     private readonly IMillHooterPlcValuesService _hooterValues;
+    private readonly OpenAccumulationOverrideService _openAccumulationOverride;
     private readonly INetworkPrinterSender _networkPrinterSender;
     private readonly IZplGenerationToggle _zplToggle;
     private readonly NdtBundleOptions _options;
@@ -40,6 +41,7 @@ public sealed class SettingsController : ControllerBase
         PlcHandshakeStatusRegistry handshakeStatus,
         PlcHandshakeCoordinator handshakeCoordinator,
         IMillHooterPlcValuesService hooterValues,
+        OpenAccumulationOverrideService openAccumulationOverride,
         INetworkPrinterSender networkPrinterSender,
         IZplGenerationToggle zplToggle,
         IOptions<NdtBundleOptions> options,
@@ -54,6 +56,7 @@ public sealed class SettingsController : ControllerBase
         _handshakeStatus = handshakeStatus;
         _handshakeCoordinator = handshakeCoordinator;
         _hooterValues = hooterValues;
+        _openAccumulationOverride = openAccumulationOverride;
         _networkPrinterSender = networkPrinterSender;
         _zplToggle = zplToggle;
         _options = options.Value;
@@ -403,6 +406,56 @@ public sealed class SettingsController : ControllerBase
             return denied!;
 
         return SetMillPlcConnection(millNo, enabled: false);
+    }
+
+    /// <summary>
+    /// Operator override for open-bundle PLC accumulation (MES <c>sizeCounts</c> / MW56 toward next close).
+    /// Use after restart when slit-edge state was lost and MES count no longer matches actual production.
+    /// </summary>
+    [HttpPost("plc/mill/{millNo:int}/open-accumulation")]
+    public async Task<IActionResult> SetOpenAccumulation(
+        int millNo,
+        [FromBody] OpenAccumulationOverrideRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!TryAuthorize(out var denied))
+            return denied!;
+
+        if (request is null)
+            return BadRequest(new { Message = "Request body is required." });
+
+        var result = await _openAccumulationOverride
+            .SetOpenAccumulationAsync(
+                millNo,
+                request.Accumulated,
+                request.PoNumber,
+                request.SizeKey,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!result.Success)
+            return BadRequest(new { Message = result.Message, result.MillNo });
+
+        return Ok(new
+        {
+            Message = result.Message,
+            result.MillNo,
+            PoNumber = result.PoNumber,
+            SizeKey = result.SizeKey,
+            PreviousAccumulated = result.PreviousAccumulated,
+            NewAccumulated = result.NewAccumulated,
+            Threshold = result.Threshold,
+            HooterSyncedToPlc = result.HooterSyncedToPlc,
+            MesHooter = result.ResolvedHooter is null
+                ? null
+                : new
+                {
+                    result.ResolvedHooter.PoNumber,
+                    result.ResolvedHooter.PipeSize,
+                    Threshold = result.ResolvedHooter.Threshold,
+                    Accumulated = result.ResolvedHooter.Accumulated
+                }
+        });
     }
 
     /// <summary>Reconnect one mill's S7 handshake after a manual disconnect.</summary>
@@ -824,5 +877,17 @@ public sealed class SettingsController : ControllerBase
     public sealed class TestPoChangeRequest
     {
         public int MillNo { get; set; }
+    }
+
+    public sealed class OpenAccumulationOverrideRequest
+    {
+        /// <summary>NDT pipes toward the next bundle close for the active pipe size.</summary>
+        public int Accumulated { get; set; }
+
+        /// <summary>Optional; defaults to the mill's running PO.</summary>
+        public string? PoNumber { get; set; }
+
+        /// <summary>Optional formation-chart size key; defaults from running PO pipe size.</summary>
+        public string? SizeKey { get; set; }
     }
 }

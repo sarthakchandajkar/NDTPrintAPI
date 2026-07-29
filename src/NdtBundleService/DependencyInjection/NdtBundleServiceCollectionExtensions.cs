@@ -71,6 +71,7 @@ public static class NdtBundleServiceCollectionExtensions
         services.AddSingleton<PlcHandshakeCoordinator>();
         services.AddSingleton<IPoChangeHandler, PoChangeHandler>();
         services.AddSingleton<IMillHooterPlcValuesService, MillHooterPlcValuesService>();
+        services.AddSingleton<OpenAccumulationOverrideService>();
         services.AddSingleton<IPlcClient>(sp =>
         {
             var bundleOptions = sp.GetRequiredService<IOptions<NdtBundleOptions>>().Value;

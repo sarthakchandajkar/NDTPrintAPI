@@ -654,6 +654,30 @@ export const api = {
       token,
       { method: "POST" }
     ),
+  settingsSetOpenAccumulation: (
+    token: string,
+    millNo: number,
+    accumulated: number,
+    options?: { poNumber?: string; sizeKey?: string }
+  ) =>
+    fetchSettingsApi<{
+      message?: string;
+      millNo?: number;
+      poNumber?: string;
+      sizeKey?: string;
+      previousAccumulated?: number;
+      newAccumulated?: number;
+      threshold?: number;
+      hooterSyncedToPlc?: boolean;
+      mesHooter?: { poNumber?: string; pipeSize?: string; threshold?: number; accumulated?: number };
+    }>(`/api/Settings/plc/mill/${millNo}/open-accumulation`, token, {
+      method: "POST",
+      body: JSON.stringify({
+        accumulated,
+        poNumber: options?.poNumber,
+        sizeKey: options?.sizeKey,
+      }),
+    }),
   settingsPrinters: (token: string) =>
     fetchSettingsApi<{ mills?: SettingsPrinterMill[] }>("/api/Settings/printers", token),
   settingsSavePrinters: (

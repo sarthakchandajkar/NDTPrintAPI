@@ -1429,26 +1429,14 @@ WHERE Bundle_No = @BatchNo AND Manual_Recon = 1;";
 
     private async Task<NdtBundleRecord> ApplyFormedBundleTotalAsync(NdtBundleRecord record, string batchNo, CancellationToken cancellationToken)
     {
+        // Manual bundle reconcile locks Total_NDT_Pcs in SQL — do not inflate from bundle summary CSV.
+        if (record.ManualRecon)
+            return record;
+
         var formedTotal = await TryReadBundleSummaryTotalAsync(batchNo, cancellationToken).ConfigureAwait(false);
         if (formedTotal is > 0 && formedTotal.Value > record.TotalNdtPcs)
         {
-            return new NdtBundleRecord
-            {
-                BundleNo = record.BundleNo,
-                PoNumber = record.PoNumber,
-                MillNo = record.MillNo,
-                TotalNdtPcs = formedTotal.Value,
-                SlitNo = record.SlitNo,
-                SlitStartTime = record.SlitStartTime,
-                SlitFinishTime = record.SlitFinishTime,
-                PrintedAt = record.PrintedAt,
-                PrintStatus = record.PrintStatus,
-                PrintAttemptedAt = record.PrintAttemptedAt,
-                PrintError = record.PrintError,
-                RejectedPipes = record.RejectedPipes,
-                NdtShortLengthPipe = record.NdtShortLengthPipe,
-                RejectedShortLengthPipe = record.RejectedShortLengthPipe
-            };
+            return CloneBundleRecord(record, formedTotal.Value);
         }
 
         if (record.TotalNdtPcs > 0)
@@ -1459,12 +1447,16 @@ WHERE Bundle_No = @BatchNo AND Manual_Recon = 1;";
         if (slitSum <= 0)
             return record;
 
-        return new NdtBundleRecord
+        return CloneBundleRecord(record, slitSum);
+    }
+
+    private static NdtBundleRecord CloneBundleRecord(NdtBundleRecord record, int totalNdtPcs) =>
+        new()
         {
             BundleNo = record.BundleNo,
             PoNumber = record.PoNumber,
             MillNo = record.MillNo,
-            TotalNdtPcs = slitSum,
+            TotalNdtPcs = totalNdtPcs,
             SlitNo = record.SlitNo,
             SlitStartTime = record.SlitStartTime,
             SlitFinishTime = record.SlitFinishTime,
@@ -1474,9 +1466,17 @@ WHERE Bundle_No = @BatchNo AND Manual_Recon = 1;";
             PrintError = record.PrintError,
             RejectedPipes = record.RejectedPipes,
             NdtShortLengthPipe = record.NdtShortLengthPipe,
-            RejectedShortLengthPipe = record.RejectedShortLengthPipe
+            RejectedShortLengthPipe = record.RejectedShortLengthPipe,
+            CloseSource = record.CloseSource,
+            AwaitingCsvRecon = record.AwaitingCsvRecon,
+            CountDiscrepancy = record.CountDiscrepancy,
+            ManualRecon = record.ManualRecon,
+            ManualReconBy = record.ManualReconBy,
+            ManualReconAt = record.ManualReconAt,
+            ManualReconReason = record.ManualReconReason,
+            ManualReconOriginalTotal = record.ManualReconOriginalTotal,
+            PostReconCsvSum = record.PostReconCsvSum
         };
-    }
 
     private async Task<int?> TryReadBundleSummaryTotalAsync(string batchNo, CancellationToken cancellationToken)
     {
