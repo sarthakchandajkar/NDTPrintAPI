@@ -140,6 +140,19 @@ public sealed class BundleProvisionalStampCorrector : IBundleProvisionalStampCor
                 continue;
             }
 
+            var frozenOnDisk = await _traceability
+                .GetSapFrozenSourceFilesAsync(new[] { csvPath, baseName }, cancellationToken)
+                .ConfigureAwait(false);
+            if (frozenOnDisk.Count > 0)
+            {
+                _logger.LogWarning(
+                    "Provisional stamp correct: skipping CSV rewrite for SAP-Accepted {File} ({OldBatch} → {NewBatch}).",
+                    baseName,
+                    oldBatch,
+                    newBatch);
+                continue;
+            }
+
             try
             {
                 // Downstream (SAP) may already have consumed this file — always warn when rewriting.

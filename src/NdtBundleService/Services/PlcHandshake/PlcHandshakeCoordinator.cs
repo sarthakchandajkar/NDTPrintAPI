@@ -80,4 +80,17 @@ public sealed class PlcHandshakeCoordinator
 
         await service.SyncHooterMemoryAfterPoEndAsync(millNo, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>Rewrites MW56/MW58 from current MES runtime state (e.g. after operator accumulation override).</summary>
+    public async Task<bool> TrySyncHooterFromMesAsync(int millNo, CancellationToken cancellationToken)
+    {
+        PlcHandshakeService? service;
+        lock (_sync)
+        {
+            if (!_byMill.TryGetValue(millNo, out service))
+                return false;
+        }
+
+        return await service.SyncHooterFromMesAsync(cancellationToken).ConfigureAwait(false);
+    }
 }

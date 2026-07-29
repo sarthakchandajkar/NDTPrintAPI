@@ -87,7 +87,7 @@ public sealed class ReconcileController : ControllerBase
                 var slitOnly = formingBatchNos?.Contains(b.BundleNo) == true;
                 var isForming = includeForming && ReconcileFormingBundleHelper.IsForming(b, slitSum, slitOnly);
                 var displayTotal = includeForming
-                    ? ReconcileFormingBundleHelper.ResolveDisplayTotal(b, slitSum, includeForming: true)
+                    ? ReconcileFormingBundleHelper.ResolveDisplayTotal(b, slitSum, isForming)
                     : b.TotalNdtPcs;
                 var poMismatch = poMismatchedBatches.Contains(b.BundleNo);
                 return new
@@ -412,8 +412,13 @@ public sealed class ReconcileController : ControllerBase
             .UpdateBundleSummaryCsvAsync(batchNo, request.CorrectedTotal, CancellationToken.None)
             .ConfigureAwait(false);
 
+        var bundleForPrint = await _bundleRepository
+            .GetByBatchNoAsync(batchNo, cancellationToken)
+            .ConfigureAwait(false)
+            ?? result.Bundle;
+
         var printResult = await _reconcileTagService
-            .ReprintAsync(result.Bundle, cancellationToken)
+            .ReprintAsync(bundleForPrint, cancellationToken)
             .ConfigureAwait(false);
 
         return Ok(new
@@ -499,7 +504,8 @@ public sealed class ReconcileController : ControllerBase
 
         var slits = await _bundleRepository.GetSlitsForBatchAsync(batchNo, cancellationToken).ConfigureAwait(false);
         var slitSum = slits.Sum(s => s.NdtPipes);
-        var displayTotal = ReconcileFormingBundleHelper.ResolveDisplayTotal(bundle, slitSum, includeForming: true);
+        var bundleIsForming = ReconcileFormingBundleHelper.IsForming(bundle, slitSum, fromDatabase is null);
+        var displayTotal = ReconcileFormingBundleHelper.ResolveDisplayTotal(bundle, slitSum, bundleIsForming);
         var (filesBySlit, statusByFile) = await GetSlitSapStatusAsync(batchNo, cancellationToken).ConfigureAwait(false);
         var manualReview = await _bundleRepository.IsManualReviewFlaggedAsync(batchNo, cancellationToken).ConfigureAwait(false);
         // Derived, never stored: any Open Ppc_Correction_Item makes the bundle "PPC correction pending".
@@ -521,7 +527,7 @@ public sealed class ReconcileController : ControllerBase
                 ManualReview = manualReview,
                 PpcCorrectionPending = ppcOpenCount > 0,
                 PpcOpenCorrectionCount = ppcOpenCount,
-                IsForming = ReconcileFormingBundleHelper.IsForming(bundle, slitSum, fromDatabase is null),
+                IsForming = bundleIsForming,
                 SlitSum = slitSum
             },
             Slits = slits.Select(s =>

@@ -276,12 +276,29 @@ export default function ReconcilePage() {
       const res = await api.manualBundleReconcile(selectedBatchNo.trim(), correctedTotal);
       const printNote = res.printSuccess ? " Tag reprinted." : res.printMessage ? ` Print: ${res.printMessage}` : "";
       setSuccess((res.message ?? "Bundle manually reconciled.") + printNote);
+      const batch = selectedBatchNo.trim();
+      const reconciledTotal =
+        typeof res.correctedTotal === "number" && res.correctedTotal >= 0 ? res.correctedTotal : correctedTotal;
+      setCorrectedTotal(reconciledTotal);
+      setBundleManualRecon(true);
+      setBundles((prev) =>
+        prev.map((b) =>
+          b.bundleNo === batch
+            ? { ...b, totalNdtPcs: reconciledTotal, manualRecon: true, isForming: false }
+            : b
+        )
+      );
       await refresh();
       setSlitsLoading(true);
-      const details = await api.reconcileBundleSlits(selectedBatchNo.trim());
+      const details = await api.reconcileBundleSlits(batch);
       setSlits(Array.isArray(details?.slits) ? details.slits : []);
       setBundleManualRecon(Boolean(details?.bundle?.manualRecon));
       setBundleManualReconReason(details?.bundle?.manualReconReason ?? null);
+      const detailTotal =
+        typeof details?.bundle?.totalNdtPcs === "number" && details.bundle.totalNdtPcs > 0
+          ? details.bundle.totalNdtPcs
+          : reconciledTotal;
+      setCorrectedTotal(detailTotal);
       setBundlePostReconCsvSum(
         typeof details?.bundle?.postReconCsvSum === "number" ? details.bundle.postReconCsvSum : null
       );
@@ -797,9 +814,9 @@ export default function ReconcilePage() {
                       </div>
                       <div className="text-xs text-gray-600 pt-1">
                         PO: {b.poNumber ?? "—"} | Mill: {b.millNo ?? "—"} | Current:{" "}
-                        {b.slitSum != null && b.slitSum > 0 ? b.slitSum : b.totalNdtPcs ?? 0}
-                        {b.isForming && b.slitSum != null && b.totalNdtPcs != null && b.slitSum > b.totalNdtPcs
-                          ? ` (tag ${b.totalNdtPcs})`
+                        {b.totalNdtPcs ?? (b.slitSum != null && b.slitSum > 0 ? b.slitSum : 0)}
+                        {!b.isForming && b.slitSum != null && b.totalNdtPcs != null && b.slitSum > b.totalNdtPcs
+                          ? ` (slits ${b.slitSum})`
                           : ""}
                       </div>
                       <div className="text-xs text-gray-400 pt-0.5">

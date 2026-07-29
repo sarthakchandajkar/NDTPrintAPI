@@ -1007,6 +1007,28 @@ public sealed class PlcHandshakeService
         });
     }
 
+    internal async Task<bool> SyncHooterFromMesAsync(CancellationToken cancellationToken)
+    {
+        var hooterCfg = _mill.Hooter;
+        if (hooterCfg?.Enabled != true || _hooterValues == null)
+            return false;
+
+        try
+        {
+            if (!_s7.IsConnected)
+                return false;
+
+            var resolved = await _hooterValues.ResolveAsync(_mill.MillNo, cancellationToken).ConfigureAwait(false);
+            SyncHooterMemoryWords(hooterCfg, resolved, forcePoResync: false);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "{MillName}: failed to rewrite MW56/MW58 from MES after operator override.", _mill.Name);
+            return false;
+        }
+    }
+
     internal async Task SyncHooterMemoryAfterPoEndAsync(int millNo, CancellationToken cancellationToken)
     {
         var hooterCfg = _mill.Hooter;
