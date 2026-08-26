@@ -13,6 +13,7 @@ namespace NdtBundleService.Controllers;
 [ApiController]
 [Route("api/[controller]")]
 [Produces("application/json")]
+[InstanceRole(InstanceRoleModes.Monolith, InstanceRoleModes.Shared, InstanceRoleModes.Mill)]
 public sealed class StatusController : ControllerBase
 {
     private readonly IPlcClient _plcClient;

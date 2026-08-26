@@ -21,6 +21,7 @@ public sealed class PoLifecycleSweepWorker : BackgroundService
     private readonly IMillBundleStateLock _millLock;
     private readonly IWipBundleRunningPoProvider _wipRunningPo;
     private readonly IOptionsMonitor<NdtBundleOptions> _options;
+    private readonly IMillOwnership _millOwnership;
     private readonly ILogger<PoLifecycleSweepWorker> _logger;
 
     public PoLifecycleSweepWorker(
@@ -33,6 +34,7 @@ public sealed class PoLifecycleSweepWorker : BackgroundService
         IMillBundleStateLock millLock,
         IWipBundleRunningPoProvider wipRunningPo,
         IOptionsMonitor<NdtBundleOptions> options,
+        IMillOwnership millOwnership,
         ILogger<PoLifecycleSweepWorker> logger)
     {
         _lifecycle = lifecycle;
@@ -44,6 +46,7 @@ public sealed class PoLifecycleSweepWorker : BackgroundService
         _millLock = millLock;
         _wipRunningPo = wipRunningPo;
         _options = options;
+        _millOwnership = millOwnership;
         _logger = logger;
     }
 
@@ -79,6 +82,8 @@ public sealed class PoLifecycleSweepWorker : BackgroundService
 
         foreach (var entry in _lifecycle.GetExpiredDrains(now, drainWindow))
         {
+            if (!_millOwnership.Owns(entry.MillNo))
+                continue;
             if (MillPoEndSourceResolver.ForMill(entry.MillNo, opts) != MillPoEndSource.Plc)
                 continue;
 
@@ -90,6 +95,8 @@ public sealed class PoLifecycleSweepWorker : BackgroundService
 
         foreach (var entry in _lifecycle.GetClosedEntries())
         {
+            if (!_millOwnership.Owns(entry.MillNo))
+                continue;
             if (MillPoEndSourceResolver.ForMill(entry.MillNo, opts) != MillPoEndSource.Plc)
                 continue;
 

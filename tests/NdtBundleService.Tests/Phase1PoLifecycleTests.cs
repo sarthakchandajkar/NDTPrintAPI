@@ -197,6 +197,7 @@ public sealed class Phase1PoLifecycleTests
             new MillBundleStateLock(),
             wip,
             Monitor(opts),
+            TestMillOwnership.Monolith(),
             NullLogger<PoLifecycleSweepWorker>.Instance);
 
         await sweep.SweepOnceAsync(CancellationToken.None);
@@ -247,6 +248,7 @@ public sealed class Phase1PoLifecycleTests
             new MillBundleStateLock(),
             wip,
             Monitor(opts),
+            TestMillOwnership.Monolith(),
             NullLogger<PoLifecycleSweepWorker>.Instance);
         await sweep.SweepOnceAsync(CancellationToken.None);
 
@@ -290,6 +292,7 @@ public sealed class Phase1PoLifecycleTests
             new MillBundleStateLock(),
             wipFile,
             Monitor(opts),
+            TestMillOwnership.Monolith(),
             NullLogger<PoLifecycleSweepWorker>.Instance);
 
         await sweep.SweepOnceAsync(CancellationToken.None);

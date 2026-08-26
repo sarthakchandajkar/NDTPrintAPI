@@ -356,6 +356,7 @@ public sealed class PoReopenLifecycleTests
             new MillBundleStateLock(),
             new MutableWipProvider(null),
             Monitor(opts),
+            TestMillOwnership.Monolith(),
             NullLogger<PoLifecycleSweepWorker>.Instance);
         await sweep.SweepOnceAsync(CancellationToken.None);
     }
@@ -378,6 +379,7 @@ public sealed class PoReopenLifecycleTests
             new MillBundleStateLock(),
             wip,
             Monitor(opts),
+            TestMillOwnership.Monolith(),
             NullLogger<PoLifecycleSweepWorker>.Instance);
 
     private static PoEndWorkflowService CreateWorkflow(

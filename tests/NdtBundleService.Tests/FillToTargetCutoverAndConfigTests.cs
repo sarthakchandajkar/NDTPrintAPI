@@ -42,6 +42,7 @@ public sealed class FillToTargetCutoverAndConfigTests
             new OptionsMonitorStub(options.Value),
             fill,
             runtime,
+            TestMillOwnership.Monolith(),
             NullLogger<FillCutoverStartupCheck>.Instance);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => sut.StartAsync(CancellationToken.None));
@@ -57,6 +58,7 @@ public sealed class FillToTargetCutoverAndConfigTests
             new OptionsMonitorStub(options.Value),
             fill,
             runtime,
+            TestMillOwnership.Monolith(),
             NullLogger<FillCutoverStartupCheck>.Instance);
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => sut.StartAsync(CancellationToken.None));
@@ -71,6 +73,7 @@ public sealed class FillToTargetCutoverAndConfigTests
             new OptionsMonitorStub(options.Value),
             new StubFill(),
             new StubRuntime(),
+            TestMillOwnership.Monolith(),
             NullLogger<FillCutoverStartupCheck>.Instance);
 
         await sut.StartAsync(CancellationToken.None);
@@ -84,6 +87,7 @@ public sealed class FillToTargetCutoverAndConfigTests
             new OptionsMonitorStub(options.Value),
             new StubFill { Awaiting = true },
             new StubRuntime { Unsafe = true },
+            TestMillOwnership.Monolith(),
             NullLogger<FillCutoverStartupCheck>.Instance);
 
         await sut.StartAsync(CancellationToken.None);
@@ -109,7 +113,11 @@ public sealed class FillToTargetCutoverAndConfigTests
         public Task UpsertHoldAsync(string sourceFileName, string poNumber, int millNo, string? pipeSize, string reasonCode, CancellationToken cancellationToken) =>
             Task.CompletedTask;
 
-        public Task<int> EscalateExpiredHoldsAsync(int quietMinutes, DateTime utcNow, CancellationToken cancellationToken) =>
+        public Task<int> EscalateExpiredHoldsAsync(
+            int quietMinutes,
+            DateTime utcNow,
+            CancellationToken cancellationToken,
+            int? millNo = null) =>
             Task.FromResult(0);
 
         public Task ApplyCountRevisionAsync(string sourceFileName, string batchNo, int oldNdtPipes, int newNdtPipes, CancellationToken cancellationToken) =>
@@ -118,10 +126,10 @@ public sealed class FillToTargetCutoverAndConfigTests
         public Task<Guid> ApplyBatchMoveAsync(string sourceFileName, string oldBatchNo, string newBatchNo, int ndtPipes, CancellationToken cancellationToken) =>
             Task.FromResult(Guid.Empty);
 
-        public Task<bool> HasAwaitingCsvReconRowsAsync(CancellationToken cancellationToken) =>
+        public Task<bool> HasAwaitingCsvReconRowsAsync(CancellationToken cancellationToken, int? millNo = null) =>
             Task.FromResult(Awaiting);
 
-        public Task<bool> HasBundlesMissingFillTargetAsync(CancellationToken cancellationToken) =>
+        public Task<bool> HasBundlesMissingFillTargetAsync(CancellationToken cancellationToken, int? millNo = null) =>
             Task.FromResult(MissingTarget);
     }
 
@@ -148,7 +156,7 @@ public sealed class FillToTargetCutoverAndConfigTests
         public Models.InputSlitRecord? GetLastRecord(string poNumber, int millNo) => null;
         public void SetLastRecord(string poNumber, int millNo, Models.InputSlitRecord? record) { }
         public Task SaveAsync(CancellationToken cancellationToken) => Task.CompletedTask;
-        public bool HasUnsafeOpenStateForFillCutover() => Unsafe;
+        public bool HasUnsafeOpenStateForFillCutover(int? millNo = null) => Unsafe;
     }
 
     private sealed class OptionsMonitorStub : IOptionsMonitor<NdtBundleOptions>

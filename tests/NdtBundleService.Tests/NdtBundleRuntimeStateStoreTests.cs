@@ -172,6 +172,7 @@ public sealed class NdtBundleRuntimeStateStoreTests : IDisposable
             options,
             new EmptyBundleRepository(),
             new FixedActivePoPerMillService(activePoByMill),
+            TestMillOwnership.Monolith(),
             NullLogger<NdtBundleRuntimeStateStore>.Instance);
     }
 

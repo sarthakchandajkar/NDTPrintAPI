@@ -84,6 +84,7 @@ public sealed class MillWideAllocatorAndPoEndIdempotencyTests : IDisposable
             new TestOptionsMonitor<NdtBundleOptions>(options),
             new EmptyBundleRepo(),
             new EmptyActivePo(),
+            TestMillOwnership.Monolith(),
             Microsoft.Extensions.Logging.Abstractions.NullLogger<NdtBundleRuntimeStateStore>.Instance);
     }
 

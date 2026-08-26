@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using NdtBundleService.Configuration;
 using NdtBundleService.Services;
 
 namespace NdtBundleService.Controllers;
@@ -6,6 +7,7 @@ namespace NdtBundleService.Controllers;
 [ApiController]
 [Route("api/[controller]")]
 [Produces("application/json")]
+[InstanceRole(InstanceRoleModes.Monolith, InstanceRoleModes.Shared)]
 public sealed class ManualTagsController : ControllerBase
 {
     private readonly IManualNdtTagService _service;

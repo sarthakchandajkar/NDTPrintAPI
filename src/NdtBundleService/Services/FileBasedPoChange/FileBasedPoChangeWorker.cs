@@ -16,6 +16,7 @@ public sealed class FileBasedPoChangeWorker : BackgroundService
     private readonly IWipBundleRunningPoProvider _wipRunningPo;
     private readonly IActivePoPerMillService _activePoPerMill;
     private readonly IOptions<NdtBundleOptions> _options;
+    private readonly IMillOwnership _millOwnership;
     private readonly ILogger<FileBasedPoChangeWorker> _logger;
 
     public FileBasedPoChangeWorker(
@@ -24,6 +25,7 @@ public sealed class FileBasedPoChangeWorker : BackgroundService
         IWipBundleRunningPoProvider wipRunningPo,
         IActivePoPerMillService activePoPerMill,
         IOptions<NdtBundleOptions> options,
+        IMillOwnership millOwnership,
         ILogger<FileBasedPoChangeWorker> logger)
     {
         _queue = queue;
@@ -31,6 +33,7 @@ public sealed class FileBasedPoChangeWorker : BackgroundService
         _wipRunningPo = wipRunningPo;
         _activePoPerMill = activePoPerMill;
         _options = options;
+        _millOwnership = millOwnership;
         _logger = logger;
     }
 
@@ -89,12 +92,23 @@ public sealed class FileBasedPoChangeWorker : BackgroundService
         }
     }
 
-    private async Task ProcessRequestCoreAsync(
+    internal async Task ProcessRequestCoreAsync(
         FileBasedPoChangeRequest request,
         Guid correlationId,
         CancellationToken cancellationToken)
     {
         var poEndSource = MillPoEndSourceResolver.ForMill(request.MillNo, _options.Value);
+        if (!_millOwnership.Owns(request.MillNo))
+        {
+            _logger.LogWarning(
+                "Mill {Mill}: file-based PO change from {File} ({OldPo} → {NewPo}) skipped — mill not owned by this instance.",
+                request.MillNo,
+                request.WipFileName,
+                request.EndedPo,
+                request.NewPo);
+            return;
+        }
+
         if (poEndSource != MillPoEndSource.File)
         {
             _logger.LogWarning(

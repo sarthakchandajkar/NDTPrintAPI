@@ -199,7 +199,17 @@ public sealed class PoLifecycleService : IPoLifecycleService
         {
             var dir = Path.GetDirectoryName(runtimeStateFile);
             if (!string.IsNullOrEmpty(dir))
+            {
+                var runtimeName = Path.GetFileNameWithoutExtension(runtimeStateFile);
+                // NdtBundleRuntimeState-M1.json → PoLifecycleState-M1.json
+                if (runtimeName.StartsWith("NdtBundleRuntimeState-", StringComparison.OrdinalIgnoreCase))
+                {
+                    var suffix = runtimeName["NdtBundleRuntimeState-".Length..];
+                    return Path.Combine(dir, $"PoLifecycleState-{suffix}.json");
+                }
+
                 return Path.Combine(dir, "PoLifecycleState.json");
+            }
         }
 
         var folder = (opt.OutputBundleFolder ?? string.Empty).Trim();

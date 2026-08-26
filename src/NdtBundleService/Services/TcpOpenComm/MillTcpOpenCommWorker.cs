@@ -15,24 +15,25 @@ public sealed class MillTcpOpenCommWorker : BackgroundService
 {
     private readonly IOptions<NdtBundleOptions> _options;
     private readonly PlcPoEndQueue _plcPoEndQueue;
+    private readonly IMillOwnership _millOwnership;
     private readonly ILogger<MillTcpOpenCommWorker> _logger;
 
     public MillTcpOpenCommWorker(
         IOptions<NdtBundleOptions> options,
         PlcPoEndQueue plcPoEndQueue,
+        IMillOwnership millOwnership,
         ILogger<MillTcpOpenCommWorker> logger)
     {
         _options = options;
         _plcPoEndQueue = plcPoEndQueue;
+        _millOwnership = millOwnership;
         _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var handshake = _options.Value.PlcHandshake ?? new PlcHandshakeOptions();
-        var tcpMills = handshake.Mills
-            .Where(m => m.ResolvePoEndSource(_options.Value) == MillPoEndSource.TcpOpen)
-            .ToList();
+        var tcpMills = SelectOwnedTcpOpenMills(_options.Value, _millOwnership);
 
         if (tcpMills.Count == 0)
         {
@@ -115,6 +116,16 @@ public sealed class MillTcpOpenCommWorker : BackgroundService
                 break;
             }
         }
+    }
+
+    /// <summary>Owned-mill filter for TcpOpen transport loops (independent of config trim).</summary>
+    internal static List<MillConfig> SelectOwnedTcpOpenMills(NdtBundleOptions options, IMillOwnership ownership)
+    {
+        var handshake = options.PlcHandshake ?? new PlcHandshakeOptions();
+        return handshake.Mills
+            .Where(m => m.ResolvePoEndSource(options) == MillPoEndSource.TcpOpen)
+            .Where(m => ownership.Owns(m.ResolveMillNo()))
+            .ToList();
     }
 
     /// <summary>

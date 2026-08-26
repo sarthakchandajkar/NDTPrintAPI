@@ -36,6 +36,7 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
     private readonly IOptions<NdtBundleOptions> _options;
     private readonly FileBasedPoChangeQueue? _fileBasedPoChangeQueue;
     private readonly IWipConfirmedRunningPoNotifier _wipConfirmedNotifier;
+    private readonly IMillOwnership _millOwnership;
     private readonly ILogger<WipBundleRunningPoProvider> _logger;
 
     private readonly object _lock = new();
@@ -52,11 +53,13 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
         IOptions<NdtBundleOptions> options,
         ILogger<WipBundleRunningPoProvider> logger,
         IWipConfirmedRunningPoNotifier wipConfirmedNotifier,
+        IMillOwnership millOwnership,
         FileBasedPoChangeQueue? fileBasedPoChangeQueue = null)
     {
         _options = options;
         _logger = logger;
         _wipConfirmedNotifier = wipConfirmedNotifier;
+        _millOwnership = millOwnership;
         _fileBasedPoChangeQueue = fileBasedPoChangeQueue;
 
         TryStartWatchers();
@@ -64,6 +67,7 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
 
     private bool IsFileBasedPoEndForMill(int millNo) =>
         millNo is >= 1 and <= 4 &&
+        _millOwnership.Owns(millNo) &&
         MillPoEndSourceResolver.ForMill(millNo, _options.Value) == MillPoEndSource.File &&
         _fileBasedPoChangeQueue is not null;
 
@@ -87,6 +91,9 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
     public void NotifyPoEndForMill(int millNo, string endedPo)
     {
         if (millNo is < 1 or > 4)
+            return;
+
+        if (!_millOwnership.Owns(millNo))
             return;
 
         if (!_options.Value.WaitForWipBundleAfterPoEnd)
@@ -297,6 +304,9 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
             if (meta is null)
                 return;
 
+            if (!_millOwnership.Owns(meta.MillNo))
+                return;
+
             DateTime stampUtc;
             try
             {
@@ -356,6 +366,9 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
         {
             for (var millNo = 1; millNo <= 4; millNo++)
             {
+                if (!_millOwnership.Owns(millNo))
+                    continue;
+
                 var st = _mills[millNo - 1];
                 if (st.WaitingForNewWip)
                 {
@@ -384,6 +397,9 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
         {
             for (var millNo = 1; millNo <= 4; millNo++)
             {
+                if (!_millOwnership.Owns(millNo))
+                    continue;
+
                 var best = OrderCandidatesNewestFirst(candidates.Where(c => c.MillNo == millNo))
                     .FirstOrDefault();
 
@@ -520,6 +536,9 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
         if (millNo is < 1 or > 4)
             return false;
 
+        if (!_millOwnership.Owns(millNo))
+            return false;
+
         lock (_lock)
         {
             var st = _mills[millNo - 1];
@@ -580,6 +599,17 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
     {
         if (!IsFileBasedPoEndForMill(millNo))
         {
+            if (!_millOwnership.Owns(millNo))
+            {
+                _logger.LogDebug(
+                    "Mill {Mill}: file-based PO change {OldPo} → {NewPo} from {File} ignored — mill not owned by this instance.",
+                    millNo,
+                    endedPo,
+                    newPo,
+                    wipFileName);
+                return false;
+            }
+
             var source = MillPoEndSourceResolver.ForMill(millNo, _options.Value);
             if (source is MillPoEndSource.Plc or MillPoEndSource.TcpOpen)
             {

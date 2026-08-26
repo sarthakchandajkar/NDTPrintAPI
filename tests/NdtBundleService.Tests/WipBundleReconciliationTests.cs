@@ -239,6 +239,7 @@ public sealed class WipBundleReconciliationTests : IDisposable
             new StubBundleRepository(hasPrintedBundleForPo),
             new StubWipRunningPoProvider(runningPoByMill),
             _queue,
+            TestMillOwnership.Monolith(),
             NullLogger<WipBundleReconciliationService>.Instance);
     }
 

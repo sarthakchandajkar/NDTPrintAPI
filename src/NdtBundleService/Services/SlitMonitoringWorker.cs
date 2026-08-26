@@ -38,6 +38,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
     private readonly IPoLifecycleService _poLifecycle;
     private readonly INdtTagPrinter _zplTagPrinter;
     private readonly IS7ConnectionProviderRegistry _s7Registry;
+    private readonly IMillOwnership _millOwnership;
     private readonly ILogger<SlitMonitoringWorker> _logger;
 
     // Per input path: last LastWriteTimeUtc we treated as fully handled (seed baseline or successful run).
@@ -72,6 +73,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         IPoLifecycleService poLifecycle,
         INdtTagPrinter zplTagPrinter,
         IS7ConnectionProviderRegistry s7Registry,
+        IMillOwnership millOwnership,
         ILogger<SlitMonitoringWorker> logger)
     {
         _optionsMonitor = optionsMonitor;
@@ -93,6 +95,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         _poLifecycle = poLifecycle;
         _zplTagPrinter = zplTagPrinter;
         _s7Registry = s7Registry;
+        _millOwnership = millOwnership;
         _logger = logger;
     }
 
@@ -466,7 +469,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 {
                     var eligibleForCoverage = rows
                         .Select(r => r.Record)
-                        .Where(r => r is not null && IsMillAllowedForNdtInputSlit(o, r!.MillNo))
+                        .Where(r => r is not null && IsOwnedMillAllowed(o, r!.MillNo))
                         .Cast<InputSlitRecord>()
                         .ToList();
                     backfillCoverage = InputSlitBackfillCoverage.Evaluate(fileFull, eligibleForCoverage, o, _logger);
@@ -506,7 +509,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     }
 
                     var record = row.Record;
-                    if (!IsMillAllowedForNdtInputSlit(o, record.MillNo))
+                    if (!IsOwnedMillAllowed(o, record.MillNo))
                     {
                         _logger.LogDebug(
                             "Mill {Mill}: NDT Input Slit processing disabled (InputSlitProcessMills); skipping slit row in {File}.",
@@ -926,14 +929,18 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 await _csvFill
                     .AdvanceQuietShortAsync(
                         poNumber: null,
-                        millNo: null,
+                        millNo: _millOwnership.SingleOwnedMill,
                         o.EffectiveCsvFillQuietMinutes,
                         DateTime.UtcNow,
                         forcePoEnd: false,
                         cancellationToken)
                     .ConfigureAwait(false);
                 await _csvFill
-                    .EscalateExpiredHoldsAsync(o.EffectiveCsvFillQuietMinutes, DateTime.UtcNow, cancellationToken)
+                    .EscalateExpiredHoldsAsync(
+                        o.EffectiveCsvFillQuietMinutes,
+                        DateTime.UtcNow,
+                        cancellationToken,
+                        _millOwnership.SingleOwnedMill)
                     .ConfigureAwait(false);
 
                 // Write one output file under OutputBundleFolder using the same name as the input inbox file.
@@ -1126,7 +1133,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
                         var reviewKeys = rows
                             .Select(r => r.Record)
-                            .Where(r => r is not null && IsMillAllowedForNdtInputSlit(o, r.MillNo))
+                            .Where(r => r is not null && IsOwnedMillAllowed(o, r.MillNo))
                             .Select(r => (
                                 InputSlitCsvParsing.NormalizePo(r!.PoNumber),
                                 r.MillNo))
@@ -1161,13 +1168,13 @@ public sealed class SlitMonitoringWorker : BackgroundService
     /// Backoff applies when any eligible row belongs to a <c>PoEndSource=Plc</c> mill.
     /// File-mill-only deferrals keep immediate next-poll retry (unchanged).
     /// </summary>
-    private static bool ShouldApplyPlcFileRetryBackoff(NdtBundleOptions o, IReadOnlyList<(string RawLine, InputSlitRecord? Record)> rows)
+    private bool ShouldApplyPlcFileRetryBackoff(NdtBundleOptions o, IReadOnlyList<(string RawLine, InputSlitRecord? Record)> rows)
     {
         foreach (var row in rows)
         {
             if (row.Record is null)
                 continue;
-            if (!IsMillAllowedForNdtInputSlit(o, row.Record.MillNo))
+            if (!IsOwnedMillAllowed(o, row.Record.MillNo))
                 continue;
             if (MillPoEndSourceResolver.ForMill(row.Record.MillNo, o) == MillPoEndSource.Plc)
                 return true;
@@ -1364,11 +1371,17 @@ public sealed class SlitMonitoringWorker : BackgroundService
     }
 
     /// <summary>
-    /// Empty/null <see cref="NdtBundleOptions.InputSlitProcessMills"/> = all mills 1–4.
+    /// Empty/null <see cref="NdtBundleOptions.InputSlitProcessMills"/> = all mills 1–4,
+    /// further restricted by <paramref name="ownedMills"/> when provided.
     /// </summary>
-    internal static bool IsMillAllowedForNdtInputSlit(NdtBundleOptions options, int millNo)
+    internal static bool IsMillAllowedForNdtInputSlit(
+        NdtBundleOptions options,
+        int millNo,
+        IReadOnlySet<int>? ownedMills = null)
     {
         if (millNo is < 1 or > 4)
+            return false;
+        if (ownedMills is not null && !ownedMills.Contains(millNo))
             return false;
 
         var mills = options.InputSlitProcessMills;
@@ -1377,6 +1390,9 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
         return mills.Contains(millNo);
     }
+
+    private bool IsOwnedMillAllowed(NdtBundleOptions options, int millNo) =>
+        IsMillAllowedForNdtInputSlit(options, millNo, _millOwnership.OwnedMills);
 
     private static string FormatInputSlitProcessMills(NdtBundleOptions options)
     {

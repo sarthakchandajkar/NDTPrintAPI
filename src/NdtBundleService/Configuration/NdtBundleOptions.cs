@@ -114,6 +114,12 @@ public class NdtBundleOptions
     public string? NdtBundleRuntimeStateFile { get; set; }
 
     /// <summary>
+    /// Optional full path for per-mill printer settings JSON (e.g. MillPrinterSettings-M1.json).
+    /// When empty, derived from the directory of <see cref="NdtBundleRuntimeStateFile"/> or OutputBundleFolder.
+    /// </summary>
+    public string? MillPrinterSettingsFile { get; set; }
+
+    /// <summary>
     /// Optional last-known NDT batch number per mill (keys <c>"1"</c>–<c>"4"</c>, values e.g. <c>1226100029</c>).
     /// On startup the service never assigns a lower sequence for that mill than the maximum of these seeds,
     /// bundles already in SQL/CSV, and persisted runtime state. Used for first deploy and as a safety floor after restart.

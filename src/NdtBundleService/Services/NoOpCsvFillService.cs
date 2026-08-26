@@ -45,7 +45,11 @@ public class NoOpCsvFillService : ICsvFillService
         CancellationToken cancellationToken) =>
         Task.CompletedTask;
 
-    public virtual Task<int> EscalateExpiredHoldsAsync(int quietMinutes, DateTime utcNow, CancellationToken cancellationToken) =>
+    public virtual Task<int> EscalateExpiredHoldsAsync(
+        int quietMinutes,
+        DateTime utcNow,
+        CancellationToken cancellationToken,
+        int? millNo = null) =>
         Task.FromResult(0);
 
     public virtual Task ApplyCountRevisionAsync(
@@ -64,9 +68,9 @@ public class NoOpCsvFillService : ICsvFillService
         CancellationToken cancellationToken) =>
         Task.FromResult(Guid.Empty);
 
-    public virtual Task<bool> HasAwaitingCsvReconRowsAsync(CancellationToken cancellationToken) =>
+    public virtual Task<bool> HasAwaitingCsvReconRowsAsync(CancellationToken cancellationToken, int? millNo = null) =>
         Task.FromResult(false);
 
-    public virtual Task<bool> HasBundlesMissingFillTargetAsync(CancellationToken cancellationToken) =>
+    public virtual Task<bool> HasBundlesMissingFillTargetAsync(CancellationToken cancellationToken, int? millNo = null) =>
         Task.FromResult(false);
 }

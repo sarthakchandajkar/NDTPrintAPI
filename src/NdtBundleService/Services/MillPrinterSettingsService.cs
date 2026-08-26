@@ -178,12 +178,26 @@ public sealed class MillPrinterSettingsService : IMillPrinterSettingsService
     private string GetSettingsFilePath()
     {
         var opt = _optionsMonitor.CurrentValue;
+        var explicitPath = (opt.MillPrinterSettingsFile ?? string.Empty).Trim();
+        if (!string.IsNullOrEmpty(explicitPath))
+            return explicitPath;
+
         var configured = (opt.NdtBundleRuntimeStateFile ?? string.Empty).Trim();
         if (!string.IsNullOrEmpty(configured))
         {
             var dir = Path.GetDirectoryName(configured);
             if (!string.IsNullOrEmpty(dir))
+            {
+                var runtimeName = Path.GetFileNameWithoutExtension(configured);
+                // NdtBundleRuntimeState-M1.json → MillPrinterSettings-M1.json
+                if (runtimeName.StartsWith("NdtBundleRuntimeState-", StringComparison.OrdinalIgnoreCase))
+                {
+                    var suffix = runtimeName["NdtBundleRuntimeState-".Length..];
+                    return Path.Combine(dir, $"MillPrinterSettings-{suffix}.json");
+                }
+
                 return Path.Combine(dir, "MillPrinterSettings.json");
+            }
         }
 
         var output = (opt.OutputBundleFolder ?? string.Empty).Trim();

@@ -335,6 +335,7 @@ public sealed class WipBundleProductionTimeOrderingTests : IDisposable
             options,
             NullLogger<WipBundleRunningPoProvider>.Instance,
             notifier ?? new RecordingWipConfirmedNotifier(),
+            TestMillOwnership.Monolith(),
             new FileBasedPoChangeQueue());
         DisableWatchers(provider);
         return provider;

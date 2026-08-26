@@ -1,10 +1,11 @@
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Services;
 using NdtBundleService.Services.FileBasedPoChange;
+using NdtBundleService.Services.InstanceLease;
 using NdtBundleService.Services.PlcHandshake;
 using NdtBundleService.Services.PlcHandshake.PlcPoEnd;
 using NdtBundleService.Services.PlcHandshake.S7;
@@ -18,9 +19,34 @@ public static class NdtBundleServiceCollectionExtensions
 {
     public static IServiceCollection AddNdtBundleServices(this IServiceCollection services, IConfiguration configuration)
     {
+        var roleSection = configuration.GetSection(InstanceRoleOptions.SectionName);
+        services.AddSingleton<IValidateOptions<InstanceRoleOptions>, InstanceRoleOptionsValidator>();
+        services.AddOptions<InstanceRoleOptions>()
+            .Bind(roleSection)
+            .ValidateOnStart();
+
+        var role = roleSection.Get<InstanceRoleOptions>() ?? new InstanceRoleOptions();
+
         services.Configure<NdtBundleOptions>(configuration.GetSection("NdtBundle"));
         services.Configure<FileLoggingOptions>(configuration.GetSection("Logging:File"));
 
+        services.AddSingleton<IMillOwnership, MillOwnership>();
+
+        AddCoreServices(services, role);
+        AddZplToggle(services, role);
+
+        // Mill singletons (PLC registry, PO lifecycle, runtime state) are required by dashboard Test/Settings
+        // endpoints even on Shared; hosted mill workers are registered separately.
+        if (role.IsMonolith || role.EnableMillWorkers || role.EnableDashboardApi)
+            AddMillSingletonServices(services);
+
+        AddHostedServices(services, role, configuration);
+
+        return services;
+    }
+
+    private static void AddCoreServices(IServiceCollection services, InstanceRoleOptions role)
+    {
         services.AddSingleton<AppLogReader>();
         services.AddSingleton<IPoPlanProvider, PoPlanCsvProvider>();
         services.AddSingleton<IPoPlanWipRepository, PoPlanWipRepository>();
@@ -31,22 +57,48 @@ public static class NdtBundleServiceCollectionExtensions
         services.AddSingleton<IBundleLabelInfoProvider, BundleLabelCsvProvider>();
         services.AddSingleton<ICurrentPoPlanService, CurrentPoPlanService>();
         services.AddSingleton<INdtBundleRepository, NdtBundleRepository>();
-        services.AddSingleton<INdtBundleRuntimeStateStore, NdtBundleRuntimeStateStore>();
         services.AddSingleton<ICsvFillService, CsvFillService>();
         services.AddSingleton<SlitCsvFillAssigner>();
-        services.AddSingleton<IBundleEngine, NdtBundleEngine>();
-        services.AddSingleton<IBundleOutputWriter, CsvBundleOutputWriter>();
-        services.AddSingleton<INdtBatchStateService, NdtBatchStateService>();
-        services.AddHostedService<FillCutoverStartupCheck>();
-        services.AddSingleton<INdtLabelPrinter, PdfNdtLabelPrinter>();
-        services.AddSingleton<INdtBundleTagPrinter, NdtBundleTagPrintService>();
+        services.AddSingleton<ITraceabilityRepository, TraceabilityRepository>();
+        services.AddSingleton<IOutputSlitSapStatusRepository, OutputSlitSapStatusRepository>();
+        services.AddSingleton<IPpcCorrectionRepository, PpcCorrectionRepository>();
+        services.AddSingleton<IResubmitDriftService, ResubmitDriftService>();
+        services.AddSingleton<IReconcileSyncService, ReconcileSyncService>();
+        services.AddSingleton<ISqlTraceabilityWriteTracker, SqlTraceabilityWriteTracker>();
+        services.AddSingleton<ISqlTraceabilityHealth, SqlTraceabilityHealth>();
+        services.AddSingleton<SettingsAuthService>();
+        services.AddSingleton<IMillPrinterSettingsService, MillPrinterSettingsService>();
         services.AddSingleton<INetworkPrinterSender, NetworkPrinterSender>();
         services.AddSingleton<IWipLabelProvider, WipLabelProvider>();
         services.AddSingleton<INdtTagPrinter, NdtZplTagPrinter>();
-        services.AddSingleton<IZplGenerationToggle, ZplGenerationToggle>();
-        services.AddSingleton<SettingsAuthService>();
-        services.AddSingleton<IMillPrinterSettingsService, MillPrinterSettingsService>();
-        services.AddSingleton<IFormationChartSettingsService, FormationChartSettingsService>();
+        services.AddSingleton<INdtLabelPrinter, PdfNdtLabelPrinter>();
+        services.AddSingleton<INdtBundleTagPrinter, NdtBundleTagPrintService>();
+        services.AddSingleton<IUploadNdtBundleFileService, UploadNdtBundleFileService>();
+        services.AddSingleton<IAppSettingRepository, AppSettingRepository>();
+        services.AddSingleton<IMillInstanceLeaseService, MillInstanceLeaseService>();
+
+        // Settings (printers / formation / ZPL) live on Shared and Mill instances.
+        if (role.IsMonolith || role.EnableDashboardApi || role.IsMill)
+        {
+            services.AddSingleton<IFormationChartSettingsService, FormationChartSettingsService>();
+        }
+
+        if (role.IsMonolith || role.EnableDashboardApi)
+        {
+            services.AddSingleton<IManualNdtTagService, ManualNdtTagService>();
+            services.AddSingleton<IReconcileBundleTagService, ReconcileBundleTagService>();
+        }
+
+        services.AddHostedService<SqlTraceabilityStartupCheck>();
+        services.AddHostedService<PoPlanCacheWarmupService>();
+    }
+
+    private static void AddMillSingletonServices(IServiceCollection services)
+    {
+        services.AddSingleton<INdtBundleRuntimeStateStore, NdtBundleRuntimeStateStore>();
+        services.AddSingleton<IBundleEngine, NdtBundleEngine>();
+        services.AddSingleton<IBundleOutputWriter, CsvBundleOutputWriter>();
+        services.AddSingleton<INdtBatchStateService, NdtBatchStateService>();
         services.AddSingleton<WipConfirmedRunningPoNotifier>();
         services.AddSingleton<IWipConfirmedRunningPoNotifier>(sp => sp.GetRequiredService<WipConfirmedRunningPoNotifier>());
         services.AddSingleton<IWipConfirmedRunningPoNotifierRegistration>(sp => sp.GetRequiredService<WipConfirmedRunningPoNotifier>());
@@ -102,31 +154,54 @@ public static class NdtBundleServiceCollectionExtensions
 
             return new StubPlcClient(sp.GetRequiredService<ILogger<StubPlcClient>>());
         });
-        services.AddSingleton<IManualNdtTagService, ManualNdtTagService>();
-        services.AddSingleton<IUploadNdtBundleFileService, UploadNdtBundleFileService>();
-        services.AddSingleton<ITraceabilityRepository, TraceabilityRepository>();
-        services.AddSingleton<IOutputSlitSapStatusRepository, OutputSlitSapStatusRepository>();
-        services.AddSingleton<IPpcCorrectionRepository, PpcCorrectionRepository>();
-        services.AddSingleton<IResubmitDriftService, ResubmitDriftService>();
-        services.AddSingleton<IReconcileSyncService, ReconcileSyncService>();
-        services.AddSingleton<IReconcileBundleTagService, ReconcileBundleTagService>();
-        services.AddSingleton<ISqlTraceabilityWriteTracker, SqlTraceabilityWriteTracker>();
-        services.AddSingleton<ISqlTraceabilityHealth, SqlTraceabilityHealth>();
+    }
 
-        services.AddHostedService<SqlTraceabilityStartupCheck>();
-        services.AddHostedService<PoPlanWipImportHostedService>();
-        services.AddHostedService<PoPlanCacheWarmupService>();
-        services.AddHostedService<PoReopenWipConfirmationBridge>();
-        services.AddHostedService<PlcHandshakeWorker>();
-        services.AddHostedService<PlcPoEndQueueWorker>();
-        services.AddHostedService<MillTcpOpenCommWorker>();
-        services.AddHostedService<FileBasedPoChangeWorker>();
-        services.AddHostedService<WipBundleFileReconciliationWorker>();
-        services.AddHostedService<PoLifecycleSweepWorker>();
-        services.AddHostedService<SlitMonitoringWorker>();
-        services.AddHostedService<NdtInputSlitSapStatusWorker>();
-        services.AddHostedService<UploadNdtBundleSchedulerWorker>();
+    private static void AddZplToggle(IServiceCollection services, InstanceRoleOptions role)
+    {
+        if (role.IsMonolith)
+            services.AddSingleton<IZplGenerationToggle, ZplGenerationToggle>();
+        else
+            services.AddSingleton<IZplGenerationToggle, SqlZplGenerationToggle>();
+    }
 
-        return services;
+    private static void AddHostedServices(
+        IServiceCollection services,
+        InstanceRoleOptions role,
+        IConfiguration configuration)
+    {
+        var bundleOptions = configuration.GetSection("NdtBundle").Get<NdtBundleOptions>() ?? new NdtBundleOptions();
+
+        if (role.IsMonolith || role.IsMill)
+            services.AddHostedService<FillCutoverStartupCheck>();
+
+        if (role.IsMonolith || role.EnableMillWorkers)
+        {
+            services.AddHostedService<PoReopenWipConfirmationBridge>();
+            services.AddHostedService<PlcHandshakeWorker>();
+            services.AddHostedService<PlcPoEndQueueWorker>();
+            services.AddHostedService<MillTcpOpenCommWorker>();
+            services.AddHostedService<FileBasedPoChangeWorker>();
+            services.AddHostedService<WipBundleFileReconciliationWorker>();
+            services.AddHostedService<PoLifecycleSweepWorker>();
+            services.AddHostedService<SlitMonitoringWorker>();
+        }
+
+        if (role.IsMonolith || role.IsShared)
+            services.AddHostedService<NdtInputSlitSapStatusWorker>();
+
+        if (role.IsMonolith || role.EnablePoPlanWipImport)
+        {
+            if (PoPlanWipImportSettings.IsEnabled(bundleOptions))
+                services.AddHostedService<PoPlanWipImportHostedService>();
+        }
+
+        if (role.IsMonolith || role.EnableUploadScheduler)
+        {
+            if (bundleOptions.EnableUploadNdtBundleScheduler)
+                services.AddHostedService<UploadNdtBundleSchedulerWorker>();
+        }
+
+        if (role.IsMonolith || role.IsMill)
+            services.AddHostedService<MillInstanceLeaseHostedService>();
     }
 }

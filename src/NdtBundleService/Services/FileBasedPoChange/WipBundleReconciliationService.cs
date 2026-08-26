@@ -13,6 +13,7 @@ public sealed class WipBundleReconciliationService : IWipBundleReconciliationSer
     private readonly INdtBundleRepository _bundleRepository;
     private readonly IWipBundleRunningPoProvider _wipRunningPo;
     private readonly FileBasedPoChangeQueue _queue;
+    private readonly IMillOwnership _millOwnership;
     private readonly ILogger<WipBundleReconciliationService> _logger;
 
     public WipBundleReconciliationService(
@@ -20,12 +21,14 @@ public sealed class WipBundleReconciliationService : IWipBundleReconciliationSer
         INdtBundleRepository bundleRepository,
         IWipBundleRunningPoProvider wipRunningPo,
         FileBasedPoChangeQueue queue,
+        IMillOwnership millOwnership,
         ILogger<WipBundleReconciliationService> logger)
     {
         _options = options;
         _bundleRepository = bundleRepository;
         _wipRunningPo = wipRunningPo;
         _queue = queue;
+        _millOwnership = millOwnership;
         _logger = logger;
     }
 
@@ -47,6 +50,8 @@ public sealed class WipBundleReconciliationService : IWipBundleReconciliationSer
 
         for (var millNo = 1; millNo <= 4; millNo++)
         {
+            if (!_millOwnership.Owns(millNo))
+                continue;
             if (MillPoEndSourceResolver.ForMill(millNo, options) != MillPoEndSource.File)
                 continue;
 

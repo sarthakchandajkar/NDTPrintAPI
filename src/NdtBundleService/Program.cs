@@ -43,13 +43,19 @@ builder.Services.AddCors(options =>
     });
 });
 
+var instanceRole = builder.Configuration.GetSection(InstanceRoleOptions.SectionName).Get<InstanceRoleOptions>()
+                   ?? new InstanceRoleOptions();
+
 // Controllers & Swagger UI for testing
-builder.Services.AddControllers().AddJsonOptions(o =>
-{
-    // Match ndtbundle-dashboard (expects mills, sourcePath, liveMillNdt).
-    o.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
-    o.JsonSerializerOptions.DictionaryKeyPolicy = JsonNamingPolicy.CamelCase;
-});
+builder.Services.AddControllers()
+    .AddJsonOptions(o =>
+    {
+        // Match ndtbundle-dashboard (expects mills, sourcePath, liveMillNdt).
+        o.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+        o.JsonSerializerOptions.DictionaryKeyPolicy = JsonNamingPolicy.CamelCase;
+    })
+    .AddMvcOptions(o => o.Conventions.Add(new InstanceRoleControllerConvention(instanceRole)));
+
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
@@ -82,16 +88,26 @@ finally
 static void ConfigureSerilog(WebApplicationBuilder builder)
 {
     var fileLogging = builder.Configuration.GetSection("Logging:File").Get<FileLoggingOptions>() ?? new FileLoggingOptions();
+    var role = builder.Configuration.GetSection(InstanceRoleOptions.SectionName).Get<InstanceRoleOptions>()
+               ?? new InstanceRoleOptions();
     var defaultLevel = builder.Configuration["Logging:LogLevel:Default"];
     var minLevel = Enum.TryParse<LogEventLevel>(defaultLevel, ignoreCase: true, out var parsed)
         ? parsed
         : LogEventLevel.Information;
 
+    var ownedMill = role.OwnedMillNos.Length == 1 ? role.OwnedMillNos[0].ToString() : "-";
+    var displayName = role.ResolveDisplayName();
+    var outputTemplate =
+        "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] [{InstanceRole}/{OwnedMill}] {SourceContext}: {Message:lj}{NewLine}{Exception}";
+
     var loggerConfig = new LoggerConfiguration()
         .MinimumLevel.Is(minLevel)
         .MinimumLevel.Override("Microsoft.AspNetCore", LogEventLevel.Warning)
         .MinimumLevel.Override("Microsoft.Hosting.Lifetime", LogEventLevel.Information)
-        .Enrich.FromLogContext();
+        .Enrich.FromLogContext()
+        .Enrich.WithProperty("InstanceRole", role.Mode)
+        .Enrich.WithProperty("OwnedMill", ownedMill)
+        .Enrich.WithProperty("InstanceDisplayName", displayName);
 
     if (fileLogging.Enabled)
     {
@@ -109,18 +125,18 @@ static void ConfigureSerilog(WebApplicationBuilder builder)
             rollingInterval: RollingInterval.Day,
             retainedFileCountLimit: retain,
             shared: true,
-            outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {SourceContext}: {Message:lj}{NewLine}{Exception}");
+            outputTemplate: outputTemplate);
     }
 
     if (OperatingSystem.IsWindows() && fileLogging.WriteToEventLog)
     {
         loggerConfig = loggerConfig.WriteTo.EventLog(
-            "NdtBundleService",
+            role.IsMonolith ? "NdtBundleService" : $"NdtBundleService-{displayName}",
             manageEventSource: false,
-            restrictedToMinimumLevel: LogEventLevel.Warning);
+            restrictedToMinimumLevel: LogEventLevel.Warning,
+            outputTemplate: outputTemplate);
     }
 
     Log.Logger = loggerConfig.CreateLogger();
     builder.Host.UseSerilog();
 }
-

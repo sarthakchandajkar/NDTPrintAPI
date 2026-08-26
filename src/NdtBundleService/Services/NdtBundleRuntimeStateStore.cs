@@ -66,10 +66,10 @@ public interface INdtBundleRuntimeStateStore
     Task SaveAsync(CancellationToken cancellationToken);
 
     /// <summary>
-    /// True when any live slot still has provisional numbering or open sizeCounts/RunningTotal —
-    /// unsafe for quiet-drain fill-to-target cutover between POs.
+    /// True when any live slot (or slots for <paramref name="millNo"/> when set) still has provisional
+    /// numbering or open sizeCounts/RunningTotal — unsafe for quiet-drain fill-to-target cutover.
     /// </summary>
-    bool HasUnsafeOpenStateForFillCutover() => false;
+    bool HasUnsafeOpenStateForFillCutover(int? millNo = null) => false;
 }
 
 public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
@@ -84,6 +84,7 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
     private readonly IOptionsMonitor<NdtBundleOptions> _optionsMonitor;
     private readonly INdtBundleRepository _bundleRepository;
     private readonly IActivePoPerMillService _activePoPerMill;
+    private readonly IMillOwnership _millOwnership;
     private readonly ILogger<NdtBundleRuntimeStateStore> _logger;
     private readonly SemaphoreSlim _initLock = new(1, 1);
     private readonly object _stateLock = new();
@@ -95,11 +96,13 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         IOptionsMonitor<NdtBundleOptions> optionsMonitor,
         INdtBundleRepository bundleRepository,
         IActivePoPerMillService activePoPerMill,
+        IMillOwnership millOwnership,
         ILogger<NdtBundleRuntimeStateStore> logger)
     {
         _optionsMonitor = optionsMonitor;
         _bundleRepository = bundleRepository;
         _activePoPerMill = activePoPerMill;
+        _millOwnership = millOwnership;
         _logger = logger;
     }
 
@@ -319,12 +322,19 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         }
     }
 
-    public bool HasUnsafeOpenStateForFillCutover()
+    public bool HasUnsafeOpenStateForFillCutover(int? millNo = null)
     {
         lock (_stateLock)
         {
-            foreach (var slot in _root.Mills.Values)
+            foreach (var (key, slot) in _root.Mills)
             {
+                if (millNo.HasValue)
+                {
+                    // Slot keys are "{po}|{mill}"
+                    if (!key.EndsWith("|" + millNo.Value.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal))
+                        continue;
+                }
+
                 if (slot.ProvisionalBatchNo > 0)
                     return true;
                 if (NdtBundleRuntimeStateLogic.HasOpenPartialBundle(slot.RunningTotal, slot.SizeCounts))
@@ -340,6 +350,17 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         PersistedRoot snapshot;
         lock (_stateLock)
         {
+            // Never persist foreign-mill state into this instance's file.
+            foreach (var key in _root.Mills.Keys
+                         .Where(k => _root.Mills[k].MillNo is >= 1 and <= 4 && !_millOwnership.Owns(_root.Mills[k].MillNo))
+                         .ToList())
+                _root.Mills.Remove(key);
+
+            foreach (var millKey in _root.MillMaxSequence.Keys
+                         .Where(k => int.TryParse(k, out var mill) && mill is >= 1 and <= 4 && !_millOwnership.Owns(mill))
+                         .ToList())
+                _root.MillMaxSequence.Remove(millKey);
+
             _root.UpdatedUtc = DateTime.UtcNow;
             snapshot = CloneRoot(_root);
         }
@@ -410,6 +431,21 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
             var parsed = JsonSerializer.Deserialize<PersistedRoot>(json, JsonOptions);
             if (parsed is null || parsed.Mills.Count == 0)
                 return false;
+
+            // Drop foreign-mill slots/floors if a shared or legacy file was pointed at this instance.
+            foreach (var key in parsed.Mills.Keys
+                         .Where(k => parsed.Mills[k].MillNo is >= 1 and <= 4 && !_millOwnership.Owns(parsed.Mills[k].MillNo))
+                         .ToList())
+                parsed.Mills.Remove(key);
+
+            foreach (var millKey in parsed.MillMaxSequence.Keys
+                         .Where(k => int.TryParse(k, out var mill) && mill is >= 1 and <= 4 && !_millOwnership.Owns(mill))
+                         .ToList())
+                parsed.MillMaxSequence.Remove(millKey);
+
+            if (parsed.Mills.Count == 0 && parsed.MillMaxSequence.Count == 0)
+                return false;
+
             loaded = parsed;
             return true;
         }
@@ -451,6 +487,11 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         foreach (var b in bundles)
         {
             if (b.MillNo is < 1 or > 4)
+                continue;
+            // Separate per-mill runtime files are necessary but not sufficient: SQL hydrate returns
+            // all mills; without ownership filter, SaveAsync would write foreign mill floors into
+            // this instance's file and corrupt sequences across cutover.
+            if (!_millOwnership.Owns(b.MillNo))
                 continue;
             if (!NdtBundleSequence.TryParseSequenceForCurrentYear(b.BundleNo, b.MillNo, out var seq))
                 continue;

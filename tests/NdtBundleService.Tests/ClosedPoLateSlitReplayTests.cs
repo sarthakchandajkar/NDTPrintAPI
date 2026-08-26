@@ -380,11 +380,15 @@ public sealed class ClosedPoLateSlitReplayTests
         public Task<CsvFillStampResult?> TryStampFileAsync(string poNumber, int millNo, string? pipeSize, int fileNdtPipes, CancellationToken cancellationToken) => Task.FromResult<CsvFillStampResult?>(null);
         public Task<int> AdvanceQuietShortAsync(string? poNumber, int? millNo, int quietMinutes, DateTime utcNow, bool forcePoEnd, CancellationToken cancellationToken) => Task.FromResult(0);
         public Task UpsertHoldAsync(string sourceFileName, string poNumber, int millNo, string? pipeSize, string reasonCode, CancellationToken cancellationToken) => Task.CompletedTask;
-        public Task<int> EscalateExpiredHoldsAsync(int quietMinutes, DateTime utcNow, CancellationToken cancellationToken) => Task.FromResult(0);
+        public Task<int> EscalateExpiredHoldsAsync(
+            int quietMinutes,
+            DateTime utcNow,
+            CancellationToken cancellationToken,
+            int? millNo = null) => Task.FromResult(0);
         public Task ApplyCountRevisionAsync(string sourceFileName, string batchNo, int oldNdtPipes, int newNdtPipes, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task<Guid> ApplyBatchMoveAsync(string sourceFileName, string oldBatchNo, string newBatchNo, int ndtPipes, CancellationToken cancellationToken) => Task.FromResult(Guid.Empty);
-        public Task<bool> HasAwaitingCsvReconRowsAsync(CancellationToken cancellationToken) => Task.FromResult(false);
-        public Task<bool> HasBundlesMissingFillTargetAsync(CancellationToken cancellationToken) => Task.FromResult(false);
+        public Task<bool> HasAwaitingCsvReconRowsAsync(CancellationToken cancellationToken, int? millNo = null) => Task.FromResult(false);
+        public Task<bool> HasBundlesMissingFillTargetAsync(CancellationToken cancellationToken, int? millNo = null) => Task.FromResult(false);
     }
 }
 

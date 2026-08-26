@@ -105,6 +105,7 @@ public sealed class WipBundlePoEndExclusionTests
             options,
             NullLogger<WipBundleRunningPoProvider>.Instance,
             NullWipConfirmedRunningPoNotifier.Instance,
+            TestMillOwnership.Monolith(),
             queue);
     }
 

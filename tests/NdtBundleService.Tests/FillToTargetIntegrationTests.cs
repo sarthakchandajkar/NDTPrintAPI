@@ -484,7 +484,11 @@ internal sealed class InMemoryTransactionalCsvFillService : ICsvFillService
         return Task.CompletedTask;
     }
 
-    public Task<int> EscalateExpiredHoldsAsync(int quietMinutes, DateTime utcNow, CancellationToken cancellationToken) =>
+    public Task<int> EscalateExpiredHoldsAsync(
+        int quietMinutes,
+        DateTime utcNow,
+        CancellationToken cancellationToken,
+        int? millNo = null) =>
         Task.FromResult(0);
 
     public Task ApplyCountRevisionAsync(
@@ -530,8 +534,8 @@ internal sealed class InMemoryTransactionalCsvFillService : ICsvFillService
         }
     }
 
-    public Task<bool> HasAwaitingCsvReconRowsAsync(CancellationToken cancellationToken) => Task.FromResult(false);
-    public Task<bool> HasBundlesMissingFillTargetAsync(CancellationToken cancellationToken) => Task.FromResult(false);
+    public Task<bool> HasAwaitingCsvReconRowsAsync(CancellationToken cancellationToken, int? millNo = null) => Task.FromResult(false);
+    public Task<bool> HasBundlesMissingFillTargetAsync(CancellationToken cancellationToken, int? millNo = null) => Task.FromResult(false);
 
     private void AdjustInPlace(string batchNo, int delta)
     {

@@ -12,6 +12,7 @@ namespace NdtBundleService.Controllers;
 [ApiController]
 [Route("api/[controller]")]
 [Produces("application/json")]
+[InstanceRole(InstanceRoleModes.Monolith, InstanceRoleModes.Shared)]
 public sealed class InputSlitsController : ControllerBase
 {
     private readonly NdtBundleOptions _options;

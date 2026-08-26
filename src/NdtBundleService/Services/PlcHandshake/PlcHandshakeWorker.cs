@@ -24,6 +24,7 @@ public sealed class PlcHandshakeWorker : BackgroundService
     private readonly IS7ConnectionProviderRegistry _s7Registry;
     private readonly IPlcSlitEndBundleCloser _slitEndCloser;
     private readonly IHandshakeEventRepository _handshakeEvents;
+    private readonly IMillOwnership _millOwnership;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<PlcHandshakeWorker> _logger;
 
@@ -43,6 +44,7 @@ public sealed class PlcHandshakeWorker : BackgroundService
         IS7ConnectionProviderRegistry s7Registry,
         IPlcSlitEndBundleCloser slitEndCloser,
         IHandshakeEventRepository handshakeEvents,
+        IMillOwnership millOwnership,
         ILoggerFactory loggerFactory,
         ILogger<PlcHandshakeWorker> logger)
     {
@@ -58,6 +60,7 @@ public sealed class PlcHandshakeWorker : BackgroundService
         _s7Registry = s7Registry;
         _slitEndCloser = slitEndCloser;
         _handshakeEvents = handshakeEvents;
+        _millOwnership = millOwnership;
         _loggerFactory = loggerFactory;
         _logger = logger;
     }
@@ -84,8 +87,15 @@ public sealed class PlcHandshakeWorker : BackgroundService
                 MillPoEndSourceResolver.ToConfigValue(excluded.ResolvePoEndSource(_options.Value)));
         }
 
-        var mills = allMills.Where(m => m.PlcHandshakeEnabled).ToList();
+        var enabledMills = allMills.Where(m => m.PlcHandshakeEnabled).ToList();
+        var mills = SelectOwnedHandshakeMills(enabledMills, _millOwnership);
 
+        foreach (var skippedOwnership in enabledMills.Where(m => !_millOwnership.Owns(m.ResolveMillNo())))
+        {
+            _logger.LogInformation(
+                "PlcHandshake skipped for Mill {MillNo}: not owned by this instance.",
+                skippedOwnership.ResolveMillNo());
+        }
         if (mills.Count == 0)
         {
             _logger.LogWarning(
@@ -165,4 +175,10 @@ public sealed class PlcHandshakeWorker : BackgroundService
         _logger.LogInformation("PlcHandshakeWorker stopping {Count} mill loop(s).", _tasks.Count);
         await base.StopAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>Owned-mill filter for handshake loops (independent of config trim).</summary>
+    internal static List<MillConfig> SelectOwnedHandshakeMills(
+        IEnumerable<MillConfig> enabledMillsWithIp,
+        IMillOwnership ownership) =>
+        enabledMillsWithIp.Where(m => ownership.Owns(m.ResolveMillNo())).ToList();
 }

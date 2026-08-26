@@ -8,23 +8,27 @@ namespace NdtBundleService.Services;
 /// <summary>
 /// Quiet-drain cutover guard: refuse to start when pre-migration awaiting-recon rows remain,
 /// fill targets are missing on printed bundles, or runtime JSON still has open provisional/partial state.
+/// Mill mode scopes SQL + runtime checks to the owned mill; Monolith checks all mills.
 /// </summary>
 public sealed class FillCutoverStartupCheck : IHostedService
 {
     private readonly IOptionsMonitor<NdtBundleOptions> _options;
     private readonly ICsvFillService _csvFill;
     private readonly INdtBundleRuntimeStateStore _runtimeState;
+    private readonly IMillOwnership _ownership;
     private readonly ILogger<FillCutoverStartupCheck> _logger;
 
     public FillCutoverStartupCheck(
         IOptionsMonitor<NdtBundleOptions> options,
         ICsvFillService csvFill,
         INdtBundleRuntimeStateStore runtimeState,
+        IMillOwnership ownership,
         ILogger<FillCutoverStartupCheck> logger)
     {
         _options = options;
         _csvFill = csvFill;
         _runtimeState = runtimeState;
+        _ownership = ownership;
         _logger = logger;
     }
 
@@ -40,21 +44,28 @@ public sealed class FillCutoverStartupCheck : IHostedService
 
         await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
 
-        var awaiting = await _csvFill.HasAwaitingCsvReconRowsAsync(cancellationToken).ConfigureAwait(false);
-        var missingTarget = await _csvFill.HasBundlesMissingFillTargetAsync(cancellationToken).ConfigureAwait(false);
-        var openRuntime = _runtimeState.HasUnsafeOpenStateForFillCutover();
+        var millNo = _ownership.SingleOwnedMill;
+        var awaiting = await _csvFill.HasAwaitingCsvReconRowsAsync(cancellationToken, millNo).ConfigureAwait(false);
+        var missingTarget = await _csvFill.HasBundlesMissingFillTargetAsync(cancellationToken, millNo).ConfigureAwait(false);
+        var openRuntime = _runtimeState.HasUnsafeOpenStateForFillCutover(millNo);
 
         if (!awaiting && !missingTarget && !openRuntime)
         {
-            _logger.LogInformation("Fill-to-target cutover check passed.");
+            _logger.LogInformation(
+                "Fill-to-target cutover check passed{Scope}.",
+                millNo.HasValue ? $" (mill {millNo.Value})" : "");
             return;
         }
 
         var reasons = new List<string>();
         if (awaiting)
-            reasons.Add("Awaiting_Csv_Recon=1 rows exist");
+            reasons.Add(millNo.HasValue
+                ? $"Awaiting_Csv_Recon=1 rows exist for mill {millNo.Value}"
+                : "Awaiting_Csv_Recon=1 rows exist");
         if (missingTarget)
-            reasons.Add("printed bundles missing Target_Ndt_Pcs");
+            reasons.Add(millNo.HasValue
+                ? $"printed bundles missing Target_Ndt_Pcs for mill {millNo.Value}"
+                : "printed bundles missing Target_Ndt_Pcs");
         if (openRuntime)
             reasons.Add("NdtBundleRuntimeState.json has open ProvisionalBatchNo / RunningTotal / sizeCounts");
 

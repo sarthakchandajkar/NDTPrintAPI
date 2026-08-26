@@ -16,7 +16,8 @@ namespace NdtBundleService.Controllers;
 [ApiController]
 [Route("api/[controller]")]
 [Produces("application/json")]
-    public sealed class TestController : ControllerBase
+[InstanceRole(InstanceRoleModes.Monolith, InstanceRoleModes.Shared, InstanceRoleModes.Mill)]
+public sealed class TestController : ControllerBase
 {
     private readonly ICurrentPoPlanService? _currentPoPlanService;
     private readonly INdtBundleTagPrinter _bundleTagPrinter;

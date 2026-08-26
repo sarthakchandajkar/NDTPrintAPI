@@ -66,7 +66,11 @@ public interface ICsvFillService
         string reasonCode,
         CancellationToken cancellationToken);
 
-    Task<int> EscalateExpiredHoldsAsync(int quietMinutes, DateTime utcNow, CancellationToken cancellationToken);
+    Task<int> EscalateExpiredHoldsAsync(
+        int quietMinutes,
+        DateTime utcNow,
+        CancellationToken cancellationToken,
+        int? millNo = null);
 
     /// <summary>Same-basename count revision: adjust Csv_Filled by delta only.</summary>
     Task ApplyCountRevisionAsync(
@@ -84,9 +88,9 @@ public interface ICsvFillService
         int ndtPipes,
         CancellationToken cancellationToken);
 
-    Task<bool> HasAwaitingCsvReconRowsAsync(CancellationToken cancellationToken);
+    Task<bool> HasAwaitingCsvReconRowsAsync(CancellationToken cancellationToken, int? millNo = null);
 
-    Task<bool> HasBundlesMissingFillTargetAsync(CancellationToken cancellationToken);
+    Task<bool> HasBundlesMissingFillTargetAsync(CancellationToken cancellationToken, int? millNo = null);
 }
 
 public sealed class CsvFillService : ICsvFillService
@@ -445,7 +449,11 @@ WHEN NOT MATCHED THEN
         }
     }
 
-    public async Task<int> EscalateExpiredHoldsAsync(int quietMinutes, DateTime utcNow, CancellationToken cancellationToken)
+    public async Task<int> EscalateExpiredHoldsAsync(
+        int quietMinutes,
+        DateTime utcNow,
+        CancellationToken cancellationToken,
+        int? millNo = null)
     {
         if (!UseDatabase)
             return 0;
@@ -460,10 +468,12 @@ UPDATE dbo.NDT_Csv_Fill_Hold
 SET Manual_Review = 1,
     Reason_Code = N'HoldQuietExpired'
 WHERE Manual_Review = 0
-  AND Held_AtUtc <= DATEADD(MINUTE, -@Quiet, @Now);";
+  AND Held_AtUtc <= DATEADD(MINUTE, -@Quiet, @Now)
+  AND (@MillNo IS NULL OR Mill_No = @MillNo);";
             await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("@Quiet", quiet);
             cmd.Parameters.AddWithValue("@Now", utcNow);
+            cmd.Parameters.AddWithValue("@MillNo", millNo.HasValue ? millNo.Value : (object)DBNull.Value);
             var n = await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             if (n > 0)
             {
@@ -658,7 +668,7 @@ WHERE Source_File_Name = @File
         return correlationId;
     }
 
-    public async Task<bool> HasAwaitingCsvReconRowsAsync(CancellationToken cancellationToken)
+    public async Task<bool> HasAwaitingCsvReconRowsAsync(CancellationToken cancellationToken, int? millNo = null)
     {
         if (!UseDatabase)
             return false;
@@ -668,8 +678,11 @@ WHERE Source_File_Name = @File
             await using var conn = SqlTraceabilityConnection.Create(Opt);
             await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
             await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(
-                "SELECT TOP 1 1 FROM dbo.NDT_Bundle WHERE Awaiting_Csv_Recon = 1;",
+                @"SELECT TOP 1 1 FROM dbo.NDT_Bundle
+WHERE Awaiting_Csv_Recon = 1
+  AND (@MillNo IS NULL OR Mill_No = @MillNo);",
                 conn);
+            cmd.Parameters.AddWithValue("@MillNo", millNo.HasValue ? millNo.Value : (object)DBNull.Value);
             var scalar = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
             return scalar is not null && scalar is not DBNull;
         }
@@ -679,7 +692,7 @@ WHERE Source_File_Name = @File
         }
     }
 
-    public async Task<bool> HasBundlesMissingFillTargetAsync(CancellationToken cancellationToken)
+    public async Task<bool> HasBundlesMissingFillTargetAsync(CancellationToken cancellationToken, int? millNo = null)
     {
         if (!UseDatabase)
             return false;
@@ -694,8 +707,10 @@ WHERE Source_File_Name = @File
 FROM dbo.NDT_Bundle
 WHERE Target_Ndt_Pcs IS NULL
   AND Total_NDT_Pcs > 0
-  AND Csv_Fill_State IN (N'PlcClosed', N'CsvFilling');",
+  AND Csv_Fill_State IN (N'PlcClosed', N'CsvFilling')
+  AND (@MillNo IS NULL OR Mill_No = @MillNo);",
                 conn);
+            cmd.Parameters.AddWithValue("@MillNo", millNo.HasValue ? millNo.Value : (object)DBNull.Value);
             var scalar = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
             return scalar is not null && scalar is not DBNull;
         }
