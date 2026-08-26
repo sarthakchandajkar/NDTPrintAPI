@@ -146,20 +146,11 @@ public sealed class ManualBundleReconcileGuardTests
     }
 
     [Fact]
-    public void Fifo_list_excludes_manually_reconciled_awaiting_bundle()
+    public void Fill_to_target_revision_delta_not_full_add()
     {
-        var printed = DateTime.UtcNow.AddMinutes(-5);
-        var bundles = new List<PlcCsvReconAwaitingBundle>
-        {
-            new("1226100001", 1, PlcTotal: 10, CurrentSlitSum: 4, printed)
-        };
-
-        // Locked bundle would be excluded from SQL list; in-memory attach should skip full bundles only.
-        Assert.True(PlcCsvReconFifo.TryAttachRow(
-            bundles,
-            new InputSlitRecord { PoNumber = "1000060364", MillNo = 1, SlitNo = "1", NdtPipes = 3 },
-            out var batchNo));
-        Assert.Equal("1226100001", batchNo);
+        var (filled, state, _, _) = CsvFillLogic.ApplyFilledDelta(10, 4, delta: 3, 20);
+        Assert.Equal(7, filled);
+        Assert.Equal(CsvFillState.CsvFilling, state);
     }
 }
 

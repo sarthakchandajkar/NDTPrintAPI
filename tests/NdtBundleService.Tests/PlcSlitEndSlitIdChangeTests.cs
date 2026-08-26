@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging.Abstractions;
+﻿using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Models;
@@ -12,7 +12,7 @@ namespace NdtBundleService.Tests;
 
 /// <summary>
 /// Slit end defaults to Mills PLC Slit ID change (DB251.DBW10), not NDT count reset.
-/// Sub-threshold slits accumulate into sizeCounts; close when remainder ≥ threshold.
+/// Sub-threshold slits accumulate into sizeCounts; close when remainder â‰¥ threshold.
 /// </summary>
 public sealed class PlcSlitEndSlitIdChangeTests
 {
@@ -48,7 +48,8 @@ public sealed class PlcSlitEndSlitIdChangeTests
 
         Assert.True(sut.TryDetectSlitEnd(1, handshake, s7, 0, 4, out var reason, out var plcCount));
         Assert.Equal(11, plcCount);
-        Assert.Contains("Slit ID change (3→4)", reason);
+        Assert.Contains("Slit ID change (3", reason);
+        Assert.Contains("4)", reason);
     }
 
     [Fact]
@@ -99,13 +100,13 @@ public sealed class PlcSlitEndSlitIdChangeTests
         var mill = new MillConfig { Name = "Mill-1", MillNo = 1 };
         var s7 = new AlwaysHealthyNoOpS7();
 
-        // Slit 1: 9 pcs (< 10) → accumulate only
+        // Slit 1: 9 pcs (< 10) â†’ accumulate only
         await sut.TryCloseOnSlitEndAsync(1, mill, s7, 9, 1, CancellationToken.None);
         await sut.TryCloseOnSlitEndAsync(1, mill, s7, 0, 2, CancellationToken.None);
         Assert.Empty(closed);
         Assert.Equal(9, runtime.GetSizeCounts("1000060163", 1)["Default"]);
 
-        // Slit 2: 3 pcs → 9+3=12 ≥ 10 → close
+        // Slit 2: 3 pcs â†’ 9+3=12 â‰¥ 10 â†’ close
         await sut.TryCloseOnSlitEndAsync(1, mill, s7, 3, 2, CancellationToken.None);
         await sut.TryCloseOnSlitEndAsync(1, mill, s7, 0, 3, CancellationToken.None);
         Assert.Single(closed);
@@ -230,9 +231,8 @@ public sealed class PlcSlitEndSlitIdChangeTests
         public void AdvanceOnPoEnd(string poNumber, int millNo, int threshold) { }
         public BundleCloseAllocation CloseBundle(string poNumber, int millNo, int closedTotalPcs, int threshold) =>
             new(1, 0);
-        public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int batchNumberForRow, out int totalSoFar)
+        public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int totalSoFar)
         {
-            batchNumberForRow = 1;
             totalSoFar = ndtPipes;
         }
         public int GetEngineBatchNo(string poNumber, int millNo) => 0;

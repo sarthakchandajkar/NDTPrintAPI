@@ -209,13 +209,14 @@ ORDER BY COALESCE(Print_Attempted_At, PrintedAt)";
     {
         await using var conn = SqlTraceabilityConnection.Create(Opt);
         await SqlTraceabilityConnection.OpenAsync(conn, _logger, "NDT_Bundle upsert", cancellationToken).ConfigureAwait(false);
-        const string sql = @"
+            const string sql = @"
 IF EXISTS (SELECT 1 FROM dbo.NDT_Bundle WHERE Bundle_No = @BundleNo)
 BEGIN
     UPDATE dbo.NDT_Bundle
     SET PO_Number = @PoNumber,
         Mill_No = @MillNo,
         Total_NDT_Pcs = @TotalNdtPcs,
+        Target_Ndt_Pcs = COALESCE(Target_Ndt_Pcs, @TotalNdtPcs),
         Context_Slit_No = @SlitNo,
         Slit_Start_Time = @SlitStartTime,
         Slit_Finish_Time = @SlitFinishTime,
@@ -229,9 +230,9 @@ END
 ELSE
 BEGIN
     INSERT INTO dbo.NDT_Bundle
-        (PO_Number, Mill_No, Bundle_No, Total_NDT_Pcs, Context_Slit_No, Slit_Start_Time, Slit_Finish_Time, Rejected_P, NDT_Short_Length_Pipe, Rejected_Short_Length_Pipe, IsReprint)
+        (PO_Number, Mill_No, Bundle_No, Total_NDT_Pcs, Target_Ndt_Pcs, Csv_Filled, Csv_Fill_State, Context_Slit_No, Slit_Start_Time, Slit_Finish_Time, Rejected_P, NDT_Short_Length_Pipe, Rejected_Short_Length_Pipe, IsReprint)
     VALUES
-        (@PoNumber, @MillNo, @BundleNo, @TotalNdtPcs, @SlitNo, @SlitStartTime, @SlitFinishTime, @RejectedPipes, @NdtShortLengthPipe, @RejectedShortLengthPipe, 0);
+        (@PoNumber, @MillNo, @BundleNo, @TotalNdtPcs, @TotalNdtPcs, 0, N'PlcClosed', @SlitNo, @SlitStartTime, @SlitFinishTime, @RejectedPipes, @NdtShortLengthPipe, @RejectedShortLengthPipe, 0);
 END";
         await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
         AddBundleUpsertParameters(cmd, record);
@@ -249,6 +250,9 @@ BEGIN
     SET PO_Number = @PoNumber,
         Mill_No = @MillNo,
         Total_NDT_Pcs = @TotalNdtPcs,
+        Target_Ndt_Pcs = COALESCE(@TargetNdtPcs, Target_Ndt_Pcs, @TotalNdtPcs),
+        Csv_Filled = CASE WHEN Target_Ndt_Pcs IS NULL THEN 0 ELSE Csv_Filled END,
+        Csv_Fill_State = CASE WHEN Target_Ndt_Pcs IS NULL THEN N'PlcClosed' ELSE Csv_Fill_State END,
         Context_Slit_No = @SlitNo,
         Slit_Start_Time = @SlitStartTime,
         Slit_Finish_Time = @SlitFinishTime,
@@ -265,12 +269,15 @@ END
 ELSE
 BEGIN
     INSERT INTO dbo.NDT_Bundle
-        (PO_Number, Mill_No, Bundle_No, Total_NDT_Pcs, Context_Slit_No, Slit_Start_Time, Slit_Finish_Time, Rejected_P, NDT_Short_Length_Pipe, Rejected_Short_Length_Pipe, IsReprint, Print_Status, Print_Attempted_At, Print_Error)
+        (PO_Number, Mill_No, Bundle_No, Total_NDT_Pcs, Target_Ndt_Pcs, Csv_Filled, Csv_Fill_State, Context_Slit_No, Slit_Start_Time, Slit_Finish_Time, Rejected_P, NDT_Short_Length_Pipe, Rejected_Short_Length_Pipe, IsReprint, Print_Status, Print_Attempted_At, Print_Error)
     VALUES
-        (@PoNumber, @MillNo, @BundleNo, @TotalNdtPcs, @SlitNo, @SlitStartTime, @SlitFinishTime, @RejectedPipes, @NdtShortLengthPipe, @RejectedShortLengthPipe, 0, 'Pending', SYSDATETIME(), NULL);
+        (@PoNumber, @MillNo, @BundleNo, @TotalNdtPcs, @TotalNdtPcs, 0, N'PlcClosed', @SlitNo, @SlitStartTime, @SlitFinishTime, @RejectedPipes, @NdtShortLengthPipe, @RejectedShortLengthPipe, 0, 'Pending', SYSDATETIME(), NULL);
 END";
         await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
         AddBundleUpsertParameters(cmd, record);
+        cmd.Parameters.AddWithValue(
+            "@TargetNdtPcs",
+            record.TargetNdtPcs ?? record.TotalNdtPcs);
         await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -820,10 +827,17 @@ WHERE Mill_No = @MillNo
         {
             await using var conn = SqlTraceabilityConnection.Create(Opt);
             await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            // Fill-to-target: Close_Source=Plc, ensure Target_Ndt_Pcs from Total, never set Awaiting_Csv_Recon.
             const string sql = @"
 UPDATE dbo.NDT_Bundle
 SET Close_Source = N'Plc',
-    Awaiting_Csv_Recon = 1
+    Awaiting_Csv_Recon = 0,
+    Target_Ndt_Pcs = COALESCE(Target_Ndt_Pcs, Total_NDT_Pcs),
+    Csv_Filled = COALESCE(Csv_Filled, 0),
+    Csv_Fill_State = CASE
+        WHEN Csv_Fill_State IS NULL OR LTRIM(RTRIM(Csv_Fill_State)) = N'' THEN N'PlcClosed'
+        ELSE Csv_Fill_State
+    END
 WHERE Bundle_No = @BundleNo;";
             await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("@BundleNo", bundleNo);
@@ -831,7 +845,7 @@ WHERE Bundle_No = @BundleNo;";
             if (updated > 0)
             {
                 _logger.LogInformation(
-                    "Set Close_Source=Plc Awaiting_Csv_Recon=1 on bundle {BundleNo}.",
+                    "Set Close_Source=Plc fill-to-target on bundle {BundleNo} (Awaiting_Csv_Recon=0).",
                     bundleNo);
             }
         }
@@ -839,339 +853,52 @@ WHERE Bundle_No = @BundleNo;";
         {
             _logger.LogWarning(
                 ex,
-                "Failed to set PLC close metadata for {BundleNo} (run docs/NDT_Bundle_Alter_CloseSource.sql if columns are missing).",
+                "Failed to set PLC close metadata for {BundleNo} (run docs/NDT_Bundle_Alter_CloseSource.sql / NDT_Bundle_Alter_CsvFill.sql if columns are missing).",
                 bundleNo);
         }
     }
 
-    public async Task<(string BundleNo, int EngineSequence, int PlcTotal)?> TryGetAwaitingPlcReconBatchAsync(
+    public Task<IReadOnlyList<PlcCsvReconAwaitingBundle>> ListAwaitingPlcReconBatchesAsync(
         string poNumber,
         int millNo,
-        CancellationToken cancellationToken)
-    {
-        if (!UseDatabase || millNo is < 1 or > 4)
-            return null;
+        CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<PlcCsvReconAwaitingBundle>>(Array.Empty<PlcCsvReconAwaitingBundle>());
 
-        var normalized = InputSlitCsvParsing.NormalizePo(poNumber);
-        try
-        {
-            await using var conn = SqlTraceabilityConnection.Create(Opt);
-            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
-            const string findSql = @"
-SELECT TOP 1 Bundle_No, Total_NDT_Pcs
-FROM dbo.NDT_Bundle
-WHERE Mill_No = @MillNo
-  AND Awaiting_Csv_Recon = 1
-  AND Close_Source = N'Plc'
-  AND Manual_Recon = 0
-  AND (PO_Number = @Po OR PO_Number = @PoNormalized)
-ORDER BY PrintedAt ASC;";
-            await using var find = new Microsoft.Data.SqlClient.SqlCommand(findSql, conn);
-            find.Parameters.AddWithValue("@MillNo", millNo);
-            find.Parameters.AddWithValue("@Po", poNumber.Trim());
-            find.Parameters.AddWithValue("@PoNormalized", normalized);
-            await using var reader = await find.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                return null;
-
-            var bundleNo = reader.GetString(0);
-            var plcTotal = reader.GetInt32(1);
-            if (!TryParseEngineSequenceFromBundleNo(bundleNo, out var seq))
-                return null;
-            return (bundleNo, seq, plcTotal);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(
-                ex,
-                "TryGetAwaitingPlcReconBatch failed for PO {PO} Mill {Mill} (columns may be missing).",
-                normalized,
-                millNo);
-            return null;
-        }
-    }
-
-    public async Task<IReadOnlyList<PlcCsvReconAwaitingBundle>> ListAwaitingPlcReconBatchesAsync(
+    public Task<(string BundleNo, int EngineSequence, int PlcTotal)?> TryGetAwaitingPlcReconBatchAsync(
         string poNumber,
         int millNo,
-        CancellationToken cancellationToken)
-    {
-        if (!UseDatabase || millNo is < 1 or > 4)
-            return Array.Empty<PlcCsvReconAwaitingBundle>();
+        CancellationToken cancellationToken) =>
+        Task.FromResult<(string BundleNo, int EngineSequence, int PlcTotal)?>(null);
 
-        var normalized = InputSlitCsvParsing.NormalizePo(poNumber);
-        try
-        {
-            await using var conn = SqlTraceabilityConnection.Create(Opt);
-            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
-            const string findSql = @"
-SELECT Bundle_No, Total_NDT_Pcs, PrintedAt
-FROM dbo.NDT_Bundle
-WHERE Mill_No = @MillNo
-  AND Awaiting_Csv_Recon = 1
-  AND Close_Source = N'Plc'
-  AND Manual_Recon = 0
-  AND (PO_Number = @Po OR PO_Number = @PoNormalized)
-ORDER BY PrintedAt ASC;";
-            await using var find = new Microsoft.Data.SqlClient.SqlCommand(findSql, conn);
-            find.Parameters.AddWithValue("@MillNo", millNo);
-            find.Parameters.AddWithValue("@Po", poNumber.Trim());
-            find.Parameters.AddWithValue("@PoNormalized", normalized);
-            await using var reader = await find.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-
-            var rows = new List<(string BundleNo, int PlcTotal, DateTime PrintedAtUtc)>();
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            {
-                rows.Add((
-                    reader.GetString(0),
-                    reader.GetInt32(1),
-                    reader.GetDateTime(2)));
-            }
-
-            await reader.CloseAsync().ConfigureAwait(false);
-
-            var result = new List<PlcCsvReconAwaitingBundle>(rows.Count);
-            foreach (var (bundleNo, plcTotal, printedAtUtc) in rows)
-            {
-                if (!TryParseEngineSequenceFromBundleNo(bundleNo, out var seq))
-                    continue;
-
-                var slits = await GetSlitsForBatchAsync(bundleNo, cancellationToken).ConfigureAwait(false);
-                var slitSum = slits.Sum(s => s.NdtPipes);
-                result.Add(new PlcCsvReconAwaitingBundle(
-                    bundleNo,
-                    seq,
-                    plcTotal,
-                    slitSum,
-                    printedAtUtc));
-            }
-
-            return result;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(
-                ex,
-                "ListAwaitingPlcReconBatches failed for PO {PO} Mill {Mill} (columns may be missing).",
-                normalized,
-                millNo);
-            return Array.Empty<PlcCsvReconAwaitingBundle>();
-        }
-    }
-
-    public async Task<PlcCsvReconResult?> TryFinalizePlcReconBundleAsync(
+    public Task<PlcCsvReconResult?> TryFinalizePlcReconBundleAsync(
         string bundleNo,
         int slitSum,
         int reconWindowMinutes,
         DateTime utcNow,
         bool force,
-        CancellationToken cancellationToken)
-    {
-        if (!UseDatabase || slitSum < 0 || string.IsNullOrWhiteSpace(bundleNo))
-            return null;
+        CancellationToken cancellationToken) =>
+        Task.FromResult<PlcCsvReconResult?>(null);
 
-        var bundleNoTrimmed = bundleNo.Trim();
-        try
-        {
-            await using var conn = SqlTraceabilityConnection.Create(Opt);
-            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
-            const string findSql = @"
-SELECT Total_NDT_Pcs, PrintedAt
-FROM dbo.NDT_Bundle
-WHERE Bundle_No = @BundleNo
-  AND Awaiting_Csv_Recon = 1
-  AND Close_Source = N'Plc';";
-            int plcTotal;
-            DateTime printedAtUtc;
-            await using (var find = new Microsoft.Data.SqlClient.SqlCommand(findSql, conn))
-            {
-                find.Parameters.AddWithValue("@BundleNo", bundleNoTrimmed);
-                await using var reader = await find.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-                if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-                    return null;
-                plcTotal = reader.GetInt32(0);
-                printedAtUtc = reader.GetDateTime(1);
-            }
-
-            var applied = PlcCsvReconSemantics.EvaluateFinalize(
-                bundleNoTrimmed,
-                plcTotal,
-                slitSum,
-                printedAtUtc,
-                reconWindowMinutes,
-                utcNow,
-                force);
-
-            if (!applied.ClearsAwaitingCsvRecon)
-                return null;
-
-            var effects = PlcCsvReconReviewEscalation.ComputeEffects(
-                plcTotal,
-                slitSum,
-                applied.ClearsAwaitingCsvRecon,
-                Opt.PlcCsvDiscrepancyReviewThresholdPercent);
-
-            const string updateSql = @"
-UPDATE dbo.NDT_Bundle
-SET Awaiting_Csv_Recon = 0,
-    Count_Discrepancy = @Discrepancy,
-    Manual_Review = CASE WHEN @ManualReview = 1 THEN 1 ELSE Manual_Review END
-WHERE Bundle_No = @BundleNo;";
-            await using var upd = new Microsoft.Data.SqlClient.SqlCommand(updateSql, conn);
-            upd.Parameters.AddWithValue("@BundleNo", bundleNoTrimmed);
-            upd.Parameters.AddWithValue("@Discrepancy", effects.CountDiscrepancy ? 1 : 0);
-            upd.Parameters.AddWithValue("@ManualReview", effects.ManualReviewEscalated ? 1 : 0);
-            await upd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-
-            if (effects.ManualReviewEscalated)
-            {
-                _logger.LogWarning(
-                    "PLC vs CSV discrepancy exceeds review threshold for bundle {BundleNo}: plcTotal={PlcTotal} slitSum={SlitSum} thresholdPercent={ThresholdPercent}. Manual_Review set (total unchanged).",
-                    bundleNoTrimmed,
-                    plcTotal,
-                    slitSum,
-                    Opt.PlcCsvDiscrepancyReviewThresholdPercent);
-            }
-            else if (effects.CountDiscrepancy)
-            {
-                _logger.LogWarning(
-                    "PLC vs CSV count discrepancy for bundle {BundleNo}: plc={PlcTotal} slitSum={SlitSum}.",
-                    bundleNoTrimmed,
-                    plcTotal,
-                    slitSum);
-            }
-            else
-            {
-                _logger.LogInformation(
-                    "PLC closed bundle {BundleNo} reconciled with slit sum {SlitSum}.",
-                    bundleNoTrimmed,
-                    slitSum);
-            }
-
-            return new PlcCsvReconResult
-            {
-                BundleNo = applied.BundleNo,
-                PlcTotal = applied.PlcTotal,
-                SlitSum = applied.SlitSum,
-                ManualReviewEscalated = effects.ManualReviewEscalated
-            };
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(
-                ex,
-                "PLC CSV recon finalize failed for bundle {BundleNo} (run docs/NDT_Bundle_Alter_CloseSource.sql if columns are missing).",
-                bundleNoTrimmed);
-            return null;
-        }
-    }
-
-    public async Task<IReadOnlyList<PlcCsvReconResult>> TryFinalizeReadyPlcReconBundlesAsync(
+    public Task<IReadOnlyList<PlcCsvReconResult>> TryFinalizeReadyPlcReconBundlesAsync(
         string poNumber,
         int millNo,
         int reconWindowMinutes,
         DateTime utcNow,
-        CancellationToken cancellationToken)
-    {
-        var awaiting = await ListAwaitingPlcReconBatchesAsync(poNumber, millNo, cancellationToken)
-            .ConfigureAwait(false);
-        if (awaiting.Count == 0)
-            return Array.Empty<PlcCsvReconResult>();
+        CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<PlcCsvReconResult>>(Array.Empty<PlcCsvReconResult>());
 
-        var finalized = new List<PlcCsvReconResult>();
-        foreach (var bundle in awaiting)
-        {
-            if (!PlcCsvReconFifo.ShouldFinalize(
-                    bundle.PlcTotal,
-                    bundle.CurrentSlitSum,
-                    bundle.PrintedAtUtc,
-                    reconWindowMinutes,
-                    utcNow))
-            {
-                continue;
-            }
+    public Task<PlcCsvReconResult?> TryForceFinalizeAwaitingReconOnReopenAsync(
+        string poNumber,
+        int millNo,
+        CancellationToken cancellationToken) =>
+        Task.FromResult<PlcCsvReconResult?>(null);
 
-            var result = await TryFinalizePlcReconBundleAsync(
-                    bundle.BundleNo,
-                    bundle.CurrentSlitSum,
-                    reconWindowMinutes,
-                    utcNow,
-                    force: false,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            if (result is not null)
-                finalized.Add(result);
-        }
-
-        return finalized;
-    }
-
-    public async Task<PlcCsvReconResult?> TryReconcilePlcClosedBundleAsync(
+    public Task<PlcCsvReconResult?> TryReconcilePlcClosedBundleAsync(
         string poNumber,
         int millNo,
         int slitSum,
-        CancellationToken cancellationToken)
-    {
-        var oldest = await TryGetAwaitingPlcReconBatchAsync(poNumber, millNo, cancellationToken)
-            .ConfigureAwait(false);
-        if (oldest is null)
-            return null;
-
-        return await TryFinalizePlcReconBundleAsync(
-                oldest.Value.BundleNo,
-                slitSum,
-                reconWindowMinutes: 1,
-                DateTime.UtcNow,
-                force: true,
-                cancellationToken)
-            .ConfigureAwait(false);
-    }
-
-    public async Task<PlcCsvReconResult?> TryForceFinalizeAwaitingReconOnReopenAsync(
-        string poNumber,
-        int millNo,
-        CancellationToken cancellationToken)
-    {
-        var awaiting = await ListAwaitingPlcReconBatchesAsync(poNumber, millNo, cancellationToken)
-            .ConfigureAwait(false);
-        if (awaiting.Count == 0)
-            return null;
-
-        PlcCsvReconResult? last = null;
-        foreach (var bundle in awaiting)
-        {
-            var result = await TryFinalizePlcReconBundleAsync(
-                    bundle.BundleNo,
-                    bundle.CurrentSlitSum,
-                    reconWindowMinutes: 1,
-                    DateTime.UtcNow,
-                    force: true,
-                    cancellationToken)
-                .ConfigureAwait(false);
-
-            if (result is null)
-                continue;
-
-            last = result;
-            if (result.CountDiscrepancy)
-            {
-                _logger.LogWarning(
-                    "PO reopen force-finalized awaiting recon for bundle {BundleNo}: plc={PlcTotal} slitSum={SlitSum} (rows received so far).",
-                    result.BundleNo,
-                    result.PlcTotal,
-                    result.SlitSum);
-            }
-            else
-            {
-                _logger.LogInformation(
-                    "PO reopen force-finalized awaiting recon for bundle {BundleNo} with slit sum {SlitSum}.",
-                    result.BundleNo,
-                    result.SlitSum);
-            }
-        }
-
-        return last;
-    }
+        CancellationToken cancellationToken) =>
+        Task.FromResult<PlcCsvReconResult?>(null);
 
     public async Task<bool> IsManualReconLockedAsync(string batchNo, CancellationToken cancellationToken)
     {
@@ -1226,8 +953,9 @@ ORDER BY PrintedAt DESC;";
             bool awaitingCsvRecon;
             string? closeSource;
             int? existingOriginalTotal;
+            int csvFilled;
             await using (var find = new Microsoft.Data.SqlClient.SqlCommand(@"
-SELECT Total_NDT_Pcs, Awaiting_Csv_Recon, Close_Source, Manual_Recon_Original_Total
+SELECT Total_NDT_Pcs, Awaiting_Csv_Recon, Close_Source, Manual_Recon_Original_Total, COALESCE(Csv_Filled, 0)
 FROM dbo.NDT_Bundle
 WHERE Bundle_No = @BundleNo;", conn, (Microsoft.Data.SqlClient.SqlTransaction)tx))
             {
@@ -1243,6 +971,7 @@ WHERE Bundle_No = @BundleNo;", conn, (Microsoft.Data.SqlClient.SqlTransaction)tx
                 awaitingCsvRecon = !reader.IsDBNull(1) && reader.GetBoolean(1);
                 closeSource = reader.IsDBNull(2) ? null : reader.GetString(2);
                 existingOriginalTotal = reader.IsDBNull(3) ? null : reader.GetInt32(3);
+                csvFilled = reader.IsDBNull(4) ? 0 : reader.GetInt32(4);
             }
 
             var originalTotal = existingOriginalTotal ?? plcTotal;
@@ -1252,16 +981,29 @@ WHERE Bundle_No = @BundleNo;", conn, (Microsoft.Data.SqlClient.SqlTransaction)tx
                 plcTotal,
                 slitSum);
 
+            // Operator corrected total is BOTH printed tag total AND Target_Ndt_Pcs (fill continues / discrepancy flags).
             const string updateSql = @"
 UPDATE dbo.NDT_Bundle
-SET Awaiting_Csv_Recon = CASE WHEN @ForceFinalized = 1 THEN 0 ELSE Awaiting_Csv_Recon END,
-    Count_Discrepancy = CASE WHEN @ForceFinalized = 1 THEN @Discrepancy ELSE Count_Discrepancy END,
+SET Awaiting_Csv_Recon = 0,
+    Count_Discrepancy = CASE
+        WHEN Csv_Filled > @CorrectedTotal THEN 1
+        WHEN @ForceFinalized = 1 THEN @Discrepancy
+        ELSE Count_Discrepancy
+    END,
+    Manual_Review = CASE WHEN Csv_Filled > @CorrectedTotal THEN 1 ELSE Manual_Review END,
     Manual_Recon = 1,
     Manual_Recon_By = @By,
     Manual_Recon_At = @At,
     Manual_Recon_Reason = @Reason,
     Manual_Recon_Original_Total = COALESCE(Manual_Recon_Original_Total, @OriginalTotal),
-    Total_NDT_Pcs = @CorrectedTotal
+    Total_NDT_Pcs = @CorrectedTotal,
+    Target_Ndt_Pcs = @CorrectedTotal,
+    Csv_Fill_State = CASE
+        WHEN Csv_Filled > @CorrectedTotal THEN N'CsvOvershoot'
+        WHEN Csv_Filled = @CorrectedTotal THEN N'CsvComplete'
+        WHEN Csv_Filled > 0 THEN N'CsvFilling'
+        ELSE N'PlcClosed'
+    END
 WHERE Bundle_No = @BundleNo;";
             await using (var upd = new Microsoft.Data.SqlClient.SqlCommand(updateSql, conn, (Microsoft.Data.SqlClient.SqlTransaction)tx))
             {
@@ -1317,7 +1059,8 @@ WHERE Bundle_No = @BundleNo;";
                 CorrectedTotal = correctedTotal,
                 ForceFinalized = finalize.ForceFinalized,
                 CountDiscrepancyLogged = finalize.ForceFinalized && finalize.CountDiscrepancy,
-                SlitSumAtFinalize = slitSum
+                SlitSumAtFinalize = slitSum,
+                CsvFilledAtReconcile = csvFilled
             };
         }
         catch (Exception ex)

@@ -1,4 +1,4 @@
-using System.Reflection;
+﻿using System.Reflection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
@@ -337,9 +337,8 @@ public sealed class WipBundlePoEndExclusionTests
         public void ClearOpenAccumulation(string poNumber, int millNo) { }
         public DateTime GetLastActivityUtc(string poNumber, int millNo) => DateTime.UtcNow;
         public Task SyncBatchSequencesFromBundlesAsync(CancellationToken cancellationToken) => Task.CompletedTask;
-        public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int batchNumberForRow, out int totalSoFar)
+        public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int totalSoFar)
         {
-            batchNumberForRow = 1;
             totalSoFar = ndtPipes;
         }
         public BundleCloseAllocation CloseBundle(string poNumber, int millNo, int closedTotalPcs, int threshold) =>

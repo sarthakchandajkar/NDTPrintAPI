@@ -6,30 +6,24 @@ namespace NdtBundleService.Services;
 public sealed record ClosedPoTraceabilityRoute(string? BatchNoFormatted, bool RequiresManualReview);
 
 /// <summary>
-/// Attaches Closed-PO late slit rows to an existing bundle (FIFO recon, SQL lookup) without opening a new sequence.
+/// Attaches Closed-PO late slit rows to an incomplete fill-to-target bundle without opening a new sequence.
+/// Soft "best existing printed bundle" attach is retired — if no incomplete target exists, Manual_Review.
 /// </summary>
 public static class ClosedPoTraceabilityBatchResolver
 {
     public static async Task<ClosedPoTraceabilityRoute> ResolveAsync(
-        INdtBundleRepository bundleRepository,
-        IList<PlcCsvReconAwaitingBundle> awaitingList,
+        ICsvFillService csvFill,
         InputSlitRecord record,
         int millNo,
         string? pipeSize,
         CancellationToken cancellationToken)
     {
-        if (awaitingList.Count > 0
-            && PlcCsvReconFifo.TryAttachRow(awaitingList, record, out var attachedBatchNo))
-        {
-            return new ClosedPoTraceabilityRoute(attachedBatchNo, RequiresManualReview: false);
-        }
-
-        var existing = await bundleRepository
-            .TryFindTraceabilityBundleForPoMillAsync(record.PoNumber, millNo, pipeSize, cancellationToken)
+        var incomplete = await csvFill
+            .TryGetOldestIncompleteAsync(record.PoNumber, millNo, pipeSize, cancellationToken)
             .ConfigureAwait(false);
 
-        if (!string.IsNullOrWhiteSpace(existing))
-            return new ClosedPoTraceabilityRoute(existing, RequiresManualReview: false);
+        if (incomplete is not null)
+            return new ClosedPoTraceabilityRoute(incomplete.BundleNo, RequiresManualReview: false);
 
         return new ClosedPoTraceabilityRoute(null, RequiresManualReview: true);
     }

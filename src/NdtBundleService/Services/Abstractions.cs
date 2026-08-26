@@ -94,43 +94,31 @@ public interface INdtBundleRepository
     Task<int> MarkManualReviewAsync(string poNumber, int millNo, CancellationToken cancellationToken);
 
     /// <summary>
-    /// After a PLC-driven close/print, stamp <c>Close_Source='Plc'</c> and <c>Awaiting_Csv_Recon=1</c>
-    /// on the formatted bundle number. No-op when SQL disabled or columns missing.
+    /// After a PLC-driven close/print, stamp <c>Close_Source='Plc'</c> and ensure fill-to-target
+    /// columns are initialized. Never sets <c>Awaiting_Csv_Recon=1</c>.
     /// </summary>
     Task TrySetPlcCloseMetadataAsync(int engineBatchSequence, int millNo, CancellationToken cancellationToken);
 
-    /// <summary>
-    /// When a PLC-closed bundle is awaiting CSV recon for this PO/mill, returns its formatted number,
-    /// engine sequence (last 5 digits), and PLC total for the oldest awaiting bundle. Null when none.
-    /// </summary>
+    /// <summary>Legacy FIFO API ? always null after fill-to-target cutover.</summary>
     Task<(string BundleNo, int EngineSequence, int PlcTotal)?> TryGetAwaitingPlcReconBatchAsync(
         string poNumber,
         int millNo,
         CancellationToken cancellationToken);
 
-    /// <summary>
-    /// All PLC-closed bundles awaiting CSV recon for this PO/mill, oldest first, with current slit sums.
-    /// </summary>
+    /// <summary>Legacy FIFO API ? always empty after fill-to-target cutover.</summary>
     Task<IReadOnlyList<PlcCsvReconAwaitingBundle>> ListAwaitingPlcReconBatchesAsync(
         string poNumber,
         int millNo,
         CancellationToken cancellationToken);
 
-    /// <summary>
-    /// When a slit CSV sum is known for a PLC-closed bundle awaiting recon, clear awaiting flag and
-    /// set <c>Count_Discrepancy</c> when sums differ. Returns the recon result when a row was found.
-    /// Delegates to <see cref="TryFinalizePlcReconBundleAsync"/> (force finalize).
-    /// </summary>
+    /// <summary>Legacy FIFO API ? always null after fill-to-target cutover.</summary>
     Task<PlcCsvReconResult?> TryReconcilePlcClosedBundleAsync(
         string poNumber,
         int millNo,
         int slitSum,
         CancellationToken cancellationToken);
 
-    /// <summary>
-    /// Finalizes recon for one bundle when slit sum meets PLC count or the recon window expired.
-    /// Discrepancy WRN is emitted only when this clears <c>Awaiting_Csv_Recon</c>.
-    /// </summary>
+    /// <summary>Legacy FIFO API ? always null after fill-to-target cutover.</summary>
     Task<PlcCsvReconResult?> TryFinalizePlcReconBundleAsync(
         string bundleNo,
         int slitSum,
@@ -139,9 +127,7 @@ public interface INdtBundleRepository
         bool force,
         CancellationToken cancellationToken);
 
-    /// <summary>
-    /// Finalizes all awaiting recon bundles for this PO/mill that are ready (count met or window expired).
-    /// </summary>
+    /// <summary>Legacy FIFO API ? always empty after fill-to-target cutover.</summary>
     Task<IReadOnlyList<PlcCsvReconResult>> TryFinalizeReadyPlcReconBundlesAsync(
         string poNumber,
         int millNo,
@@ -149,10 +135,7 @@ public interface INdtBundleRepository
         DateTime utcNow,
         CancellationToken cancellationToken);
 
-    /// <summary>
-    /// On PO reopen: force-finalize any awaiting recon for this PO/mill using slit rows received so far.
-    /// Clears <c>Awaiting_Csv_Recon</c>; logs WRN when PLC vs slit totals differ.
-    /// </summary>
+    /// <summary>Legacy FIFO API ? always null after fill-to-target cutover.</summary>
     Task<PlcCsvReconResult?> TryForceFinalizeAwaitingReconOnReopenAsync(
         string poNumber,
         int millNo,
@@ -173,8 +156,8 @@ public interface INdtBundleRepository
 
     /// <summary>
     /// Distinct (normalized slit key, source file basename) pairs from <c>Output_Slit_Row</c> for the
-    /// batch. Slit keys use the same normalization as <see cref="GetSlitsForBatchAsync"/> (empty → "—").
-    /// Empty when SQL is disabled — SAP status enrichment is SQL-only.
+    /// batch. Slit keys use the same normalization as <see cref="GetSlitsForBatchAsync"/> (empty ? "?").
+    /// Empty when SQL is disabled ? SAP status enrichment is SQL-only.
     /// </summary>
     Task<IReadOnlyList<(string SlitNo, string SourceFileName)>> GetSlitSourceFileNamesForBatchAsync(
         string batchNo,
@@ -211,7 +194,7 @@ public interface INdtBundleRepository
 
     /// <summary>
     /// Bundle numbers whose <c>Output_Slit_Row</c> rows span multiple POs or a PO different from the
-    /// bundle row — indicates provisional-stamp collision contamination; operators should verify
+    /// bundle row ? indicates provisional-stamp collision contamination; operators should verify
     /// before reconciling such bundles.
     /// </summary>
     Task<IReadOnlyList<string>> GetBatchesWithPoMismatchedSlitRowsAsync(CancellationToken cancellationToken) =>
@@ -227,6 +210,12 @@ public sealed class ManualBundleReconcileResult
     public bool ForceFinalized { get; init; }
     public bool CountDiscrepancyLogged { get; init; }
     public int SlitSumAtFinalize { get; init; }
+
+    /// <summary><c>Csv_Filled</c> at reconcile time (before/after unchanged by target revision).</summary>
+    public int CsvFilledAtReconcile { get; init; }
+
+    /// <summary>True when mid-fill corrected target is below already-stamped CSV count (plan case c).</summary>
+    public bool FillOvershootVsCorrectedTarget => CsvFilledAtReconcile > CorrectedTotal;
 }
 
 /// <summary>Result of reconciling a late Input Slit sum against a PLC-closed bundle.</summary>
@@ -389,7 +378,7 @@ public interface IBundleEngine
 public interface IPlcClient
 {
     /// <summary>
-    /// Current PO-end signal level per mill (1–4). Mills without a configured endpoint read as false.
+    /// Current PO-end signal level per mill (1?4). Mills without a configured endpoint read as false.
     /// </summary>
     Task<IReadOnlyDictionary<int, bool>> GetPoEndSignalsByMillAsync(CancellationToken cancellationToken);
 
@@ -435,7 +424,7 @@ public interface IPoEndWorkflowService
         CancellationToken cancellationToken,
         Guid? correlationId = null);
 
-    /// <param name="plcNdtCountFinal">DB251 NDT at M40.6 edge — fallback when sizeCounts/MW56 are empty.</param>
+    /// <param name="plcNdtCountFinal">DB251 NDT at M40.6 edge ? fallback when sizeCounts/MW56 are empty.</param>
     Task<PoEndWorkflowResult> ExecuteAsync(
         string poNumber,
         int millNo,
@@ -456,7 +445,7 @@ public interface IActivePoPerMillService
 }
 
 /// <summary>
-/// Running PO for a mill from the latest <c>WIP_MM_…</c> file in the TM Bundle folder.
+/// Running PO for a mill from the latest <c>WIP_MM_?</c> file in the TM Bundle folder.
 /// After PO end, waits for a newer WIP file for that mill before returning the next PO.
 /// </summary>
 public interface IWipBundleRunningPoProvider
@@ -469,11 +458,11 @@ public interface IWipBundleRunningPoProvider
     /// <summary>True when PO end completed but no qualifying new WIP bundle file has arrived yet for this mill.</summary>
     bool IsWaitingForNewWipAfterPoEnd(int millNo);
 
-    /// <summary>Post–PO-end wait context for slit-file adoption and orphan guards.</summary>
+    /// <summary>Post?PO-end wait context for slit-file adoption and orphan guards.</summary>
     bool TryGetPoEndWaitContext(int millNo, out bool waitingForNewWip, out string? endedPo);
 
     /// <summary>
-    /// Clears post–PO-end WIP wait for a mill and re-seeds running PO from the latest WIP bundle file.
+    /// Clears post?PO-end WIP wait for a mill and re-seeds running PO from the latest WIP bundle file.
     /// Use when PO end was triggered in error (e.g. stale PLC latch at service startup).
     /// </summary>
     /// <returns>True when the mill was waiting and has been resumed.</returns>
@@ -508,15 +497,14 @@ public interface IMillSlitLiveNdtAccumulator
 }
 
 /// <summary>
-/// Shared state for NDT batch number and running total per (PO, Mill).
-/// Batch increments when count reaches formation chart threshold or on PO End.
+/// Running NDT total per (PO, Mill) for file-close bookkeeping. Does not allocate batch numbers ?
+/// close + fill-to-target own numbering.
 /// </summary>
 public interface INdtBatchStateService
 {
     /// <summary>
-    /// Updates running total for (poNumber, millNo) by ndtPipes and returns the batch number for this record,
-    /// the new total so far, and the threshold used (from formation chart by pipe size).
-    /// When <paramref name="ndtPipes"/> is 0, running total is unchanged and the current batch number (offset + 1) is still returned for output CSV rows.
+    /// Updates running total for (poNumber, millNo) by ndtPipes. Returns batch number 0 (unused under
+    /// fill-to-target), the new total so far, and the formation-chart threshold.
     /// </summary>
     Task<(int BatchNumber, int TotalSoFar, int Threshold)> GetBatchForRecordAsync(
         string poNumber,

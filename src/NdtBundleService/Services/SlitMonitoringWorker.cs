@@ -22,8 +22,9 @@ public sealed class SlitMonitoringWorker : BackgroundService
     private readonly IOptionsMonitor<NdtBundleOptions> _optionsMonitor;
     private readonly IBundleEngine _bundleEngine;
     private readonly IBundleOutputWriter _outputWriter;
-    private readonly INdtBatchStateService _batchState;
     private readonly INdtBundleRuntimeStateStore _runtimeState;
+    private readonly ICsvFillService _csvFill;
+    private readonly SlitCsvFillAssigner _fillAssigner;
     private readonly PlcPoEndPollHandler _plcPoEndPollHandler;
     private readonly ITraceabilityRepository _traceability;
     private readonly IOutputSlitSapStatusRepository _sapStatus;
@@ -55,8 +56,9 @@ public sealed class SlitMonitoringWorker : BackgroundService
         IOptionsMonitor<NdtBundleOptions> optionsMonitor,
         IBundleEngine bundleEngine,
         IBundleOutputWriter outputWriter,
-        INdtBatchStateService batchState,
         INdtBundleRuntimeStateStore runtimeState,
+        ICsvFillService csvFill,
+        SlitCsvFillAssigner fillAssigner,
         PlcPoEndPollHandler plcPoEndPollHandler,
         ITraceabilityRepository traceability,
         IOutputSlitSapStatusRepository sapStatus,
@@ -75,8 +77,9 @@ public sealed class SlitMonitoringWorker : BackgroundService
         _optionsMonitor = optionsMonitor;
         _bundleEngine = bundleEngine;
         _outputWriter = outputWriter;
-        _batchState = batchState;
         _runtimeState = runtimeState;
+        _csvFill = csvFill;
+        _fillAssigner = fillAssigner;
         _plcPoEndPollHandler = plcPoEndPollHandler;
         _traceability = traceability;
         _sapStatus = sapStatus;
@@ -491,11 +494,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 var sourceRowNumber = 2; // CSV header is row 1
                 var anyRowBundled = false;
                 var anyEligibleMillRow = false;
-                var pendingOrphanClose = new HashSet<(string Po, int Mill)>();
-                var fifoSessions = new Dictionary<(string Po, int Mill), List<PlcCsvReconAwaitingBundle>>();
-                var reconTouchedPoMills = new HashSet<(string Po, int Mill)>();
                 var manualReviewFlagged = new HashSet<(string Po, int Mill)>();
-                var openPlcCsvSlitSumByPoMill = new Dictionary<(string Po, int Mill), int>();
                 foreach (var row in rows)
                 {
                     if (row.Record is null)
@@ -641,7 +640,6 @@ public sealed class SlitMonitoringWorker : BackgroundService
                             if (!string.IsNullOrWhiteSpace(existingBatch))
                             {
                                 closedPoBatchNo = existingBatch;
-                                reconTouchedPoMills.Add(poMillKey);
                                 _logger.LogInformation(
                                     "Closed PO traceability: PO {PO} Mill {Mill} file {File} keeps existing bundle {Batch} (already recorded; no re-route).",
                                     poMillKey.Item1,
@@ -651,37 +649,41 @@ public sealed class SlitMonitoringWorker : BackgroundService
                             }
                             else
                             {
-                                if (!fifoSessions.TryGetValue(poMillKey, out var awaitingList))
-                                {
-                                    var loaded = await _bundleRepository
-                                        .ListAwaitingPlcReconBatchesAsync(
-                                            bundleRecord.PoNumber,
-                                            bundleRecord.MillNo,
-                                            cancellationToken)
-                                        .ConfigureAwait(false);
-                                    awaitingList = loaded.Count > 0
-                                        ? loaded.Select(static b => b).ToList()
-                                        : [];
-                                    fifoSessions[poMillKey] = awaitingList;
-                                }
-
                                 var route = await ClosedPoTraceabilityBatchResolver
                                     .ResolveAsync(
-                                        _bundleRepository,
-                                        awaitingList,
+                                        _csvFill,
                                         bundleRecord,
                                         bundleRecord.MillNo,
                                         closedPoPipeSize,
                                         cancellationToken)
                                     .ConfigureAwait(false);
 
-                                closedPoBatchNo = route.BatchNoFormatted;
-                                if (route.RequiresManualReview)
+                                if (!string.IsNullOrWhiteSpace(route.BatchNoFormatted) && !route.RequiresManualReview)
+                                {
+                                    var stamped = await _fillAssigner
+                                        .AssignAsync(
+                                            fileFull,
+                                            bundleRecord.PoNumber,
+                                            bundleRecord.MillNo,
+                                            closedPoPipeSize,
+                                            Math.Max(0, bundleRecord.NdtPipes),
+                                            holdWhenNoOpenBundle: false,
+                                            cancellationToken)
+                                        .ConfigureAwait(false);
+                                    closedPoBatchNo = stamped.BatchNo ?? route.BatchNoFormatted;
+                                    _logger.LogInformation(
+                                        "Closed PO fill-to-target: PO {PO} Mill {Mill} file {File} stamped to bundle {Batch}.",
+                                        poMillKey.Item1,
+                                        poMillKey.Item2,
+                                        Path.GetFileName(fileFull),
+                                        closedPoBatchNo);
+                                }
+                                else if (route.RequiresManualReview)
                                 {
                                     if (manualReviewFlagged.Add(poMillKey))
                                     {
                                         _logger.LogWarning(
-                                            "Closed PO traceability: no existing bundle for PO {PO} Mill {Mill} file {File}; Manual_Review (no new sequence).",
+                                            "Closed PO traceability: no incomplete fill target for PO {PO} Mill {Mill} file {File}; Manual_Review (no new sequence).",
                                             poMillKey.Item1,
                                             poMillKey.Item2,
                                             Path.GetFileName(fileFull));
@@ -689,16 +691,17 @@ public sealed class SlitMonitoringWorker : BackgroundService
                                             .MarkManualReviewAsync(poMillKey.Item1, poMillKey.Item2, cancellationToken)
                                             .ConfigureAwait(false);
                                     }
-                                }
-                                else if (!string.IsNullOrWhiteSpace(closedPoBatchNo))
-                                {
-                                    reconTouchedPoMills.Add(poMillKey);
-                                    _logger.LogInformation(
-                                        "Closed PO traceability: PO {PO} Mill {Mill} file {File} attached to bundle {Batch}.",
-                                        poMillKey.Item1,
-                                        poMillKey.Item2,
-                                        Path.GetFileName(fileFull),
-                                        closedPoBatchNo);
+
+                                    await _fillAssigner
+                                        .AssignAsync(
+                                            fileFull,
+                                            bundleRecord.PoNumber,
+                                            bundleRecord.MillNo,
+                                            closedPoPipeSize,
+                                            Math.Max(0, bundleRecord.NdtPipes),
+                                            holdWhenNoOpenBundle: true,
+                                            cancellationToken)
+                                        .ConfigureAwait(false);
                                 }
                             }
                         }
@@ -749,181 +752,148 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     }
                     else
                     {
-                        var bundleLock = await _millBundleStateLock
-                            .AcquireAsync(bundleRecord.MillNo, cancellationToken)
-                            .ConfigureAwait(false);
-                        try
+                        var millBatchMode = MillCsvBatchModeResolver.Resolve(o, bundleRecord.MillNo);
+                        if (millBatchMode.IsConstant)
                         {
-                            var poMillKey = (
-                                InputSlitCsvParsing.NormalizePo(bundleRecord.PoNumber),
-                                bundleRecord.MillNo);
-                            ndtBatchNoFormatted = string.Empty;
-                            List<PlcCsvReconAwaitingBundle>? awaitingList = null;
-
-                            // Sticky attach (all paths): re-processed files and SAP-Accepted slits keep
-                            // the bundle already recorded in Output_Slit_Row — never the current
-                            // provisional / newest printed bundle (2603491_03 incident).
-                            var stickyBatch = await _traceability
-                                .TryGetExistingOutputSlitBatchAsync(
-                                    fileFull,
-                                    bundleRecord.PoNumber,
-                                    bundleRecord.MillNo,
-                                    cancellationToken)
+                            ndtBatchNoFormatted = millBatchMode.Value ?? "10001";
+                        }
+                        else
+                        {
+                            var bundleLock = await _millBundleStateLock
+                                .AcquireAsync(bundleRecord.MillNo, cancellationToken)
                                 .ConfigureAwait(false);
-                            if (!string.IsNullOrWhiteSpace(stickyBatch))
+                            try
                             {
-                                ndtBatchNoFormatted = stickyBatch;
-                                reconTouchedPoMills.Add(poMillKey);
-                                _logger.LogInformation(
-                                    "Slit file {File} PO {PO} Mill {Mill} keeps existing bundle {Batch} (sticky attach).",
-                                    Path.GetFileName(fileFull),
-                                    poMillKey.Item1,
-                                    poMillKey.Item2,
-                                    stickyBatch);
-                            }
-                            else if (fileSapIngestGate == OutputSlitIngestGate.Accepted)
-                            {
-                                _logger.LogWarning(
-                                    "SAP-Accepted gate: {File} has no Output_Slit_Row batch — skipping batch assignment "
-                                    + "(corrections must go through PPC).",
-                                    outputFileBaseName);
+                                var poMillKey = (
+                                    InputSlitCsvParsing.NormalizePo(bundleRecord.PoNumber),
+                                    bundleRecord.MillNo);
                                 ndtBatchNoFormatted = string.Empty;
-                            }
-                            else if (!fifoSessions.TryGetValue(poMillKey, out awaitingList))
-                            {
-                                var loaded = await _bundleRepository
-                                    .ListAwaitingPlcReconBatchesAsync(
+
+                                var stickyBatch = await _traceability
+                                    .TryGetExistingOutputSlitBatchAsync(
+                                        fileFull,
                                         bundleRecord.PoNumber,
                                         bundleRecord.MillNo,
                                         cancellationToken)
                                     .ConfigureAwait(false);
-                                awaitingList = loaded.Count > 0
-                                    ? loaded.Select(static b => b).ToList()
-                                    : [];
-                                fifoSessions[poMillKey] = awaitingList;
-                            }
-
-                            awaitingList ??= fifoSessions.GetValueOrDefault(poMillKey);
-
-                            if (string.IsNullOrWhiteSpace(ndtBatchNoFormatted)
-                                && awaitingList is not null
-                                && awaitingList.Count > 0
-                                && PlcCsvReconFifo.TryAttachRow(
-                                    awaitingList,
-                                    bundleRecord,
-                                    out var attachedBatchNo))
-                            {
-                                // F-2 FIFO: attach late CSV rows to the oldest unfilled PLC-closed bundle.
-                                ndtBatchNoFormatted = attachedBatchNo;
-                                reconTouchedPoMills.Add(poMillKey);
-                            }
-                            else if (string.IsNullOrWhiteSpace(ndtBatchNoFormatted))
-                            {
-                                var trigger = BundleCloseTriggerParser.Parse(o.CloseTrigger);
-                                var plcHealthy = _s7Registry.TryGet(bundleRecord.MillNo)?.IsHealthy == true;
-                                var plcTraceabilityOnly = PlcOpenCsvIngestPolicy.ShouldIngestTraceabilityOnly(
-                                    trigger,
-                                    plcHealthy);
-
-                                if (plcTraceabilityOnly)
+                                if (!string.IsNullOrWhiteSpace(stickyBatch))
                                 {
-                                    // Open bundle: PLC leads (sizeCounts/MW56); CSV records traceability only.
-                                    var peekBatch = await _batchState
-                                        .GetBatchForRecordAsync(
-                                            bundleRecord.PoNumber,
-                                            bundleRecord.MillNo,
-                                            ndtPipes: 0,
-                                            cancellationToken,
-                                            pipeSize)
-                                        .ConfigureAwait(false);
-                                    ndtBatchNoFormatted = peekBatch.BatchNumber > 0
-                                        ? FormatNdtBatchNo(peekBatch.BatchNumber, bundleRecord.MillNo)
-                                        : string.Empty;
-
-                                    if (bundleRecord.NdtPipes > 0)
-                                    {
-                                        openPlcCsvSlitSumByPoMill.TryGetValue(poMillKey, out var csvSum);
-                                        csvSum += bundleRecord.NdtPipes;
-                                        openPlcCsvSlitSumByPoMill[poMillKey] = csvSum;
-
-                                        var sizeKey = FormationChartLookup.NormalizePipeSizeKey(pipeSize);
-                                        if (string.IsNullOrEmpty(sizeKey))
-                                            sizeKey = "Default";
-                                        var plcRemainder = _runtimeState
-                                            .GetSizeCounts(bundleRecord.PoNumber, bundleRecord.MillNo)
-                                            .GetValueOrDefault(sizeKey);
-                                        PlcOpenCsvReconcile.LogDiscrepancyIfNeeded(
-                                            _logger,
-                                            bundleRecord.PoNumber,
-                                            bundleRecord.MillNo,
-                                            csvSum,
-                                            plcRemainder,
-                                            sizeKey);
-                                    }
+                                    ndtBatchNoFormatted = stickyBatch;
+                                    _logger.LogInformation(
+                                        "Slit file {File} PO {PO} Mill {Mill} keeps existing bundle {Batch} (sticky attach).",
+                                        Path.GetFileName(fileFull),
+                                        poMillKey.Item1,
+                                        poMillKey.Item2,
+                                        stickyBatch);
+                                }
+                                else if (fileSapIngestGate == OutputSlitIngestGate.Accepted)
+                                {
+                                    _logger.LogWarning(
+                                        "SAP-Accepted gate: {File} has no Output_Slit_Row batch — skipping batch assignment "
+                                        + "(corrections must go through PPC).",
+                                        outputFileBaseName);
+                                    ndtBatchNoFormatted = string.Empty;
                                 }
                                 else
                                 {
-                                var (bn, _, _) = await _batchState
-                                    .GetBatchForRecordAsync(
-                                        bundleRecord.PoNumber,
-                                        bundleRecord.MillNo,
-                                        bundleRecord.NdtPipes,
-                                        cancellationToken,
-                                        pipeSize)
-                                    .ConfigureAwait(false);
+                                    var trigger = BundleCloseTriggerParser.Parse(o.CloseTrigger);
+                                    var plcHealthy = _s7Registry.TryGet(bundleRecord.MillNo)?.IsHealthy == true;
+                                    var plcTraceabilityOnly = PlcOpenCsvIngestPolicy.ShouldIngestTraceabilityOnly(
+                                        trigger,
+                                        plcHealthy);
 
-                                int? closedPrintedBatch = null;
-                                if (bundleRecord.NdtPipes > 0)
-                                {
-                                    try
+                                    var assign = await _fillAssigner
+                                        .AssignAsync(
+                                            fileFull,
+                                            bundleRecord.PoNumber,
+                                            bundleRecord.MillNo,
+                                            pipeSize,
+                                            Math.Max(0, bundleRecord.NdtPipes),
+                                            holdWhenNoOpenBundle: plcTraceabilityOnly,
+                                            cancellationToken)
+                                        .ConfigureAwait(false);
+
+                                    if (!string.IsNullOrWhiteSpace(assign.BatchNo))
                                     {
-                                        await _bundleEngine.ProcessSlitRecordAsync(
-                                            bundleRecord,
-                                            async (contextRecord, batchNo, totalNdtPcs) =>
+                                        ndtBatchNoFormatted = assign.BatchNo;
+                                    }
+                                    else if (assign.Held)
+                                    {
+                                        ndtBatchNoFormatted = string.Empty;
+                                    }
+                                    else
+                                    {
+                                            int? closedPrintedBatch = null;
+                                            if (bundleRecord.NdtPipes > 0)
                                             {
-                                                if (totalNdtPcs <= 0)
-                                                    return;
-
-                                                closedPrintedBatch = batchNo;
                                                 try
                                                 {
-                                                    await _outputWriter.WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken).ConfigureAwait(false);
-                                                    _logger.LogInformation(
-                                                        "Bundle output completed for {BatchNo} ({Pcs} pcs).",
-                                                        FormatNdtBatchNo(batchNo, contextRecord.MillNo),
-                                                        totalNdtPcs);
+                                                    await _bundleEngine.ProcessSlitRecordAsync(
+                                                        bundleRecord,
+                                                        async (contextRecord, batchNo, totalNdtPcs) =>
+                                                        {
+                                                            if (totalNdtPcs <= 0)
+                                                                return;
+
+                                                            closedPrintedBatch = batchNo;
+                                                            try
+                                                            {
+                                                                await _outputWriter.WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken).ConfigureAwait(false);
+                                                                _logger.LogInformation(
+                                                                    "Bundle output completed for {BatchNo} ({Pcs} pcs).",
+                                                                    FormatNdtBatchNo(batchNo, contextRecord.MillNo),
+                                                                    totalNdtPcs);
+                                                            }
+                                                            catch (Exception ex)
+                                                            {
+                                                                _logger.LogError(ex, "Tag print failed for bundle {BatchNo}.", FormatNdtBatchNo(batchNo, contextRecord.MillNo));
+                                                            }
+                                                        },
+                                                        cancellationToken,
+                                                        pipeSize).ConfigureAwait(false);
                                                 }
                                                 catch (Exception ex)
                                                 {
-                                                    _logger.LogError(ex, "Tag print failed for bundle {BatchNo}.", FormatNdtBatchNo(batchNo, contextRecord.MillNo));
+                                                    _logger.LogError(ex, "Bundle engine failed for record in {File}.", fileFull);
                                                 }
-                                            },
-                                            cancellationToken,
-                                            pipeSize).ConfigureAwait(false);
+                                            }
 
-                                        if (backfillAction == BackfillBundlingAction.OrphanAutoClose)
-                                        {
-                                            pendingOrphanClose.Add((
-                                                InputSlitCsvParsing.NormalizePo(bundleRecord.PoNumber),
-                                                bundleRecord.MillNo));
-                                        }
+                                            if (closedPrintedBatch is int closedSeq && closedSeq > 0)
+                                            {
+                                                var closedFormatted = FormatNdtBatchNo(closedSeq, effectiveRecord.MillNo);
+                                                var afterClose = await _fillAssigner
+                                                    .AssignAsync(
+                                                        fileFull,
+                                                        bundleRecord.PoNumber,
+                                                        bundleRecord.MillNo,
+                                                        pipeSize,
+                                                        Math.Max(0, bundleRecord.NdtPipes),
+                                                        holdWhenNoOpenBundle: true,
+                                                        cancellationToken)
+                                                    .ConfigureAwait(false);
+                                                ndtBatchNoFormatted = afterClose.BatchNo ?? closedFormatted;
+                                            }
+                                            else
+                                            {
+                                                var held = await _fillAssigner
+                                                    .AssignAsync(
+                                                        fileFull,
+                                                        bundleRecord.PoNumber,
+                                                        bundleRecord.MillNo,
+                                                        pipeSize,
+                                                        Math.Max(0, bundleRecord.NdtPipes),
+                                                        holdWhenNoOpenBundle: true,
+                                                        cancellationToken)
+                                                    .ConfigureAwait(false);
+                                                ndtBatchNoFormatted = held.BatchNo ?? string.Empty;
+                                            }
                                     }
-                                    catch (Exception ex)
-                                    {
-                                        _logger.LogError(ex, "Bundle engine failed for record in {File}; output CSV was already written.", fileFull);
-                                    }
-                                }
-
-                                var batchForOutput = closedPrintedBatch ?? bn;
-                                ndtBatchNoFormatted = batchForOutput > 0
-                                    ? FormatNdtBatchNo(batchForOutput, effectiveRecord.MillNo)
-                                    : string.Empty;
                                 }
                             }
-                        }
-                        finally
-                        {
-                            bundleLock.Dispose();
+                            finally
+                            {
+                                bundleLock.Dispose();
+                            }
                         }
                     }
 
@@ -938,6 +908,14 @@ public sealed class SlitMonitoringWorker : BackgroundService
                         rawOut = InputSlitCsvParsing.ReplaceFieldAtIndex(rawOut, poColumnIndex, effectivePo);
                     }
 
+                    if (string.IsNullOrWhiteSpace(ndtBatchNoFormatted) && !omitBatch)
+                    {
+                        inputRowsForSql.Add((effectiveRecord, sourceRowNumber));
+                        anyEligibleMillRow = true;
+                        sourceRowNumber++;
+                        continue;
+                    }
+
                     outputLines.Add(rawOut.TrimEnd() + "," + ndtBatchNoFormatted);
                     inputRowsForSql.Add((effectiveRecord, sourceRowNumber));
                     outputRowsForSql.Add((bundleRecord, ndtBatchNoFormatted, sourceRowNumber));
@@ -945,53 +923,20 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     sourceRowNumber++;
                 }
 
-                // F-5.2 / F-4.4: Closed-PO backfill with AutoClose — flush orphans when guards allow.
-                foreach (var (po, mill) in pendingOrphanClose)
-                {
-                    var phase = _poLifecycle.GetPhase(mill, po);
-                    var millRunningPo = await _wipRunningPo.TryGetRunningPoForMillAsync(mill, cancellationToken).ConfigureAwait(false);
-                    await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
-                    var lastActivity = _runtimeState.GetLastActivityUtc(po, mill);
+                await _csvFill
+                    .AdvanceQuietShortAsync(
+                        poNumber: null,
+                        millNo: null,
+                        o.EffectiveCsvFillQuietMinutes,
+                        DateTime.UtcNow,
+                        forcePoEnd: false,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                await _csvFill
+                    .EscalateExpiredHoldsAsync(o.EffectiveCsvFillQuietMinutes, DateTime.UtcNow, cancellationToken)
+                    .ConfigureAwait(false);
 
-                    if (!OrphanSweepGuard.ShouldSweepClosedPo(
-                            mill,
-                            po,
-                            phase,
-                            millRunningPo,
-                            lastActivity,
-                            DateTime.UtcNow,
-                            o.OrphanQuiescenceMinutes))
-                        continue;
-
-                    var bundleLock = await _millBundleStateLock.AcquireAsync(mill, cancellationToken).ConfigureAwait(false);
-                    try
-                    {
-                        await _bundleEngine.HandlePoEndAsync(
-                            po,
-                            mill,
-                            async (contextRecord, batchNo, totalNdtPcs) =>
-                            {
-                                if (totalNdtPcs <= 0)
-                                    return;
-                                await _outputWriter
-                                    .WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken)
-                                    .ConfigureAwait(false);
-                                _logger.LogInformation(
-                                    "Backfill orphan auto-closed: PO {PO} Mill {Mill} Batch {Batch} NdtPcs {Pcs}.",
-                                    po,
-                                    mill,
-                                    FormatNdtBatchNo(batchNo, mill),
-                                    totalNdtPcs);
-                            },
-                            cancellationToken).ConfigureAwait(false);
-                        await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
-                    }
-                    finally
-                    {
-                        bundleLock.Dispose();
-                    }
-                }
-
+                // Write one output file under OutputBundleFolder using the same name as the input inbox file.
                 // Write one output file under OutputBundleFolder using the same name as the input inbox file.
                 var outputFolder = (o.OutputBundleFolder ?? string.Empty).Trim();
                 string? outputPath = null;
@@ -1132,49 +1077,6 @@ public sealed class SlitMonitoringWorker : BackgroundService
                                 syncEx,
                                 "Failed to sync NDT_Bundle total from slit sum for batch {BatchNo} after output slit import.",
                                 batchNo);
-                        }
-                    }
-
-                    var reconPoMills = reconTouchedPoMills.ToList();
-                    if (reconPoMills.Count == 0)
-                    {
-                        reconPoMills = outputRowsForSql
-                            .Select(r => (
-                                InputSlitCsvParsing.NormalizePo(r.Record.PoNumber),
-                                r.Record.MillNo))
-                            .Distinct()
-                            .ToList();
-                    }
-
-                    foreach (var (po, mill) in reconPoMills)
-                    {
-                        try
-                        {
-                            var finalized = await _bundleRepository
-                                .TryFinalizeReadyPlcReconBundlesAsync(
-                                    po,
-                                    mill,
-                                    o.ReconWindowMinutes,
-                                    DateTime.UtcNow,
-                                    cancellationToken)
-                                .ConfigureAwait(false);
-
-                            foreach (var recon in finalized)
-                            {
-                                if (recon.CountDiscrepancy && o.ReprintOnCountMismatch)
-                                {
-                                    await TryReprintOnPlcCsvMismatchAsync(recon, mill, cancellationToken)
-                                        .ConfigureAwait(false);
-                                }
-                            }
-                        }
-                        catch (Exception reconEx)
-                        {
-                            _logger.LogWarning(
-                                reconEx,
-                                "PLC CSV recon finalize failed for PO {PO} Mill {Mill} after slit import.",
-                                po,
-                                mill);
                         }
                     }
                 }
@@ -1330,59 +1232,6 @@ public sealed class SlitMonitoringWorker : BackgroundService
             pipeSize = fromMap;
 
         return (pipeType.Trim(), pipeSize.Trim());
-    }
-
-    private async Task TryReprintOnPlcCsvMismatchAsync(
-        PlcCsvReconResult recon,
-        int millNo,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            if (await _bundleRepository.IsManualReconLockedAsync(recon.BundleNo, cancellationToken).ConfigureAwait(false))
-            {
-                _logger.LogInformation(
-                    "ReprintOnCountMismatch skipped for manually reconciled bundle {BundleNo}.",
-                    recon.BundleNo);
-                return;
-            }
-
-            await _bundleRepository
-                .TrySyncBundleTotalFromSlitsAsync(recon.BundleNo, forceFromSlits: true, cancellationToken)
-                .ConfigureAwait(false);
-            var bundle = await _bundleRepository
-                .GetByBatchNoAsync(recon.BundleNo, cancellationToken)
-                .ConfigureAwait(false);
-            if (bundle is null || !TryParseEngineSequenceFromBundleNo(recon.BundleNo, out var seq))
-            {
-                _logger.LogWarning(
-                    "ReprintOnCountMismatch: could not load bundle {BundleNo} for corrected reprint.",
-                    recon.BundleNo);
-                return;
-            }
-
-            var pcs = bundle.TotalNdtPcs > 0 ? bundle.TotalNdtPcs : recon.SlitSum;
-            var context = new InputSlitRecord
-            {
-                PoNumber = bundle.PoNumber,
-                MillNo = millNo,
-                SlitNo = bundle.SlitNo,
-                NdtPipes = pcs
-            };
-            var printed = await _zplTagPrinter
-                .PrintBundleTagAsync(context, seq, pcs, isReprint: true, cancellationToken)
-                .ConfigureAwait(false);
-            _logger.LogWarning(
-                "ReprintOnCountMismatch: corrected reprint for {BundleNo} slitSum={SlitSum} plc={PlcTotal} sent={Sent}.",
-                recon.BundleNo,
-                recon.SlitSum,
-                recon.PlcTotal,
-                printed);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "ReprintOnCountMismatch failed for {BundleNo}.", recon.BundleNo);
-        }
     }
 
     private static bool TryParseEngineSequenceFromBundleNo(string bundleNo, out int sequence)

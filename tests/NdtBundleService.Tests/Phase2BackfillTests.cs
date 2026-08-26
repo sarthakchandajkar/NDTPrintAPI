@@ -256,6 +256,5 @@ public sealed class Phase2BackfillTests
 
         Assert.Equal(BackfillBundlingAction.ManualReview, action);
         Assert.NotEqual(BackfillBundlingAction.NormalBundle, action);
-        Assert.NotEqual(BackfillBundlingAction.OrphanAutoClose, action);
     }
 }

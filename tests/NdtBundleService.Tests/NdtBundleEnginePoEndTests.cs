@@ -16,7 +16,7 @@ public sealed class NdtBundleEnginePoEndTests
         var engine = TestEngineFactory.Create(formation, pipeSize, runtime);
 
         await runtime.EnsureInitializedAsync(CancellationToken.None);
-        runtime.ApplySlitContribution("PO-100", 1, ndtPipes: 12, threshold: 20, out _, out _);
+        runtime.ApplySlitContribution("PO-100", 1, ndtPipes: 12, threshold: 20, out _);
 
         var closed = new List<(int BatchNo, int Pcs)>();
         await engine.HandlePoEndAsync(
@@ -43,7 +43,7 @@ public sealed class NdtBundleEnginePoEndTests
         var engine = TestEngineFactory.Create(formation, pipeSize, runtime);
 
         await runtime.EnsureInitializedAsync(CancellationToken.None);
-        runtime.ApplySlitContribution("PO-100", 1, ndtPipes: 12, threshold: 20, out _, out _);
+        runtime.ApplySlitContribution("PO-100", 1, ndtPipes: 12, threshold: 20, out _);
 
         await engine.HandlePoEndAsync(
             "PO-100",
@@ -152,13 +152,12 @@ public sealed class NdtBundleEnginePoEndTests
 
         public Task SyncBatchSequencesFromBundlesAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
-        public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int batchNumberForRow, out int totalSoFar)
+        public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int totalSoFar)
         {
             var slot = Slot(poNumber, millNo);
             if (ndtPipes > 0)
                 slot.RunningTotal += ndtPipes;
             totalSoFar = slot.RunningTotal;
-            batchNumberForRow = slot.BatchOffset + 1;
             if (slot.RunningTotal >= threshold)
             {
                 slot.BatchOffset += 1;
@@ -170,12 +169,12 @@ public sealed class NdtBundleEnginePoEndTests
         {
             var slot = Slot(poNumber, millNo);
             if (closedTotalPcs <= 0)
-                return new BundleCloseAllocation(slot.EngineBatchNo, slot.EngineBatchNo + 1);
+                return new BundleCloseAllocation(slot.EngineBatchNo);
             var provisional = slot.EngineBatchNo + 1;
             slot.EngineBatchNo += 1;
             if (slot.BatchOffset < slot.EngineBatchNo)
                 slot.BatchOffset = slot.EngineBatchNo;
-            return new BundleCloseAllocation(slot.EngineBatchNo, provisional);
+            return new BundleCloseAllocation(slot.EngineBatchNo);
         }
 
         public void AdvanceOnPoEnd(string poNumber, int millNo, int threshold)

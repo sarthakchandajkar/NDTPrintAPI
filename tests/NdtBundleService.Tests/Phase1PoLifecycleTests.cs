@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging.Abstractions;
+﻿using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Models;
@@ -52,12 +52,12 @@ public sealed class Phase1PoLifecycleTests
         Assert.True(log2);
         Assert.Equal(1, step2);
 
-        // Advance to final cap step — logs once
+        // Advance to final cap step â€” logs once
         var (_, log3, step3) = tracker.Park(path, t0.AddSeconds(40), [5, 30, 120]);
         Assert.True(log3);
         Assert.Equal(2, step3);
 
-        // Same cap step again — no duplicate log
+        // Same cap step again â€” no duplicate log
         var (_, log3b, _) = tracker.Park(path, t0.AddSeconds(41), [5, 30, 120]);
         Assert.False(log3b);
 
@@ -147,7 +147,7 @@ public sealed class Phase1PoLifecycleTests
     [Fact]
     public async Task IncidentReplay_AfterDrain_late_rows_merge_into_one_tail_bundle()
     {
-        // E2/E5 replay: 8 pcs open at PO end + 6 late → one 14-pc tail after drain (threshold 20 so late file does not auto-close).
+        // E2/E5 replay: 8 pcs open at PO end + 6 late â†’ one 14-pc tail after drain (threshold 20 so late file does not auto-close).
         var opts = CreatePlcOptions(flushMode: "AfterDrain", drainMinutes: 1);
         var runtime = new InMemoryRuntimeStateStore();
         await runtime.EnsureInitializedAsync(CancellationToken.None);
@@ -170,7 +170,7 @@ public sealed class Phase1PoLifecycleTests
         var poEnd = await workflow.ExecuteAsync("1000060163", 1, false, CancellationToken.None);
         Assert.True(poEnd.FlushDeferred);
 
-        // F-3: late file 2510117_06 at ~20:36 while waiting for WIP — still bundles (no 85-min gate).
+        // F-3: late file 2510117_06 at ~20:36 while waiting for WIP â€” still bundles (no 85-min gate).
         Assert.False(SlitWipBundlingGate.ShouldSkipBundling(
             waitingForWip: true,
             runningPoFromWip: null,
@@ -183,7 +183,7 @@ public sealed class Phase1PoLifecycleTests
             (_, _, _) => Task.CompletedTask,
             CancellationToken.None);
         Assert.Equal(14, runtime.GetSizeCounts("1000060163", 1)["Default"]);
-        Assert.Empty(closed); // still below threshold — waiting for drain flush
+        Assert.Empty(closed); // still below threshold â€” waiting for drain flush
 
         // Force drain expiry
         Assert.True(lifecycle.TryMarkDraining(1, "1000060163", DateTime.UtcNow.AddMinutes(-2)));
@@ -317,6 +317,7 @@ public sealed class Phase1PoLifecycleTests
             lifecycle,
             new PipeSizeStub(),
             new NoOpPlcCloseRepo(),
+            NoOpCsvFillService.Instance,
             new PlcHandshakeStatusRegistry(),
             new TestOptionsMonitor<NdtBundleOptions>(opts),
             NullLogger<PoEndWorkflowService>.Instance);
@@ -563,13 +564,12 @@ public sealed class Phase1PoLifecycleTests
         public DateTime GetLastActivityUtc(string poNumber, int millNo) => DateTime.UtcNow;
         public Task SyncBatchSequencesFromBundlesAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
-        public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int batchNumberForRow, out int totalSoFar)
+        public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int totalSoFar)
         {
             var slot = Slot(poNumber, millNo);
             if (ndtPipes > 0)
                 slot.RunningTotal += ndtPipes;
             totalSoFar = slot.RunningTotal;
-            batchNumberForRow = slot.BatchOffset + 1;
             if (slot.RunningTotal >= threshold)
             {
                 slot.BatchOffset += 1;
@@ -581,12 +581,12 @@ public sealed class Phase1PoLifecycleTests
         {
             var slot = Slot(poNumber, millNo);
             if (closedTotalPcs <= 0)
-                return new BundleCloseAllocation(slot.EngineBatchNo, slot.EngineBatchNo + 1);
+                return new BundleCloseAllocation(slot.EngineBatchNo);
             var provisional = slot.EngineBatchNo + 1;
             slot.EngineBatchNo += 1;
             if (slot.BatchOffset < slot.EngineBatchNo)
                 slot.BatchOffset = slot.EngineBatchNo;
-            return new BundleCloseAllocation(slot.EngineBatchNo, provisional);
+            return new BundleCloseAllocation(slot.EngineBatchNo);
         }
 
         public void AdvanceOnPoEnd(string poNumber, int millNo, int threshold)

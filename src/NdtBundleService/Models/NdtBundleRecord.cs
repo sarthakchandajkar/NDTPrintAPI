@@ -23,9 +23,20 @@ public sealed class NdtBundleRecord
     /// <summary><c>File</c> or <c>Plc</c>; null when column absent / legacy rows.</summary>
     public string? CloseSource { get; init; }
 
+    /// <summary>Legacy column; unused after fill-to-target cutover (kept for quiet-drain SQL).</summary>
     public bool AwaitingCsvRecon { get; init; }
 
     public bool CountDiscrepancy { get; init; }
+
+    /// <summary>Closed/printed count that CSV fill must meet. Null on pre-migration rows.</summary>
+    public int? TargetNdtPcs { get; init; }
+
+    public int CsvFilled { get; init; }
+
+    /// <summary><see cref="CsvFillState"/> value.</summary>
+    public string CsvFillState { get; init; } = "PlcClosed";
+
+    public DateTime? CsvLastRowAtUtc { get; init; }
 
     public bool ManualRecon { get; init; }
 

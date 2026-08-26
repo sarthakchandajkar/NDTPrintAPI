@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging.Abstractions;
+﻿using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Models;
@@ -120,6 +120,7 @@ public sealed class PoEndImmediateRemainderTests
             new PoLifecycleService(new TestOptionsMonitor<NdtBundleOptions>(opts)),
             new PipeSizeStub(),
             new CapturingRepo(metadataBatches),
+            NoOpCsvFillService.Instance,
             new PlcHandshakeStatusRegistry(),
             new TestOptionsMonitor<NdtBundleOptions>(opts),
             NullLogger<PoEndWorkflowService>.Instance);
@@ -280,11 +281,10 @@ public sealed class PoEndImmediateRemainderTests
             _engine.TryGetValue(k, out var prev);
             var next = prev + 1;
             _engine[k] = next;
-            return new BundleCloseAllocation(next, 0);
+            return new BundleCloseAllocation(next);
         }
-        public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int batchNumberForRow, out int totalSoFar)
+        public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int totalSoFar)
         {
-            batchNumberForRow = 1;
             totalSoFar = ndtPipes;
         }
         public int GetEngineBatchNo(string poNumber, int millNo) =>

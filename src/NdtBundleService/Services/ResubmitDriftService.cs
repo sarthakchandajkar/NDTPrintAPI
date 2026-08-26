@@ -117,17 +117,20 @@ public sealed class ResubmitDriftService : IResubmitDriftService
     private readonly INdtBundleRepository _bundleRepository;
     private readonly IReconcileSyncService _reconcileSync;
     private readonly IOutputSlitSapStatusRepository _sapStatus;
+    private readonly ICsvFillService _csvFill;
     private readonly ILogger<ResubmitDriftService> _logger;
 
     public ResubmitDriftService(
         INdtBundleRepository bundleRepository,
         IReconcileSyncService reconcileSync,
         IOutputSlitSapStatusRepository sapStatus,
+        ICsvFillService csvFill,
         ILogger<ResubmitDriftService> logger)
     {
         _bundleRepository = bundleRepository;
         _reconcileSync = reconcileSync;
         _sapStatus = sapStatus;
+        _csvFill = csvFill;
         _logger = logger;
     }
 
@@ -186,6 +189,50 @@ public sealed class ResubmitDriftService : IResubmitDriftService
         foreach (var (batchNo, slitNo, ndtPipes) in sqlRows)
             sqlSums[(batchNo, slitNo)] = sqlSums.TryGetValue((batchNo, slitNo), out var existing) ? existing + ndtPipes : ndtPipes;
 
+        // Batch-number move: file batch column differs from SQL for this basename (detect-on-resubmit).
+        var sqlBatches = sqlSums.Keys.Select(static k => k.Item1).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var fileBatches = fileSums.Keys.Select(static k => k.Item1).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (sqlBatches.Count == 1
+            && fileBatches.Count == 1
+            && !string.Equals(sqlBatches[0], fileBatches[0], StringComparison.OrdinalIgnoreCase))
+        {
+            var oldBatch = sqlBatches[0];
+            var newBatch = fileBatches[0];
+            var movedPipes = fileSums.Values.Sum();
+            var correlationId = await _csvFill
+                .ApplyBatchMoveAsync(fileName, oldBatch, newBatch, movedPipes, cancellationToken)
+                .ConfigureAwait(false);
+            _logger.LogWarning(
+                "Resubmit drift BATCH MOVE CorrelationId={CorrelationId} file={File}: {OldBatch} → {NewBatch} pipes={Pipes}. "
+                + "Operator email to SAP must delete under OLD key then reload under NEW key.",
+                correlationId,
+                fileName,
+                oldBatch,
+                newBatch,
+                movedPipes);
+
+            // Sync slit rows to new batch values via reconcile path for matching slits.
+            var slitsSyncedMove = 0;
+            foreach (var (key, fileValue) in fileSums)
+            {
+                var rows = await _reconcileSync
+                    .SyncAfterSlitReconcileAsync(key.BatchNo, key.SlitNo, fileValue, cancellationToken)
+                    .ConfigureAwait(false);
+                if (rows > 0)
+                    slitsSyncedMove++;
+            }
+
+            await _sapStatus
+                .RecordResubmitDriftSyncedEventAsync(fileName, pendingFolder, cancellationToken)
+                .ConfigureAwait(false);
+
+            var movePlan = new ResubmitDriftPlan(
+                Array.Empty<ResubmitDriftChange>(),
+                Array.Empty<(string, string, int)>(),
+                Array.Empty<(string, string, int)>());
+            return new ResubmitDriftResult(movePlan, slitsSyncedMove, [newBatch], Array.Empty<string>());
+        }
+
         var plan = ResubmitDriftPlanner.Compute(fileSums, sqlSums);
         if (!plan.HasDrift)
         {
@@ -212,14 +259,23 @@ public sealed class ResubmitDriftService : IResubmitDriftService
                 anomaly.BatchNo, anomaly.SlitNo, anomaly.NdtPipes, fileName);
         }
 
-        // Value drift: the resubmitted file wins. Same SQL path as operator slit reconcile.
+        // Same-bundle count revision: adjust Csv_Filled by DELTA (new − old), never double-add.
         var slitsSynced = 0;
         foreach (var change in plan.Changes)
         {
             _logger.LogWarning(
-                "Resubmit drift: {File} batch {BatchNo} slit {SlitNo}: Output_Slit_Row {SqlValue} → {FileValue} "
-                + "(resubmitted file is authoritative).",
-                fileName, change.BatchNo, change.SlitNo, change.SqlNdtPipes, change.FileNdtPipes);
+                "Resubmit drift REVISION: {File} batch {BatchNo} slit {SlitNo}: Output_Slit_Row {SqlValue} → {FileValue} "
+                + "(delta={Delta}; resubmitted file is authoritative).",
+                fileName, change.BatchNo, change.SlitNo, change.SqlNdtPipes, change.FileNdtPipes,
+                change.FileNdtPipes - change.SqlNdtPipes);
+            await _csvFill
+                .ApplyCountRevisionAsync(
+                    fileName,
+                    change.BatchNo,
+                    change.SqlNdtPipes,
+                    change.FileNdtPipes,
+                    cancellationToken)
+                .ConfigureAwait(false);
             var rows = await _reconcileSync
                 .SyncAfterSlitReconcileAsync(change.BatchNo, change.SlitNo, change.FileNdtPipes, cancellationToken)
                 .ConfigureAwait(false);

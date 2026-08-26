@@ -184,9 +184,8 @@ public sealed class Phase3F2PlcCloseTests
         public void ClearOpenAccumulation(string poNumber, int millNo) => ClearRunningTotal(poNumber, millNo);
         public DateTime GetLastActivityUtc(string poNumber, int millNo) => DateTime.UtcNow;
         public Task SyncBatchSequencesFromBundlesAsync(CancellationToken cancellationToken) => Task.CompletedTask;
-        public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int batchNumberForRow, out int totalSoFar)
+        public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int totalSoFar)
         {
-            batchNumberForRow = 1;
             totalSoFar = ndtPipes;
         }
         public BundleCloseAllocation CloseBundle(string poNumber, int millNo, int closedTotalPcs, int threshold)
@@ -196,7 +195,7 @@ public sealed class Phase3F2PlcCloseTests
             var provisional = n + 1;
             n += 1;
             _engine[k] = n;
-            return new BundleCloseAllocation(n, provisional);
+            return new BundleCloseAllocation(n);
         }
         public void AdvanceOnPoEnd(string poNumber, int millNo, int threshold) { }
         public int GetEngineBatchNo(string poNumber, int millNo) => _engine.GetValueOrDefault(Key(poNumber, millNo));

@@ -123,7 +123,17 @@ public sealed class PpcCorrectionPhase3Tests
             reconcileTagService: null!,
             sapRepo,
             ppcRepo,
+            new TestOptionsMonitor(),
             NullLogger<ReconcileController>.Instance);
+
+    private sealed class TestOptionsMonitor : Microsoft.Extensions.Options.IOptionsMonitor<NdtBundleService.Configuration.NdtBundleOptions>
+    {
+        public NdtBundleService.Configuration.NdtBundleOptions CurrentValue { get; } = new();
+        public NdtBundleService.Configuration.NdtBundleOptions Get(string? name) => CurrentValue;
+        public IDisposable OnChange(Action<NdtBundleService.Configuration.NdtBundleOptions, string?> listener) =>
+            Microsoft.Extensions.Options.Options.Create(CurrentValue) as IDisposable ?? NullDisp.Instance;
+        private sealed class NullDisp : IDisposable { public static readonly NullDisp Instance = new(); public void Dispose() { } }
+    }
 
     private static object? GetProp(object obj, string name) =>
         obj.GetType().GetProperty(name)?.GetValue(obj);

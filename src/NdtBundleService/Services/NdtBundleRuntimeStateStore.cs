@@ -19,29 +19,32 @@ public interface INdtBundleRuntimeStateStore
 
     void ClearRunningTotal(string poNumber, int millNo);
 
-    /// <summary>Clears open partial state (RunningTotal, sizeCounts, provisional) without altering printed sequence counters.</summary>
+    /// <summary>Clears open partial state (RunningTotal, sizeCounts) without altering printed sequence counters.</summary>
     void ClearOpenAccumulation(string poNumber, int millNo);
 
     DateTime GetLastActivityUtc(string poNumber, int millNo);
 
-    void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int batchNumberForRow, out int totalSoFar);
-
     /// <summary>
-    /// Allocates the next mill-wide sequence at close (single source of truth). Returns final + provisional
-    /// so callers can correct open-row stamps when they diverge.
+    /// Accumulates open RunningTotal for file-close bookkeeping only. Does <b>not</b> allocate or
+    /// return a batch number (CSV fill-to-target reads final numbers from SQL).
     /// </summary>
-    BundleCloseAllocation CloseBundle(string poNumber, int millNo, int closedTotalPcs, int threshold);
+    void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int totalSoFar);
 
-    /// <summary>
-    /// After a close allocates <paramref name="allocatedSequence"/>, re-provisions other open slots
-    /// on the mill whose provisional stamp is now stale (≤ allocated) and returns the reassignments
-    /// so callers can correct the already-stamped slit rows/CSVs immediately.
-    /// </summary>
-    IReadOnlyList<ProvisionalStampReassignment> ReassignCollidingProvisionals(
+    /// <summary>Legacy overload: <paramref name="batchNumberForRow"/> is always 0 under fill-to-target.</summary>
+    void ApplySlitContribution(
+        string poNumber,
         int millNo,
-        int allocatedSequence,
-        string closedPoNumber) =>
-        Array.Empty<ProvisionalStampReassignment>();
+        int ndtPipes,
+        int threshold,
+        out int batchNumberForRow,
+        out int totalSoFar)
+    {
+        ApplySlitContribution(poNumber, millNo, ndtPipes, threshold, out totalSoFar);
+        batchNumberForRow = 0;
+    }
+
+    /// <summary>Allocates the next mill-wide sequence at close (sole numbering authority).</summary>
+    BundleCloseAllocation CloseBundle(string poNumber, int millNo, int closedTotalPcs, int threshold);
 
     void AdvanceOnPoEnd(string poNumber, int millNo, int threshold);
 
@@ -61,6 +64,12 @@ public interface INdtBundleRuntimeStateStore
     void SetLastRecord(string poNumber, int millNo, InputSlitRecord? record);
 
     Task SaveAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// True when any live slot still has provisional numbering or open sizeCounts/RunningTotal —
+    /// unsafe for quiet-drain fill-to-target cutover between POs.
+    /// </summary>
+    bool HasUnsafeOpenStateForFillCutover() => false;
 }
 
 public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
@@ -187,31 +196,14 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
     public Task SyncBatchSequencesFromBundlesAsync(CancellationToken cancellationToken) =>
         ApplyMaxSequencesFromBundlesAsync(mergeIntoExisting: true, cancellationToken);
 
-    public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int batchNumberForRow, out int totalSoFar)
+    public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int totalSoFar)
     {
         lock (_stateLock)
         {
             var slot = GetSlot(poNumber, millNo);
             TouchSlotActivity(slot);
             SyncSlotToMillFloor(slot);
-
-            var millFloor = GetMillMaxSequence(millNo);
-            if (slot.ProvisionalBatchNo <= 0)
-            {
-                // Legacy in-flight slots (pre-ProvisionalBatchNo) keep BatchOffset+1 so open rows stay consistent.
-                if (NdtBundleRuntimeStateLogic.HasOpenPartialBundle(slot.RunningTotal, slot.SizeCounts)
-                    && slot.BatchOffset > 0)
-                {
-                    slot.ProvisionalBatchNo = slot.BatchOffset + 1;
-                }
-                else
-                {
-                    slot.ProvisionalBatchNo =
-                        NdtBundleRuntimeStateLogic.ResolveProvisionalOpenBatchNumber(0, millFloor);
-                }
-            }
-
-            batchNumberForRow = slot.ProvisionalBatchNo;
+            slot.ProvisionalBatchNo = 0;
 
             if (ndtPipes <= 0)
             {
@@ -221,8 +213,6 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
 
             slot.RunningTotal += ndtPipes;
             totalSoFar = slot.RunningTotal;
-            // Do not advance BatchOffset / mill sequence on threshold — allocation is close-only.
-            // Keep RunningTotal for HasOpenPartialBundle; SizeCounts remain the engine's close driver.
         }
     }
 
@@ -233,12 +223,9 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
             var slot = GetSlot(poNumber, millNo);
             TouchSlotActivity(slot);
             if (closedTotalPcs <= 0)
-                return new BundleCloseAllocation(slot.EngineBatchNo, slot.ProvisionalBatchNo);
+                return new BundleCloseAllocation(slot.EngineBatchNo);
 
             var millFloor = GetMillMaxSequence(millNo);
-            var provisional = slot.ProvisionalBatchNo > 0
-                ? slot.ProvisionalBatchNo
-                : NdtBundleRuntimeStateLogic.ResolveProvisionalOpenBatchNumber(0, millFloor);
             var final = NdtBundleRuntimeStateLogic.AllocateNextMillSequence(millFloor);
 
             RaiseMillMaxSequence(millNo, final);
@@ -247,44 +234,8 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
             slot.ProvisionalBatchNo = 0;
             slot.RunningTotal = 0;
 
-            return new BundleCloseAllocation(final, provisional);
+            return new BundleCloseAllocation(final);
         }
-    }
-
-    public IReadOnlyList<ProvisionalStampReassignment> ReassignCollidingProvisionals(
-        int millNo,
-        int allocatedSequence,
-        string closedPoNumber)
-    {
-        if (allocatedSequence <= 0)
-            return Array.Empty<ProvisionalStampReassignment>();
-
-        var closedPo = InputSlitCsvParsing.NormalizePo(closedPoNumber);
-        List<ProvisionalStampReassignment>? reassigned = null;
-        lock (_stateLock)
-        {
-            foreach (var slot in _root.Mills.Values)
-            {
-                if (slot.MillNo != millNo
-                    || string.Equals(slot.PoNumber, closedPo, StringComparison.OrdinalIgnoreCase)
-                    || slot.ProvisionalBatchNo <= 0
-                    || slot.ProvisionalBatchNo > allocatedSequence)
-                {
-                    continue;
-                }
-
-                var newProvisional = Math.Max(allocatedSequence, GetMillMaxSequence(millNo)) + 1;
-                reassigned ??= new List<ProvisionalStampReassignment>();
-                reassigned.Add(new ProvisionalStampReassignment(
-                    slot.PoNumber,
-                    millNo,
-                    slot.ProvisionalBatchNo,
-                    newProvisional));
-                slot.ProvisionalBatchNo = newProvisional;
-            }
-        }
-
-        return reassigned ?? (IReadOnlyList<ProvisionalStampReassignment>)Array.Empty<ProvisionalStampReassignment>();
     }
 
     public void AdvanceOnPoEnd(string poNumber, int millNo, int threshold)
@@ -293,9 +244,6 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         {
             var slot = GetSlot(poNumber, millNo);
             TouchSlotActivity(slot);
-            // HandlePoEndAsync already closes partials via CloseBundle (print path). Only clear
-            // bookkeeping and align the output-column offset with the engine sequence — do not burn
-            // extra bundle numbers without a tag print.
             slot.RunningTotal = 0;
             slot.ProvisionalBatchNo = 0;
             if (slot.BatchOffset < slot.EngineBatchNo)
@@ -368,6 +316,22 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         finally
         {
             _initLock.Release();
+        }
+    }
+
+    public bool HasUnsafeOpenStateForFillCutover()
+    {
+        lock (_stateLock)
+        {
+            foreach (var slot in _root.Mills.Values)
+            {
+                if (slot.ProvisionalBatchNo > 0)
+                    return true;
+                if (NdtBundleRuntimeStateLogic.HasOpenPartialBundle(slot.RunningTotal, slot.SizeCounts))
+                    return true;
+            }
+
+            return false;
         }
     }
 
@@ -777,7 +741,7 @@ public sealed class NdtBundleRuntimeStateStore : INdtBundleRuntimeStateStore
         public int BatchOffset { get; set; }
         public int RunningTotal { get; set; }
         public int EngineBatchNo { get; set; }
-        /// <summary>Open-row provisional sequence (mill floor + 1 at first stamp); cleared at close.</summary>
+        /// <summary>Legacy field; always cleared under fill-to-target (CSV never allocates).</summary>
         public int ProvisionalBatchNo { get; set; }
         public Dictionary<string, int> SizeCounts { get; set; } = new(StringComparer.OrdinalIgnoreCase);
         public InputSlitRecord? LastRecord { get; set; }

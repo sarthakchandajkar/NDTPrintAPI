@@ -61,11 +61,10 @@ public sealed class NdtBundleRuntimeStateStoreTests : IDisposable
 
         await store.EnsureInitializedAsync(CancellationToken.None);
 
-        store.ApplySlitContribution("PO-100", 1, ndtPipes: 0, threshold: 15, out var batchNumber, out var totalSoFar);
+        store.ApplySlitContribution("PO-100", 1, ndtPipes: 0, threshold: 15, out var totalSoFar);
 
         Assert.Equal(34, store.GetBatchOffset("PO-100", 1));
         Assert.Equal(8, totalSoFar);
-        Assert.Equal(35, batchNumber);
     }
 
     [Fact]
@@ -120,23 +119,19 @@ public sealed class NdtBundleRuntimeStateStoreTests : IDisposable
         var store = CreateStore(new Dictionary<int, string>(), gracePeriodDays: 14);
         await store.EnsureInitializedAsync(CancellationToken.None);
 
-        store.ApplySlitContribution("PO-200", 2, ndtPipes: 10, threshold: 15, out var batch1, out var total1);
-        Assert.Equal(1, batch1);
+        store.ApplySlitContribution("PO-200", 2, ndtPipes: 10, threshold: 15, out var total1);
         Assert.Equal(10, total1);
 
-        store.ApplySlitContribution("PO-200", 2, ndtPipes: 5, threshold: 15, out var batch2, out var total2);
-        Assert.Equal(1, batch2);
+        store.ApplySlitContribution("PO-200", 2, ndtPipes: 5, threshold: 15, out var total2);
         Assert.Equal(15, total2);
-        // Provisional stamp held; BatchOffset stays 0 until CloseBundle
+        // RunningTotal held; BatchOffset stays 0 until CloseBundle
         Assert.Equal(0, store.GetBatchOffset("PO-200", 2));
         Assert.Equal(15, store.GetRunningTotal("PO-200", 2));
 
-        store.ApplySlitContribution("PO-200", 2, ndtPipes: 0, threshold: 15, out var batch3, out _);
-        Assert.Equal(1, batch3);
+        store.ApplySlitContribution("PO-200", 2, ndtPipes: 0, threshold: 15, out _);
 
         var closed = store.CloseBundle("PO-200", 2, closedTotalPcs: 15, threshold: 15);
         Assert.Equal(1, closed.FinalSequence);
-        Assert.Equal(1, closed.ProvisionalSequence);
         Assert.Equal(1, store.GetBatchOffset("PO-200", 2));
         Assert.Equal(0, store.GetRunningTotal("PO-200", 2));
     }
@@ -147,7 +142,7 @@ public sealed class NdtBundleRuntimeStateStoreTests : IDisposable
         var store = CreateStore(new Dictionary<int, string>(), gracePeriodDays: 14);
         await store.EnsureInitializedAsync(CancellationToken.None);
 
-        store.ApplySlitContribution("PO-300", 3, ndtPipes: 4, threshold: 15, out _, out _);
+        store.ApplySlitContribution("PO-300", 3, ndtPipes: 4, threshold: 15, out _);
         await store.SaveAsync(CancellationToken.None);
 
         Assert.True(File.Exists(_statePath));

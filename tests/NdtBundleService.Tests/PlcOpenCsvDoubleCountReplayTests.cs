@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging.Abstractions;
+﻿using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Models;
@@ -16,7 +16,7 @@ namespace NdtBundleService.Tests;
 public sealed class PlcOpenCsvDoubleCountReplayTests
 {
     /// <summary>
-    /// Seven slits × 6 pcs (42 physical). CSV + PLC replay must yield 42, not 84.
+    /// Seven slits Ã— 6 pcs (42 physical). CSV + PLC replay must yield 42, not 84.
     /// </summary>
     [Fact]
     public async Task Seven_slits_csv_and_plc_replay_counts_once_not_sum()
@@ -248,7 +248,7 @@ public sealed class PlcOpenCsvDoubleCountReplayTests
         public DateTime GetLastActivityUtc(string poNumber, int millNo) => DateTime.UtcNow;
         public Task SyncBatchSequencesFromBundlesAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
-        public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int batchNumberForRow, out int totalSoFar)
+        public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int totalSoFar)
         {
             var k = Key(poNumber, millNo);
             _running.TryGetValue(k, out var run);
@@ -256,7 +256,6 @@ public sealed class PlcOpenCsvDoubleCountReplayTests
                 run += ndtPipes;
             _running[k] = run;
             totalSoFar = run;
-            batchNumberForRow = 1;
         }
 
         public BundleCloseAllocation CloseBundle(string poNumber, int millNo, int closedTotalPcs, int threshold) =>

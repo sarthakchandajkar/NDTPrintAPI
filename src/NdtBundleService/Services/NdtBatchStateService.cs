@@ -1,7 +1,8 @@
 namespace NdtBundleService.Services;
 
 /// <summary>
-/// Running NDT total and bundle sequence per (PO, Mill), backed by <see cref="INdtBundleRuntimeStateStore"/>.
+/// Running NDT total per (PO, Mill) for file-close bookkeeping, backed by <see cref="INdtBundleRuntimeStateStore"/>.
+/// Does not allocate batch numbers — close + fill-to-target own numbering.
 /// </summary>
 public sealed class NdtBatchStateService : INdtBatchStateService
 {
@@ -37,9 +38,10 @@ public sealed class NdtBatchStateService : INdtBatchStateService
         await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
 
         var threshold = await ResolveThresholdAsync(poNumber, knownPipeSize, cancellationToken).ConfigureAwait(false);
-        _runtimeState.ApplySlitContribution(poNumber, millNo, ndtPipes, threshold, out var batchNumber, out var totalSoFar);
+        _runtimeState.ApplySlitContribution(poNumber, millNo, ndtPipes, threshold, out var totalSoFar);
         await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
-        return (batchNumber, totalSoFar, threshold);
+        // BatchNumber is unused under fill-to-target (CSV stamps from SQL fill pointer).
+        return (0, totalSoFar, threshold);
     }
 
     public async Task IncrementBatchOnPoEndAsync(string poNumber, int millNo, CancellationToken cancellationToken)

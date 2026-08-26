@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using NdtBundleService.Configuration;
 using NdtBundleService.Models;
 using NdtBundleService.Services;
@@ -11,7 +11,7 @@ namespace NdtBundleService.Tests;
 public sealed class Phase3F2ReconAndGracePinTests
 {
     [Fact]
-    public async Task Awaiting_recon_attach_leaves_sizeCounts_and_RunningTotal_untouched_and_opens_no_new_sequence()
+    public async Task Plc_close_leaves_sizeCounts_and_RunningTotal_untouched_for_csv_fill()
     {
         var runtime = new TrackingRuntime();
         await runtime.EnsureInitializedAsync(CancellationToken.None);
@@ -29,48 +29,33 @@ public sealed class Phase3F2ReconAndGracePinTests
         Assert.Equal(0, runtime.GetSizeCounts("1000060163", 1).GetValueOrDefault("Default"));
         Assert.Equal(0, runtime.GetRunningTotal("1000060163", 1));
 
-        var awaiting = ("1226100001", 1, 11);
-        var slitSums = new Dictionary<(string Po, int Mill), int>();
-        var attached = PlcCsvReconAttach.TryAttach(
-            awaiting,
-            new InputSlitRecord { PoNumber = "1000060163", MillNo = 1, SlitNo = "1", NdtPipes = 11 },
-            slitSums,
-            out var batchNo);
-
-        Assert.True(attached);
-        Assert.Equal("1226100001", batchNo);
-        Assert.Equal(11, slitSums[("1000060163", 1)]);
-
-        // Attach must not call ProcessSlitRecord / ApplySlitContribution — runtime stays frozen.
+        // CSV fill stamps against the closed target without ApplySlitContribution — runtime stays frozen.
+        var stamp = CsvFillLogic.ComputeAfterStamp("1226100001", targetNdtPcs: 11, csvFilledBefore: 0, fileNdtPipes: 11, 20);
+        Assert.Equal(CsvFillState.CsvComplete, stamp.FillState);
         Assert.Equal(0, runtime.GetSizeCounts("1000060163", 1).GetValueOrDefault("Default"));
         Assert.Equal(0, runtime.GetRunningTotal("1000060163", 1));
         Assert.Equal(1, runtime.GetEngineBatchNo("1000060163", 1));
     }
 
     [Fact]
-    public void Surplus_and_deficit_recon_set_discrepancy_without_updating_stored_total()
+    public void Surplus_and_deficit_fill_set_discrepancy_without_updating_printed_total()
     {
-        var deficit = PlcCsvReconSemantics.Evaluate("1226100001", plcTotal: 11, slitSum: 10);
-        Assert.True(deficit.CountDiscrepancy);
-        Assert.True(deficit.ClearsAwaitingCsvRecon);
-        Assert.False(deficit.UpdatesStoredTotal);
-        Assert.Equal(11, deficit.PlcTotal);
-        Assert.Equal(10, deficit.SlitSum);
+        var shortFill = CsvFillLogic.ComputeQuietShort(targetNdtPcs: 11, csvFilled: 10, 20);
+        Assert.True(shortFill.CountDiscrepancy);
+        Assert.Equal(CsvFillState.CsvShort, shortFill.State);
 
-        var surplus = PlcCsvReconSemantics.Evaluate("1226100001", plcTotal: 11, slitSum: 14);
-        Assert.True(surplus.CountDiscrepancy);
-        Assert.True(surplus.ClearsAwaitingCsvRecon);
-        Assert.False(surplus.UpdatesStoredTotal);
-        Assert.Equal(11, surplus.PlcTotal);
-        Assert.Equal(14, surplus.SlitSum);
+        var overshoot = CsvFillLogic.ComputeAfterStamp("1226100001", 11, 0, 14, 20);
+        Assert.True(overshoot.CountDiscrepancy);
+        Assert.Equal(CsvFillState.CsvOvershoot, overshoot.FillState);
+        Assert.Equal(14, overshoot.CsvFilledAfter);
 
-        var match = PlcCsvReconSemantics.Evaluate("1226100001", plcTotal: 11, slitSum: 11);
+        var match = CsvFillLogic.ComputeAfterStamp("1226100001", 11, 0, 11, 20);
         Assert.False(match.CountDiscrepancy);
-        Assert.False(match.UpdatesStoredTotal);
+        Assert.Equal(CsvFillState.CsvComplete, match.FillState);
     }
 
     [Fact]
-    public async Task After_plc_close_and_attach_next_bundle_starts_from_zero_not_surplus()
+    public async Task After_plc_close_and_csv_overshoot_next_bundle_starts_from_zero_not_surplus()
     {
         var runtime = new TrackingRuntime();
         await runtime.EnsureInitializedAsync(CancellationToken.None);
@@ -84,17 +69,12 @@ public sealed class Phase3F2ReconAndGracePinTests
             (_, _, _) => Task.CompletedTask,
             CancellationToken.None);
 
-        // Late CSV surplus attached without ProcessSlitRecord (14 pcs on closed bundle only).
-        var slitSums = new Dictionary<(string Po, int Mill), int>();
-        Assert.True(PlcCsvReconAttach.TryAttach(
-            ("1226100001", 1, 11),
-            new InputSlitRecord { PoNumber = "1000060163", MillNo = 1, SlitNo = "2", NdtPipes = 14 },
-            slitSums,
-            out _));
-        Assert.Equal(14, slitSums[("1000060163", 1)]);
+        // Late CSV surplus fills the closed target only (overshoot) — does not touch runtime sizeCounts.
+        var overshoot = CsvFillLogic.ComputeAfterStamp("1226100001", 11, 0, 14, 20);
+        Assert.Equal(CsvFillState.CsvOvershoot, overshoot.FillState);
         Assert.Equal(0, runtime.GetSizeCounts("1000060163", 1).GetValueOrDefault("Default"));
 
-        // Next physical slit uses file path (unhealthy / File) — must close fresh 11, not 11+14.
+        // Next physical slit uses file path — must close fresh 11, not 11+14.
         var fileEngine = TestEngineFactory.Create(
             new FormationStub(10),
             new PipeSizeStub(),
@@ -141,7 +121,7 @@ public sealed class Phase3F2ReconAndGracePinTests
             return Task.CompletedTask;
         }
 
-        // Threshold reached — grace starts; no close yet.
+        // Threshold reached â€” grace starts; no close yet.
         await engine.ProcessSlitRecordAsync(
             new InputSlitRecord { PoNumber = "1000060163", MillNo = 1, SlitNo = "1", NdtPipes = 11 },
             OnClose,
@@ -219,13 +199,12 @@ public sealed class Phase3F2ReconAndGracePinTests
     public void ApplySlitContribution_zero_ndt_is_peek_only_no_running_total_or_sequence_burn()
     {
         var runtime = new TrackingRuntime();
-        runtime.ApplySlitContribution("1000060288", 1, ndtPipes: 17, threshold: 80, out _, out var afterFirst);
+        runtime.ApplySlitContribution("1000060288", 1, ndtPipes: 17, threshold: 80, out var afterFirst);
         Assert.Equal(17, afterFirst);
         Assert.Equal(0, runtime.GetEngineBatchNo("1000060288", 1));
 
-        runtime.ApplySlitContribution("1000060288", 1, ndtPipes: 0, threshold: 80, out var peekBatch, out var peekTotal);
+        runtime.ApplySlitContribution("1000060288", 1, ndtPipes: 0, threshold: 80, out var peekTotal);
         Assert.Equal(17, peekTotal);
-        Assert.Equal(1, peekBatch);
         Assert.Equal(17, runtime.GetRunningTotal("1000060288", 1));
         Assert.Equal(0, runtime.GetEngineBatchNo("1000060288", 1));
     }
@@ -269,14 +248,13 @@ public sealed class Phase3F2ReconAndGracePinTests
         public DateTime GetLastActivityUtc(string poNumber, int millNo) => DateTime.UtcNow;
         public Task SyncBatchSequencesFromBundlesAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
-        public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int batchNumberForRow, out int totalSoFar)
+        public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int totalSoFar)
         {
             var k = Key(poNumber, millNo);
             _running.TryGetValue(k, out var run);
             run += ndtPipes;
             _running[k] = run;
             totalSoFar = run;
-            batchNumberForRow = GetEngineBatchNo(poNumber, millNo) + 1;
             if (run >= threshold)
                 _running[k] = 0;
         }
@@ -288,7 +266,7 @@ public sealed class Phase3F2ReconAndGracePinTests
             var provisional = n + 1;
             n += 1;
             _engine[k] = n;
-            return new BundleCloseAllocation(n, provisional);
+            return new BundleCloseAllocation(n);
         }
 
         public void AdvanceOnPoEnd(string poNumber, int millNo, int threshold) =>

@@ -1,4 +1,4 @@
-using NdtBundleService.Configuration;
+﻿using NdtBundleService.Configuration;
 using NdtBundleService.Models;
 using NdtBundleService.Services;
 using NdtBundleService.Services.PoLifecycle;
@@ -27,7 +27,7 @@ public sealed class ClosedPoLateSlitReplayTests
 
         Assert.Equal(BackfillBundlingAction.TraceabilityOnly, action);
         Assert.NotEqual(BackfillBundlingAction.NormalBundle, action);
-        Assert.NotEqual(BackfillBundlingAction.OrphanAutoClose, action);
+        Assert.NotEqual(BackfillBundlingAction.ManualReview, action);
     }
 
     [Fact]
@@ -76,13 +76,7 @@ public sealed class ClosedPoLateSlitReplayTests
             autoCloseOrphanBundles: true);
         Assert.Equal(BackfillBundlingAction.TraceabilityOnly, action);
 
-        var route = await ClosedPoTraceabilityBatchResolver.ResolveAsync(
-            repo,
-            [],
-            record,
-            Mill,
-            pipeSize: "2",
-            CancellationToken.None);
+        var route = await ClosedPoTraceabilityBatchResolver.ResolveAsync(new StubCsvFill(repo), record, Mill, "2", CancellationToken.None);
 
         Assert.False(route.RequiresManualReview);
         Assert.Equal(LockedBundle, route.BatchNoFormatted);
@@ -100,13 +94,7 @@ public sealed class ClosedPoLateSlitReplayTests
         var repo = new IncidentReplayBundleRepo(existingBundle: null);
         var record = new InputSlitRecord { PoNumber = Po, MillNo = Mill, SlitNo = "04", NdtPipes = 3 };
 
-        var route = await ClosedPoTraceabilityBatchResolver.ResolveAsync(
-            repo,
-            [],
-            record,
-            Mill,
-            pipeSize: "2",
-            CancellationToken.None);
+        var route = await ClosedPoTraceabilityBatchResolver.ResolveAsync(new StubCsvFill(repo), record, Mill, "2", CancellationToken.None);
 
         Assert.True(route.RequiresManualReview);
         Assert.Null(route.BatchNoFormatted);
@@ -122,11 +110,10 @@ public sealed class ClosedPoLateSlitReplayTests
             (otherPo, Mill, "2", otherBundle));
 
         var route = await ClosedPoTraceabilityBatchResolver.ResolveAsync(
-            repo,
-            [],
+            new StubCsvFill(repo),
             new InputSlitRecord { PoNumber = Po, MillNo = Mill, SlitNo = "04", NdtPipes = 3 },
             Mill,
-            pipeSize: "2",
+            "2",
             CancellationToken.None);
 
         Assert.Equal(LockedBundle, route.BatchNoFormatted);
@@ -141,11 +128,10 @@ public sealed class ClosedPoLateSlitReplayTests
             (Po, Mill, "4", "1226100099"));
 
         var route = await ClosedPoTraceabilityBatchResolver.ResolveAsync(
-            repo,
-            [],
+            new StubCsvFill(repo),
             new InputSlitRecord { PoNumber = Po, MillNo = Mill, SlitNo = "04", NdtPipes = 3 },
             Mill,
-            pipeSize: "2",
+            "2",
             CancellationToken.None);
 
         Assert.Equal(LockedBundle, route.BatchNoFormatted);
@@ -154,18 +140,16 @@ public sealed class ClosedPoLateSlitReplayTests
     [Fact]
     public async Task Awaiting_recon_empty_falls_back_to_po_mill_size_lookup_not_mill_latest()
     {
-        // Production loads ListAwaitingPlcReconBatchesAsync(po, mill) — PO+mill scoped in SQL.
-        // After manual recon clears awaiting, late rows use TryFindTraceabilityBundle (PO+mill+size).
+        // After fill cutover: incomplete fill / traceability lookup is PO+mill scoped via StubCsvFill.
         var repo = new ScopingBundleRepo(
             (Po, Mill, "2", LockedBundle),
             ("1000060363", Mill, "2", "1226100003"));
 
         var route = await ClosedPoTraceabilityBatchResolver.ResolveAsync(
-            repo,
-            [],
+            new StubCsvFill(repo),
             new InputSlitRecord { PoNumber = Po, MillNo = Mill, SlitNo = "04", NdtPipes = 3 },
             Mill,
-            pipeSize: "2",
+            "2",
             CancellationToken.None);
 
         Assert.Equal(LockedBundle, route.BatchNoFormatted);
@@ -382,4 +366,25 @@ public sealed class ClosedPoLateSlitReplayTests
         public DateTime GetLastActivityUtc(string po, int mill) =>
             _lastActivity.GetValueOrDefault((po, mill));
     }
+
+    private sealed class StubCsvFill : ICsvFillService
+    {
+        private readonly INdtBundleRepository _repo;
+        public StubCsvFill(INdtBundleRepository repo) => _repo = repo;
+        public Task TryInitializeFillTargetAsync(string bundleNo, int targetNdtPcs, string? closeSource, CancellationToken cancellationToken) => Task.CompletedTask;
+        public async Task<CsvFillIncompleteBundle?> TryGetOldestIncompleteAsync(string poNumber, int millNo, string? pipeSize, CancellationToken cancellationToken)
+        {
+            var b = await _repo.TryFindTraceabilityBundleForPoMillAsync(poNumber, millNo, pipeSize, cancellationToken);
+            return string.IsNullOrWhiteSpace(b) ? null : new CsvFillIncompleteBundle(b!, 1, 0, CsvFillState.PlcClosed, null, null);
+        }
+        public Task<CsvFillStampResult?> TryStampFileAsync(string poNumber, int millNo, string? pipeSize, int fileNdtPipes, CancellationToken cancellationToken) => Task.FromResult<CsvFillStampResult?>(null);
+        public Task<int> AdvanceQuietShortAsync(string? poNumber, int? millNo, int quietMinutes, DateTime utcNow, bool forcePoEnd, CancellationToken cancellationToken) => Task.FromResult(0);
+        public Task UpsertHoldAsync(string sourceFileName, string poNumber, int millNo, string? pipeSize, string reasonCode, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<int> EscalateExpiredHoldsAsync(int quietMinutes, DateTime utcNow, CancellationToken cancellationToken) => Task.FromResult(0);
+        public Task ApplyCountRevisionAsync(string sourceFileName, string batchNo, int oldNdtPipes, int newNdtPipes, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<Guid> ApplyBatchMoveAsync(string sourceFileName, string oldBatchNo, string newBatchNo, int ndtPipes, CancellationToken cancellationToken) => Task.FromResult(Guid.Empty);
+        public Task<bool> HasAwaitingCsvReconRowsAsync(CancellationToken cancellationToken) => Task.FromResult(false);
+        public Task<bool> HasBundlesMissingFillTargetAsync(CancellationToken cancellationToken) => Task.FromResult(false);
+    }
 }
+

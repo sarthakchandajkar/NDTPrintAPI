@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging.Abstractions;
+﻿using Microsoft.Extensions.Logging.Abstractions;
 using NdtBundleService.Models;
 using NdtBundleService.Services;
 using Xunit;
@@ -9,7 +9,7 @@ namespace NdtBundleService.Tests;
 /// Phase 4 resubmitted-rejected-file handling (docs/NDT_Input_Slit_SAP_Status_Design.md):
 /// - ingest gate: only a plain first-pass Pending (or untracked) basename may be re-emitted;
 ///   Accepted, Rejected-in-flight, and resubmitted (Resubmit_Count &gt; 0) basenames are gated
-///   (the ExactMatch bypass — the operator-edited copy is authoritative and never clobbered);
+///   (the ExactMatch bypass â€” the operator-edited copy is authoritative and never clobbered);
 /// - resubmit content drift: the resubmitted pending CSV is diffed against Output_Slit_Row;
 ///   value drift re-syncs SQL via the operator-slit-reconcile path and bundle totals follow
 ///   (Q5 invariant), while Manual_Recon-locked bundles keep their total (lock semantics unchanged);
@@ -59,9 +59,9 @@ public sealed class ResubmitDriftPhase4Tests
         {
             "PO Number,Slit No,NDT Pipes,NDT Batch No",
             "1000060363,01,7,1226100001",
-            "1000060363,01,5,1226100001",   // same (batch, slit) → summed
+            "1000060363,01,5,1226100001",   // same (batch, slit) â†’ summed
             "1000060363,02,8,1226100002",
-            "1000060363,03,4,",             // unstamped → never posted to SAP → ignored
+            "1000060363,03,4,",             // unstamped â†’ never posted to SAP â†’ ignored
             string.Empty
         });
 
@@ -126,7 +126,7 @@ public sealed class ResubmitDriftPhase4Tests
         var reconcileSync = new RecordingReconcileSync();
         var sapRepo = new RecordingSapRepo();
         var service = new ResubmitDriftService(
-            bundleRepo, reconcileSync, sapRepo, NullLogger<ResubmitDriftService>.Instance);
+            bundleRepo, reconcileSync, sapRepo, NoOpCsvFillService.Instance, NullLogger<ResubmitDriftService>.Instance);
 
         var result = await service.DetectAndReconcileAsync(pending.Folder, FileName, CancellationToken.None);
 
@@ -134,7 +134,7 @@ public sealed class ResubmitDriftPhase4Tests
         Assert.Equal(1, result!.SlitsSynced);
         // Only the drifted slit is re-synced, with the resubmitted file's value.
         Assert.Equal((BatchNo, "01", 12), Assert.Single(reconcileSync.SlitSyncs));
-        // Q5: the bundle total follows the new slit sum (unlocked bundle → forced slit-sum sync).
+        // Q5: the bundle total follows the new slit sum (unlocked bundle â†’ forced slit-sum sync).
         Assert.Equal(BatchNo, Assert.Single(bundleRepo.TotalSyncs));
         Assert.Empty(bundleRepo.PostReconSumRefreshes);
         Assert.Equal(BatchNo, Assert.Single(result.BatchTotalsSynced));
@@ -156,14 +156,14 @@ public sealed class ResubmitDriftPhase4Tests
         };
         var reconcileSync = new RecordingReconcileSync();
         var service = new ResubmitDriftService(
-            bundleRepo, reconcileSync, new RecordingSapRepo(), NullLogger<ResubmitDriftService>.Instance);
+            bundleRepo, reconcileSync, new RecordingSapRepo(), NoOpCsvFillService.Instance, NullLogger<ResubmitDriftService>.Instance);
 
         var result = await service.DetectAndReconcileAsync(pending.Folder, FileName, CancellationToken.None);
 
         Assert.NotNull(result);
-        // Per-slit SQL still follows the file (same as operator slit reconcile on a locked bundle) …
+        // Per-slit SQL still follows the file (same as operator slit reconcile on a locked bundle) â€¦
         Assert.Equal((BatchNo, "01", 12), Assert.Single(reconcileSync.SlitSyncs));
-        // … but the locked bundle total is untouched; only Post_Recon_Csv_Sum refreshes.
+        // â€¦ but the locked bundle total is untouched; only Post_Recon_Csv_Sum refreshes.
         Assert.Empty(bundleRepo.TotalSyncs);
         Assert.Equal(BatchNo, Assert.Single(bundleRepo.PostReconSumRefreshes));
         Assert.Equal(BatchNo, Assert.Single(result!.ManualReconLockedBatches));
@@ -180,7 +180,7 @@ public sealed class ResubmitDriftPhase4Tests
         var reconcileSync = new RecordingReconcileSync();
         var sapRepo = new RecordingSapRepo();
         var service = new ResubmitDriftService(
-            bundleRepo, reconcileSync, sapRepo, NullLogger<ResubmitDriftService>.Instance);
+            bundleRepo, reconcileSync, sapRepo, NoOpCsvFillService.Instance, NullLogger<ResubmitDriftService>.Instance);
 
         var result = await service.DetectAndReconcileAsync(pending.Folder, FileName, CancellationToken.None);
 
@@ -200,11 +200,11 @@ public sealed class ResubmitDriftPhase4Tests
             $"1000060363,01,12,{BatchNo}");
         var reconcileSync = new RecordingReconcileSync();
         var service = new ResubmitDriftService(
-            new FakeDriftBundleRepo(), reconcileSync, new RecordingSapRepo(), NullLogger<ResubmitDriftService>.Instance);
+            new FakeDriftBundleRepo(), reconcileSync, new RecordingSapRepo(), NoOpCsvFillService.Instance, NullLogger<ResubmitDriftService>.Instance);
 
-        // SQL has no rows for the basename (e.g. ingest predates SQL traceability) → no sync.
+        // SQL has no rows for the basename (e.g. ingest predates SQL traceability) â†’ no sync.
         Assert.Null(await service.DetectAndReconcileAsync(pending.Folder, FileName, CancellationToken.None));
-        // Pending file vanished (SAP pulled it between poll and drift check) → no sync.
+        // Pending file vanished (SAP pulled it between poll and drift check) â†’ no sync.
         Assert.Null(await service.DetectAndReconcileAsync(pending.Folder, "does-not-exist.csv", CancellationToken.None));
         Assert.Empty(reconcileSync.SlitSyncs);
     }
@@ -352,3 +352,4 @@ public sealed class ResubmitDriftPhase4Tests
             Task.FromResult<(int, IReadOnlyList<RemovedSlitRowTraceRef>)>((0, Array.Empty<RemovedSlitRowTraceRef>()));
     }
 }
+

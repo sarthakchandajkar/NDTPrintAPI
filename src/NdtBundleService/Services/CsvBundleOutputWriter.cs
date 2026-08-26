@@ -14,6 +14,7 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
 {
     private readonly NdtBundleOptions _options;
     private readonly INdtBundleRepository _bundleRepository;
+    private readonly ICsvFillService _csvFill;
     private readonly INdtTagPrinter? _tagPrinter;
     private readonly ITraceabilityRepository? _traceability;
     private readonly IWipLabelProvider? _wipLabelProvider;
@@ -22,6 +23,7 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
     public CsvBundleOutputWriter(
         IOptions<NdtBundleOptions> options,
         INdtBundleRepository bundleRepository,
+        ICsvFillService csvFill,
         ILogger<CsvBundleOutputWriter> logger,
         INdtTagPrinter? tagPrinter = null,
         ITraceabilityRepository? traceability = null,
@@ -29,6 +31,7 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
     {
         _options = options.Value;
         _bundleRepository = bundleRepository;
+        _csvFill = csvFill;
         _tagPrinter = tagPrinter;
         _traceability = traceability;
         _wipLabelProvider = wipLabelProvider;
@@ -103,6 +106,9 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
             PoNumber = contextRecord.PoNumber,
             MillNo = contextRecord.MillNo,
             TotalNdtPcs = totalNdtPcs,
+            TargetNdtPcs = totalNdtPcs,
+            CsvFilled = 0,
+            CsvFillState = CsvFillState.PlcClosed,
             SlitNo = contextRecord.SlitNo,
             SlitStartTime = contextRecord.SlitStartTime,
             SlitFinishTime = contextRecord.SlitFinishTime,
@@ -111,6 +117,9 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
             RejectedShortLengthPipe = contextRecord.RejectedShortLengthPipe
         };
         await _bundleRepository.RecordBundlePendingPrintAsync(record, cancellationToken).ConfigureAwait(false);
+        await _csvFill
+            .TryInitializeFillTargetAsync(ndtBatchNoFormatted, totalNdtPcs, closeSource: null, cancellationToken)
+            .ConfigureAwait(false);
         await TryRecordBundleLabelAsync(contextRecord.PoNumber, contextRecord.MillNo, cancellationToken).ConfigureAwait(false);
 
         if (_tagPrinter is null)

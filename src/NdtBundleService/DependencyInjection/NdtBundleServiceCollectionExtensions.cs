@@ -32,10 +32,12 @@ public static class NdtBundleServiceCollectionExtensions
         services.AddSingleton<ICurrentPoPlanService, CurrentPoPlanService>();
         services.AddSingleton<INdtBundleRepository, NdtBundleRepository>();
         services.AddSingleton<INdtBundleRuntimeStateStore, NdtBundleRuntimeStateStore>();
-        services.AddSingleton<IBundleProvisionalStampCorrector, BundleProvisionalStampCorrector>();
+        services.AddSingleton<ICsvFillService, CsvFillService>();
+        services.AddSingleton<SlitCsvFillAssigner>();
         services.AddSingleton<IBundleEngine, NdtBundleEngine>();
         services.AddSingleton<IBundleOutputWriter, CsvBundleOutputWriter>();
         services.AddSingleton<INdtBatchStateService, NdtBatchStateService>();
+        services.AddHostedService<FillCutoverStartupCheck>();
         services.AddSingleton<INdtLabelPrinter, PdfNdtLabelPrinter>();
         services.AddSingleton<INdtBundleTagPrinter, NdtBundleTagPrintService>();
         services.AddSingleton<INetworkPrinterSender, NetworkPrinterSender>();

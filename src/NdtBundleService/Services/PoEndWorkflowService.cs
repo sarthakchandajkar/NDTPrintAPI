@@ -21,6 +21,7 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
     private readonly IPoLifecycleService _poLifecycle;
     private readonly IPipeSizeProvider _pipeSizeProvider;
     private readonly INdtBundleRepository _bundleRepository;
+    private readonly ICsvFillService _csvFill;
     private readonly PlcHandshakeStatusRegistry _handshakeStatus;
     private readonly IOptionsMonitor<NdtBundleOptions> _options;
     private readonly ILogger<PoEndWorkflowService> _logger;
@@ -36,6 +37,7 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
         IPoLifecycleService poLifecycle,
         IPipeSizeProvider pipeSizeProvider,
         INdtBundleRepository bundleRepository,
+        ICsvFillService csvFill,
         PlcHandshakeStatusRegistry handshakeStatus,
         IOptionsMonitor<NdtBundleOptions> options,
         ILogger<PoEndWorkflowService> logger,
@@ -51,6 +53,7 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
         _poLifecycle = poLifecycle;
         _pipeSizeProvider = pipeSizeProvider;
         _bundleRepository = bundleRepository;
+        _csvFill = csvFill;
         _handshakeStatus = handshakeStatus;
         _options = options;
         _logger = logger;
@@ -302,6 +305,16 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
             },
             cancellationToken,
             correlationId).ConfigureAwait(false);
+
+        await _csvFill
+            .AdvanceQuietShortAsync(
+                po,
+                millNo,
+                _options.CurrentValue.EffectiveCsvFillQuietMinutes,
+                DateTime.UtcNow,
+                forcePoEnd: true,
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     internal static PoEndFlushMode ResolveFlushMode(MillPoEndSource source, NdtBundleOptions opts)

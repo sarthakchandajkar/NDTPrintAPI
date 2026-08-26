@@ -82,7 +82,6 @@ public sealed class OpenAccumulationOverrideTests
             int millNo,
             int ndtPipes,
             int threshold,
-            out int batchNumberForRow,
             out int totalSoFar) =>
             throw new NotSupportedException();
 

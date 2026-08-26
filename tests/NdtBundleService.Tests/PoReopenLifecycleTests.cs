@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging.Abstractions;
+﻿using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Models;
@@ -9,7 +9,7 @@ using Xunit;
 
 namespace NdtBundleService.Tests;
 
-/// <summary>PO reopen (Closed→Running) for hold/resume cycles and orphan sweep guards.</summary>
+/// <summary>PO reopen (Closedâ†’Running) for hold/resume cycles and orphan sweep guards.</summary>
 public sealed class PoReopenLifecycleTests
 {
     private const string PoA = "1000060100";
@@ -35,19 +35,19 @@ public sealed class PoReopenLifecycleTests
         var poReopen = CreatePoReopen(lifecycle, runtime, repo, opts);
         var workflow = CreateWorkflow(engine, output, runtime, wip, lifecycle, opts);
 
-        // PO-A: five full bundles → sequences 10–14
+        // PO-A: five full bundles â†’ sequences 10â€“14
         for (var i = 0; i < 5; i++)
             await CloseFullBundleAsync(engine, output, PoA, Mill, Threshold);
 
         Assert.Equal([10, 11, 12, 13, 14], closed.Where(c => c.Po == PoA).Select(c => c.Batch).ToList());
 
-        // PO change trigger for PO-A — remainder batch 15
+        // PO change trigger for PO-A â€” remainder batch 15
         runtime.SetSizeCounts(PoA, Mill, new Dictionary<string, int> { ["Default"] = 7 });
         await workflow.ExecuteAsync(PoA, Mill, false, CancellationToken.None);
         await DrainAndCloseAsync(lifecycle, workflow, runtime, engine, output, opts, PoA);
         Assert.Contains(closed, c => c.Po == PoA && c.Batch == 15 && c.Pcs == 7);
 
-        // PO-B: bundles 16–20
+        // PO-B: bundles 16â€“20
         wip.SetRunningPo(PoB);
         runtime.SetEngineBatchNo(PoB, Mill, 15);
         for (var i = 0; i < 5; i++)
@@ -62,7 +62,7 @@ public sealed class PoReopenLifecycleTests
 
         var orphanCountBefore = closed.Count;
 
-        // Slit activity marks resume candidate only — reopen requires WIP confirmation
+        // Slit activity marks resume candidate only â€” reopen requires WIP confirmation
         wip.SetWaitingAfterPoEnd(PoB);
         runtime.SetSizeCounts(PoA, Mill, new Dictionary<string, int> { ["Default"] = 6 });
         runtime.SetLastActivityUtc(PoA, Mill, DateTime.UtcNow);
@@ -165,7 +165,7 @@ public sealed class PoReopenLifecycleTests
         lifecycle.TryMarkDraining(Mill, PoA, DateTime.UtcNow.AddHours(-1));
         await DrainAndCloseAsync(lifecycle, workflow, runtime, engine, output, opts, PoA);
 
-        // Late trickle for Closed PO-A while mill runs PO-B — not WIP-confirmed
+        // Late trickle for Closed PO-A while mill runs PO-B â€” not WIP-confirmed
         runtime.SetSizeCounts(PoA, Mill, new Dictionary<string, int> { ["Default"] = 3 });
         runtime.SetLastActivityUtc(PoA, Mill, DateTime.UtcNow.AddHours(-2));
         Assert.False(PoRunningAdoption.IsWipConfirmedRunning(PoA, PoB));
@@ -219,12 +219,9 @@ public sealed class PoReopenLifecycleTests
 
         var awaiting = await repo.TryGetAwaitingPlcReconBatchAsync(PoA, Mill, CancellationToken.None);
         Assert.NotNull(awaiting);
-        var slitSums = new Dictionary<(string Po, int Mill), int>();
-        Assert.True(PlcCsvReconAttach.TryAttach(
-            awaiting,
-            new InputSlitRecord { PoNumber = PoA, MillNo = Mill, SlitNo = "03", NdtPipes = 4 },
-            slitSums,
-            out _));
+        // Fill-to-target: late slit contributes toward target without inventing a new sequence.
+        var stamp = CsvFillLogic.ComputeAfterStamp(awaiting!.Value.BundleNo, awaiting.Value.PlcTotal, 0, 4, 20);
+        Assert.Equal(CsvFillState.CsvFilling, stamp.FillState);
 
         wip.AcceptNewPo(PoA);
         Assert.True(poReopen.TryReopenIfClosed(Mill, PoA, PoA));
@@ -401,6 +398,7 @@ public sealed class PoReopenLifecycleTests
             lifecycle,
             new PipeSizeStub(),
             new NoOpPlcCloseRepo(),
+            NoOpCsvFillService.Instance,
             new PlcHandshakeStatusRegistry(),
             Monitor(opts),
             NullLogger<PoEndWorkflowService>.Instance);
@@ -664,7 +662,8 @@ public sealed class PoReopenLifecycleTests
                 return Task.FromResult<PlcCsvReconResult?>(null);
 
             if (!force
-                && !PlcCsvReconFifo.ShouldFinalize(a.PlcTotal, slitSum, DateTime.UtcNow.AddHours(-1), reconWindowMinutes, utcNow))
+                && slitSum < a.PlcTotal
+                && (utcNow - DateTime.UtcNow.AddHours(-1)).TotalMinutes < reconWindowMinutes)
             {
                 return Task.FromResult<PlcCsvReconResult?>(null);
             }
@@ -801,14 +800,13 @@ public sealed class PoReopenLifecycleTests
         public void SetLastActivityUtc(string poNumber, int millNo, DateTime utc) =>
             S(poNumber, millNo).LastActivityUtc = utc;
 
-        public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int batchNumberForRow, out int totalSoFar)
+        public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int totalSoFar)
         {
             var slot = S(poNumber, millNo);
             slot.LastActivityUtc = DateTime.UtcNow;
             var floor = _millMax.GetValueOrDefault(millNo);
             if (slot.ProvisionalBatchNo <= 0)
                 slot.ProvisionalBatchNo = Math.Max(floor, slot.EngineBatchNo) + 1;
-            batchNumberForRow = slot.ProvisionalBatchNo;
             if (ndtPipes > 0)
                 slot.RunningTotal += ndtPipes;
             totalSoFar = slot.RunningTotal;
@@ -824,7 +822,7 @@ public sealed class PoReopenLifecycleTests
             slot.BatchOffset = final;
             slot.ProvisionalBatchNo = 0;
             slot.RunningTotal = 0;
-            return new BundleCloseAllocation(final, final);
+            return new BundleCloseAllocation(final);
         }
 
         public void AdvanceOnPoEnd(string poNumber, int millNo, int threshold)

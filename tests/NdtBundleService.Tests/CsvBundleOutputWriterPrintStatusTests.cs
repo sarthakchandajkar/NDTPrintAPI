@@ -85,6 +85,7 @@ public sealed class CsvBundleOutputWriterPrintStatusTests
         return new CsvBundleOutputWriter(
             options,
             repo,
+            NoOpCsvFillService.Instance,
             NullLogger<CsvBundleOutputWriter>.Instance,
             tagPrinter);
     }

@@ -1,4 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
+using NdtBundleService.Configuration;
 using NdtBundleService.Models;
 using NdtBundleService.Services;
 
@@ -25,6 +27,7 @@ public sealed class ReconcileController : ControllerBase
     private readonly IReconcileBundleTagService _reconcileTagService;
     private readonly IOutputSlitSapStatusRepository _sapStatus;
     private readonly IPpcCorrectionRepository _ppcCorrections;
+    private readonly IOptionsMonitor<NdtBundleOptions> _options;
     private readonly ILogger<ReconcileController> _logger;
 
     public ReconcileController(
@@ -36,6 +39,7 @@ public sealed class ReconcileController : ControllerBase
         IReconcileBundleTagService reconcileTagService,
         IOutputSlitSapStatusRepository sapStatus,
         IPpcCorrectionRepository ppcCorrections,
+        IOptionsMonitor<NdtBundleOptions> options,
         ILogger<ReconcileController> logger)
     {
         _bundleRepository = bundleRepository;
@@ -46,6 +50,7 @@ public sealed class ReconcileController : ControllerBase
         _reconcileTagService = reconcileTagService;
         _sapStatus = sapStatus;
         _ppcCorrections = ppcCorrections;
+        _options = options;
         _logger = logger;
     }
 
@@ -421,6 +426,47 @@ public sealed class ReconcileController : ControllerBase
             .ReprintAsync(bundleForPrint, cancellationToken)
             .ConfigureAwait(false);
 
+        // Plan case (c): mid-fill corrected target below already-stamped CSV → open PPC resubmit items
+        // for any SAP-Accepted files on this batch (operator email path; system never auto-emails).
+        var ppcItemsCreated = 0;
+        var ppcItemsUpdated = 0;
+        IReadOnlyList<string> sapAcceptedFiles = Array.Empty<string>();
+        if (result.FillOvershootVsCorrectedTarget)
+        {
+            try
+            {
+                var (filesBySlit, statusByFile) = await GetSlitSapStatusAsync(batchNo, cancellationToken)
+                    .ConfigureAwait(false);
+                var allSlits = filesBySlit.Keys.ToList();
+                sapAcceptedFiles = ResolveSapAcceptedFilesForSlits(filesBySlit, statusByFile, allSlits);
+                foreach (var fileName in sapAcceptedFiles)
+                {
+                    var upsert = await _ppcCorrections
+                        .UpsertOpenItemAsync(
+                            batchNo,
+                            fileName,
+                            slitNo: string.Empty,
+                            oldNdtPipes: result.CsvFilledAtReconcile,
+                            correctedNdtPipes: result.CorrectedTotal,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    if (upsert is null)
+                        continue;
+                    if (upsert.Created)
+                        ppcItemsCreated++;
+                    else
+                        ppcItemsUpdated++;
+                }
+            }
+            catch (Exception ppcEx)
+            {
+                _logger.LogWarning(
+                    ppcEx,
+                    "PPC correction upsert after manual reconcile overshoot failed for {BatchNo}.",
+                    batchNo);
+            }
+        }
+
         return Ok(new
         {
             Message = printResult.Success
@@ -436,6 +482,11 @@ public sealed class ReconcileController : ControllerBase
             CountDiscrepancyLogged = result.CountDiscrepancyLogged,
             SlitSumAtFinalize = result.SlitSumAtFinalize,
             ManualReconOriginalTotal = result.Bundle.ManualReconOriginalTotal ?? result.OriginalTotal,
+            CsvFilledAtReconcile = result.CsvFilledAtReconcile,
+            FillOvershootVsCorrectedTarget = result.FillOvershootVsCorrectedTarget,
+            SapAcceptedFiles = sapAcceptedFiles,
+            PpcCorrectionItemsCreated = ppcItemsCreated,
+            PpcCorrectionItemsUpdated = ppcItemsUpdated,
             PoMismatchWarning = poMismatchWarning
         });
     }
@@ -898,6 +949,62 @@ public sealed class ReconcileController : ControllerBase
             NdtBatchNo = batchNo,
             NdtPcs = bundle.TotalNdtPcs
         });
+    }
+
+    /// <summary>
+    /// Operator-initiated Accepted resubmit: regenerate corrected pending CSV (same basename),
+    /// bump Resubmit_Count via pending drop, return pre-filled email change summary. Never sends email.
+    /// Future move UI can call the same transactional services used by detect-on-resubmit.
+    /// </summary>
+    [HttpPost("resubmit-accepted-file")]
+    public async Task<IActionResult> ResubmitAcceptedFile(
+        [FromBody] ResubmitAcceptedFileRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request is null || string.IsNullOrWhiteSpace(request.FileName))
+            return BadRequest(new { Message = "FileName is required." });
+
+        var fileName = Path.GetFileName(request.FileName.Trim());
+        var pendingFolder = (_options.CurrentValue.OutputBundleFolder ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(pendingFolder))
+            return BadRequest(new { Message = "OutputBundleFolder is not configured." });
+
+        if (request.CsvLines is null || request.CsvLines.Count == 0)
+            return BadRequest(new { Message = "CsvLines (full corrected CSV including header) are required." });
+
+        Directory.CreateDirectory(pendingFolder);
+        var path = Path.Combine(pendingFolder, fileName);
+        await System.IO.File.WriteAllLinesAsync(path, request.CsvLines, cancellationToken).ConfigureAwait(false);
+
+        var emailSummary =
+            $"SAP NDT Input Slit resubmission request\r\n"
+            + $"File: {fileName}\r\n"
+            + $"Old batch: {request.OldBatchNo}\r\n"
+            + $"New batch: {request.NewBatchNo}\r\n"
+            + $"Corrected totals / notes: {request.ChangeNotes}\r\n"
+            + "Please delete/correct the posted SAP record for the OLD key (if batch changed) and re-ingest the pending file.";
+
+        _logger.LogWarning(
+            "Operator Accepted resubmit: wrote {Path}. Email is NOT sent; present summary to operator.",
+            path);
+
+        return Ok(new
+        {
+            Message = "Corrected file written to pending folder. Email SAP manually using EmailChangeSummary.",
+            FileName = fileName,
+            PendingPath = path,
+            EmailChangeSummary = emailSummary,
+            Note = "Future UI move action should call the same ResubmitDrift / CsvFill batch-move services."
+        });
+    }
+
+    public sealed class ResubmitAcceptedFileRequest
+    {
+        public string FileName { get; set; } = string.Empty;
+        public IReadOnlyList<string> CsvLines { get; set; } = Array.Empty<string>();
+        public string? OldBatchNo { get; set; }
+        public string? NewBatchNo { get; set; }
+        public string? ChangeNotes { get; set; }
     }
 
     public sealed class ManualBundleReconcileRequest

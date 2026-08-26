@@ -26,10 +26,7 @@ public enum BackfillBundlingAction
     TraceabilityOnly = 1,
 
     /// <summary>Traceability only + flag <c>Manual_Review</c>; do not print.</summary>
-    ManualReview = 2,
-
-    /// <summary>Closed PO: allow bundling then immediately close-and-print via orphan policy.</summary>
-    OrphanAutoClose = 3
+    ManualReview = 2
 }
 
 /// <summary>Pure F-5.2 / F-4.4 decision helpers for Input Slit backfill.</summary>

@@ -180,10 +180,39 @@ public class NdtBundleOptions
     public int MaxInputSlitFileProcessingFailures { get; set; } = 20;
 
     /// <summary>
-    /// Minutes to keep a PLC-closed bundle in <c>Awaiting_Csv_Recon</c> before force-finalizing recon
-    /// (discrepancy WRN only at finalize). Default 180.
+    /// Minutes with no new CSV row on an incomplete fill slot before marking <c>CsvShort</c> and advancing.
+    /// Default 180. Replaces the former <c>Awaiting_Csv_Recon</c> / <see cref="ReconWindowMinutes"/> timeout.
+    /// </summary>
+    public int CsvFillQuietMinutes { get; set; } = 180;
+
+    /// <summary>
+    /// Obsolete alias for <see cref="CsvFillQuietMinutes"/>. Prefer <see cref="CsvFillQuietMinutes"/>.
+    /// When set in config without <see cref="CsvFillQuietMinutes"/>, binders may still populate this;
+    /// runtime code should use <see cref="EffectiveCsvFillQuietMinutes"/>.
     /// </summary>
     public int ReconWindowMinutes { get; set; } = 180;
+
+    /// <summary>Resolved quiet timeout: prefers <see cref="CsvFillQuietMinutes"/> when &gt; 0, else <see cref="ReconWindowMinutes"/>.</summary>
+    public int EffectiveCsvFillQuietMinutes =>
+        CsvFillQuietMinutes > 0 ? CsvFillQuietMinutes : Math.Max(1, ReconWindowMinutes);
+
+    /// <summary>
+    /// When true (default in Production), refuse to start if <c>Awaiting_Csv_Recon=1</c> or open provisional
+    /// runtime slots remain — mistimed quiet-drain cutover must not silently mix behaviours.
+    /// </summary>
+    public bool RequireCleanFillCutover { get; set; } = true;
+
+    /// <summary>
+    /// Per-mill CSV batch column mode. Key = mill number as string ("1".."4").
+    /// <c>FillToTarget</c> = real NDT numbers; <c>Constant</c> = literal <see cref="MillCsvBatchModeEntry.Value"/> (e.g. "10001").
+    /// </summary>
+    public Dictionary<string, MillCsvBatchModeEntry> MillCsvBatchMode { get; set; } = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["1"] = new MillCsvBatchModeEntry { Mode = "FillToTarget" },
+        ["2"] = new MillCsvBatchModeEntry { Mode = "Constant", Value = "10001" },
+        ["3"] = new MillCsvBatchModeEntry { Mode = "Constant", Value = "10001" },
+        ["4"] = new MillCsvBatchModeEntry { Mode = "Constant", Value = "10001" },
+    };
 
     /// <summary>
     /// When <c>Post_Recon_Csv_Sum</c> on a Manual_Recon-locked bundle exceeds <c>Total_NDT_Pcs</c> by more than

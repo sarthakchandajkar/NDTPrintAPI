@@ -1,4 +1,4 @@
-using System.Reflection;
+﻿using System.Reflection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
@@ -39,7 +39,7 @@ public sealed class WipBundleProductionTimeOrderingTests : IDisposable
         }
     }
 
-    // T1 — 06:16 cross-PO bounce: after 546 ends, 522 backlog with fresher mtimes must not re-accept.
+    // T1 â€” 06:16 cross-PO bounce: after 546 ends, 522 backlog with fresher mtimes must not re-accept.
     [Fact]
     public async Task T1_AfterPoEnd_cross_po_backlog_replay_rejected_then_newer_po_accepted()
     {
@@ -93,7 +93,7 @@ public sealed class WipBundleProductionTimeOrderingTests : IDisposable
         Assert.Contains(notifier.Confirmations, c => c.Mill == 1 && c.Po == "1000060549");
     }
 
-    // T2 — 04:15 same-PO out-of-order-by-embedded-time: older SortKeys with fresher mtimes are ignored.
+    // T2 â€” 04:15 same-PO out-of-order-by-embedded-time: older SortKeys with fresher mtimes are ignored.
     [Fact]
     public async Task T2_SamePo_out_of_order_embedded_time_with_fresh_mtime_rejected()
     {
@@ -127,7 +127,7 @@ public sealed class WipBundleProductionTimeOrderingTests : IDisposable
         Assert.Equal("260727_042012", GetLastAppliedSortKey(provider, 1));
     }
 
-    // T3 — SortKey forward but mtime regresses → reject + pins the secondary-guard truth table.
+    // T3 â€” SortKey forward but mtime regresses â†’ reject + pins the secondary-guard truth table.
     [Fact]
     public async Task T3_SortKey_forward_mtime_regresses_rejected()
     {
@@ -148,11 +148,11 @@ public sealed class WipBundleProductionTimeOrderingTests : IDisposable
         Assert.Equal("260727_050000", GetLastAppliedSortKey(provider, 1));
     }
 
-    // T4 — no on-share files for ended PO → floor falls back to PoEndUtc-derived key.
+    // T4 â€” no on-share files for ended PO â†’ floor falls back to PoEndUtc-derived key.
     [Fact]
     public async Task T4_PoEnd_floor_falls_back_to_po_end_utc_when_no_ended_po_files()
     {
-        var provider = CreateProvider(); // empty folder — no seed
+        var provider = CreateProvider(); // empty folder â€” no seed
         Assert.Null(await provider.TryGetRunningPoForMillAsync(1, CancellationToken.None));
 
         var before = DateTime.UtcNow;
@@ -163,7 +163,7 @@ public sealed class WipBundleProductionTimeOrderingTests : IDisposable
         var floor = GetEndedPoLastWipSortKey(provider, 1);
         Assert.False(string.IsNullOrEmpty(floor));
         Assert.True(WipSortKey.IsValid(floor));
-        // Floor is plant-local formatting of PoEndUtc — must sit in the PO-end window.
+        // Floor is plant-local formatting of PoEndUtc â€” must sit in the PO-end window.
         Assert.True(
             string.CompareOrdinal(floor, WipSortKey.FromUtc(before.AddSeconds(-2))) >= 0
             && string.CompareOrdinal(floor, WipSortKey.FromUtc(after.AddSeconds(2))) <= 0);
@@ -176,7 +176,7 @@ public sealed class WipBundleProductionTimeOrderingTests : IDisposable
         Assert.Equal("1000060549", await provider.TryGetRunningPoForMillAsync(1, CancellationToken.None));
     }
 
-    // T5 — genuine A→B→A resume: A's new WIP (SortKey after B's floor) reopens Closed A.
+    // T5 â€” genuine Aâ†’Bâ†’A resume: A's new WIP (SortKey after B's floor) reopens Closed A.
     [Fact]
     public async Task T5_Genuine_A_B_A_resume_reopens_closed_po()
     {
@@ -209,7 +209,7 @@ public sealed class WipBundleProductionTimeOrderingTests : IDisposable
         Assert.Contains(notifier.Confirmations, c => c.Mill == 1 && c.Po == "1000060522");
     }
 
-    // T6 — stale Closed-PO backlog must not apply and must not reopen.
+    // T6 â€” stale Closed-PO backlog must not apply and must not reopen.
     [Fact]
     public async Task T6_Stale_closed_po_backlog_does_not_reopen()
     {
@@ -231,7 +231,7 @@ public sealed class WipBundleProductionTimeOrderingTests : IDisposable
             reopen.TryReopenIfClosed(mill, po, po);
         };
 
-        // Stale 522 backlog (SortKey before floor) with refreshed mtime — mill waiting.
+        // Stale 522 backlog (SortKey before floor) with refreshed mtime â€” mill waiting.
         var drip = DateTime.UtcNow;
         Assert.False(provider.TrySetRunningPoFromWipFile(
             1, "1000060522", drip, "WIP_01_1000060522_2601020504_260727_042012.csv"));
@@ -256,7 +256,7 @@ public sealed class WipBundleProductionTimeOrderingTests : IDisposable
 
     // T7 lives in WipBundleReconciliationTests.ReconcileAsync_orders_by_embedded_production_time_not_write_stamp.
 
-    // T8 — when WIP is waiting (running PO null), ResolvePoNumberAsync falls through to slit PO.
+    // T8 â€” when WIP is waiting (running PO null), ResolvePoNumberAsync falls through to slit PO.
     [Fact]
     public async Task T8_ResolvePo_falls_through_to_slit_when_wip_waiting()
     {
@@ -488,9 +488,8 @@ public sealed class WipBundleProductionTimeOrderingTests : IDisposable
         public void ClearOpenAccumulation(string poNumber, int millNo) { }
         public DateTime GetLastActivityUtc(string poNumber, int millNo) => DateTime.UtcNow;
         public Task SyncBatchSequencesFromBundlesAsync(CancellationToken cancellationToken) => Task.CompletedTask;
-        public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int batchNumberForRow, out int totalSoFar)
+        public void ApplySlitContribution(string poNumber, int millNo, int ndtPipes, int threshold, out int totalSoFar)
         {
-            batchNumberForRow = 1;
             totalSoFar = ndtPipes;
         }
         public BundleCloseAllocation CloseBundle(string poNumber, int millNo, int closedTotalPcs, int threshold) => new(1, 1);
