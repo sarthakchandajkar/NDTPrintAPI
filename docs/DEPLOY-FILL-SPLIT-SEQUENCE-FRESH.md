@@ -95,14 +95,22 @@ DBCC CHECKIDENT ('dbo.NDT_Bundle', RESEED, 0);
 
 Do **not** drop `NDT_Bundle` / `Input_Slit_Row` / etc. You are emptying rows, not removing the base schema.
 
-#### 2.3 Folders to **archive** (move, do not delete)
+#### 2.3 Folders — SAP source vs MES output
 
-Create `\\10.2.20.210\pas-sap\To SAP\TM\_archive\ndt-reset-YYYYMMDD\` and **move** contents of:
+**Do not move, delete, or empty** SAP source folders. The service only **reads** them (never writes, moves, or deletes):
+
+| Folder | Why leave it |
+|---|---|
+| `\\10.2.20.210\pas-sap\To SAP\TM\Input Slit` | SAP slit inbox. Mill ingest source. Skip leftovers with mill `MinSourceFileLastWriteUtc` (step 2.5). |
+| `\\10.2.20.210\pas-sap\To SAP\TM\Input Slit Accepted` | SAP-accepted slit copies. Dashboard / running-PO read only — **not** mill ingest. |
+| `\\10.2.20.210\pas-sap\From SAP\TMFG_TMWIP\PO Accepted` | Shared re-imports `PO_Plan_WIP` from here |
+| `\\10.2.20.210\pas-sap\To SAP\TM\NDT\NDT Input Slit\FormationChart.csv` | Thresholds |
+| `\\10.2.20.210\pas-sap\To SAP\TM\Bundle` and `Bundle Accepted` | WIP bundle files (PO running / mill-4 file PO-end) |
+
+Optional: archive **MES-written** NDT outputs (move, do not delete) into `\\10.2.20.210\pas-sap\To SAP\TM\_archive\ndt-reset-YYYYMMDD\` if you want a clean pickup folder. Skip this if those folders are also SAP-owned / read-only.
 
 | Folder (production path) | What it is |
 |---|---|
-| `\\10.2.20.210\pas-sap\To SAP\TM\Input Slit` | SAP Input Slit inbox (mill will re-ingest leftovers) |
-| `\\10.2.20.210\pas-sap\To SAP\TM\Input Slit Accepted` | Processed input copies |
 | `\\10.2.20.210\pas-sap\To SAP\TM\NDT\NDT Input Slit\Input Slit` | MES output CSVs (SAP pickup — not switched yet) |
 | `\\10.2.20.210\pas-sap\To SAP\TM\NDT\NDT Input Slit\NDT Input Slit Accepted` | SAP-accepted NDT outputs |
 | `\\10.2.20.210\pas-sap\To SAP\TM\NDT\NDT Input Slit\NDT Input Slit Rejected` | SAP-rejected NDT outputs |
@@ -110,15 +118,7 @@ Create `\\10.2.20.210\pas-sap\To SAP\TM\_archive\ndt-reset-YYYYMMDD\` and **move
 | `\\10.2.20.210\pas-sap\To SAP\TM\NDT\NDT Final Output\Bundle` | NDT process CSVs |
 | `\\10.2.20.210\pas-sap\To SAP\TM\NDT\MES PAS NDT\Bundle` | Upload-to-SAP bundle CSVs |
 
-Leave **in place** (not archive):
-
-| Folder | Why |
-|---|---|
-| `\\10.2.20.210\pas-sap\From SAP\TMFG_TMWIP\PO Accepted` | Shared re-imports `PO_Plan_WIP` from here |
-| `\\10.2.20.210\pas-sap\To SAP\TM\NDT\NDT Input Slit\FormationChart.csv` | Thresholds |
-| `\\10.2.20.210\pas-sap\To SAP\TM\Bundle` and `Bundle Accepted` | WIP bundle files (PO running / mill-4 file PO-end). Archive only if you know they are leftover test files for POs you will not resume. |
-
-Recreate empty inbox/output folders after the move so the service can write.
+Do **not** recreate `Input Slit` or `Input Slit Accepted` as empty.
 
 #### 2.4 State files to **delete** (every JSON the mill writes)
 
@@ -140,22 +140,25 @@ All under `\\10.2.20.210\pas-sap\To SAP\TM\NDT\NDT Input Slit\` (and any copy ne
 
 Shared dashboard saves printers to `MillPrinterSettings.json` (next to the Shared/base `NdtBundleRuntimeStateFile`), **not** the `-M{n}` files. Mill instances read `-M{n}`. Put printer IPs in the mill files, not only on Shared.
 
-#### 2.5 `BackfillLookbackHours` so old source files are not re-ingested
+#### 2.5 Skip leftover SAP slit files (`MinSourceFileLastWriteUtc`)
 
-Production default is **48 hours**. On mill start, `SlitMonitoringWorker` scans `Input Slit` and queues any file whose `LastWriteTimeUtc` is within 48 hours **and** whose path+write-time is **not** in `Input_Slit_Row` (which you just emptied). That **will** re-create bundles from leftover inbox files.
+`Input Slit` and `Input Slit Accepted` stay populated (read-only SAP sources). The mill **never** moves or deletes them.
 
-Do **all** of:
+Ingest reads **only** `Input Slit`. `Input Slit Accepted` is dashboard / running-PO only.
 
-1. Inbox is empty after archive (step 2.3). Confirm `Input Slit` has zero files.
-2. After mill start, first log line must show queued = 0:
+Production `BackfillLookbackHours` is **48**. After the SQL wipe, `Input_Slit_Row` is empty, so any inbox file whose `LastWriteTimeUtc` is within 48 hours **and** on or after `MinSourceFileLastWriteUtc` is queued as a new slit. Leave the mill floor **one second after the newest leftover** in `Input Slit`.
 
-   `Input Slit reconcile: scanned {N}, already imported 0, queued for backfill 0, outside lookback/min-write {M} (lookbackHours=48).`
+Mill-1..4 templates currently use `"MinSourceFileLastWriteUtc": "2026-08-30T12:53:57Z"` (newest leftover at generate time was `12:53:56Z`). **Re-measure immediately before mill start** and bump all four mill files if a newer leftover exists:
 
-3. If you cannot empty the inbox, set on **each mill** `appsettings.Production.json` **before start**:
+```powershell
+$newest = (Get-ChildItem '\\10.2.20.210\pas-sap\To SAP\TM\Input Slit' -File |
+  Measure-Object LastWriteTimeUtc -Maximum).Maximum
+([datetime]$newest).ToUniversalTime().AddSeconds(1).ToString('yyyy-MM-ddTHH:mm:ssZ')
+```
 
-   `"MinSourceFileLastWriteUtc": "2026-08-30T12:00:00Z"`
+Leave Shared `MinSourceFileLastWriteUtc` **empty** so PO Accepted scans are not cut off. Do **not** set `BackfillLookbackHours` to 0 — the code clamps to **minimum 1 hour**.
 
-   (use a timestamp **after** the last leftover file write; ISO UTC). That raises the floor above `BackfillLookbackHours`. Do **not** set `BackfillLookbackHours` to 0 — the code clamps to **minimum 1 hour**.
+After mill start, first reconcile line must show `queued for backfill 0` (leftovers counted in `outside lookback/min-write`). If queued is not 0, stop that mill, raise the floor, restart.
 
 `PoPlanImportMinLastWriteUtc` is `2026-06-01T00:00:00Z`. Shared **will** re-import PO Accepted files from that date. That is intended so the first PO has pipe size / NDT pcs. It does not create NDT bundles.
 
