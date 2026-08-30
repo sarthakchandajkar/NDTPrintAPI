@@ -26,7 +26,13 @@ public enum BackfillBundlingAction
     TraceabilityOnly = 1,
 
     /// <summary>Traceability only + flag <c>Manual_Review</c>; do not print.</summary>
-    ManualReview = 2
+    ManualReview = 2,
+
+    /// <summary>
+    /// Fill-to-target terminal-row gate: hold unpublished, flag <c>Manual_Review</c>, do not stamp
+    /// the next incomplete bundle.
+    /// </summary>
+    HoldReview = 3
 }
 
 /// <summary>Pure F-5.2 / F-4.4 decision helpers for Input Slit backfill.</summary>
@@ -75,4 +81,66 @@ public static class InputSlitBackfillPolicy
         // Running / Draining + no coverage
         return BackfillBundlingAction.NormalBundle;
     }
+
+    /// <summary>
+    /// SQL printed-bundle lookup for F-5 coverage. A lookup failure must not stay <see cref="BackfillCoverageKind.None"/>
+    /// (that would stamp the next incomplete on a transient SQL error).
+    /// </summary>
+    public static BackfillCoverageKind ApplySqlPrintedLookup(
+        BackfillCoverageKind current,
+        bool sqlLookupFailed,
+        bool hasPrintedBundle)
+    {
+        if (current != BackfillCoverageKind.None)
+            return current;
+
+        return sqlLookupFailed || hasPrintedBundle
+            ? BackfillCoverageKind.Ambiguous
+            : BackfillCoverageKind.None;
+    }
+
+    /// <summary>
+    /// Fail-closed mapping for <c>HasPrintedBundleForPoAsync</c>: a lookup error is treated as present
+    /// so callers cannot downgrade coverage to <see cref="BackfillCoverageKind.None"/>.
+    /// </summary>
+    public static bool FailClosedHasPrintedBundle(bool found, bool lookupFailed) =>
+        lookupFailed || found;
+}
+
+/// <summary>
+/// Fill-to-target gate for F-5 backfill only: completed bundles exclude the current fill pointer;
+/// they are never stamp targets. Live ingest does not call this.
+/// </summary>
+public static class InputSlitBackfillFillGate
+{
+    public static bool ShouldApply(
+        bool isBackfill,
+        BackfillBundlingAction action,
+        MillPoEndSource poEndSource,
+        bool isFillToTarget) =>
+        isBackfill
+        && action == BackfillBundlingAction.NormalBundle
+        && poEndSource == MillPoEndSource.Plc
+        && isFillToTarget;
+
+    /// <summary>
+    /// True → hold unpublished + Manual_Review (do not call the fill assigner).
+    /// False → stamp the oldest incomplete via the existing assigner.
+    /// </summary>
+    public static bool ShouldHoldRatherThanStamp(
+        DateTime fileLastWriteUtc,
+        bool hasTerminalFillRow,
+        DateTime? oldestIncompletePrintedAtUtc)
+    {
+        if (!hasTerminalFillRow)
+            return false;
+
+        if (oldestIncompletePrintedAtUtc is null)
+            return true;
+
+        return ToUtc(fileLastWriteUtc) < ToUtc(oldestIncompletePrintedAtUtc.Value);
+    }
+
+    private static DateTime ToUtc(DateTime value) =>
+        value.Kind == DateTimeKind.Utc ? value : value.ToUniversalTime();
 }

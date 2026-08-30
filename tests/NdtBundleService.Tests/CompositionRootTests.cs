@@ -2,6 +2,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.DependencyInjection;
 using NdtBundleService.Services;
@@ -57,6 +58,7 @@ public sealed class CompositionRootTests : IDisposable
 
         var types = GetHostedServiceTypes(provider);
         Assert.Contains(typeof(SqlTraceabilityStartupCheck), types);
+        Assert.Contains(typeof(SourceFileEligibilityStartupLog), types);
         Assert.Contains(typeof(PoPlanCacheWarmupService), types);
         Assert.Contains(typeof(NdtInputSlitSapStatusWorker), types);
         Assert.DoesNotContain(typeof(PlcHandshakeWorker), types);
@@ -98,6 +100,19 @@ public sealed class CompositionRootTests : IDisposable
         Assert.True(
             hosted.IndexOf(typeof(MillInstanceLeaseHostedService))
             < hosted.IndexOf(typeof(SlitMonitoringWorker)));
+    }
+
+    [Fact]
+    public async Task AddNdtBundleServices_malformed_MinSourceFileLastWriteUtc_throws()
+    {
+        var config = BuildCompositionConfiguration(_tempRoot, new Dictionary<string, string?>
+        {
+            ["NdtBundle:MinSourceFileLastWriteUtc"] = "not-a-date"
+        });
+
+        var ex = await Assert.ThrowsAsync<OptionsValidationException>(() => BuildProviderAsync(config));
+        Assert.Contains("not-a-date", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("MinSourceFileLastWriteUtc", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

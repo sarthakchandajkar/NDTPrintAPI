@@ -478,13 +478,30 @@ public sealed class SlitMonitoringWorker : BackgroundService
                         foreach (var er in eligibleForCoverage
                                      .GroupBy(r => (Po: InputSlitCsvParsing.NormalizePo(r.PoNumber), r.MillNo)))
                         {
-                            if (await _bundleRepository
-                                    .HasPrintedBundleForPoAsync(er.Key.MillNo, er.Key.Po, cancellationToken)
-                                    .ConfigureAwait(false))
+                            var sqlLookupFailed = false;
+                            var hasPrinted = false;
+                            try
                             {
-                                backfillCoverage = BackfillCoverageKind.Ambiguous;
-                                break;
+                                hasPrinted = await _bundleRepository
+                                    .HasPrintedBundleForPoAsync(er.Key.MillNo, er.Key.Po, cancellationToken)
+                                    .ConfigureAwait(false);
                             }
+                            catch (Exception ex)
+                            {
+                                sqlLookupFailed = true;
+                                _logger.LogWarning(
+                                    ex,
+                                    "Backfill coverage SQL lookup failed for PO {PO} Mill {Mill}; treating as Ambiguous.",
+                                    er.Key.Po,
+                                    er.Key.MillNo);
+                            }
+
+                            backfillCoverage = InputSlitBackfillPolicy.ApplySqlPrintedLookup(
+                                backfillCoverage,
+                                sqlLookupFailed,
+                                hasPrinted);
+                            if (backfillCoverage == BackfillCoverageKind.Ambiguous)
+                                break;
                         }
                     }
 
@@ -613,6 +630,58 @@ public sealed class SlitMonitoringWorker : BackgroundService
                         rowPhase,
                         poEndSource,
                         o.AutoCloseOrphanBundles);
+
+                    if (InputSlitBackfillFillGate.ShouldApply(
+                            isBackfill,
+                            backfillAction,
+                            poEndSource,
+                            MillCsvBatchModeResolver.Resolve(o, bundleRecord.MillNo).IsFillToTarget))
+                    {
+                        backfillAction = await ApplyBackfillTerminalFillGateAsync(
+                                fileFull,
+                                bundleRecord,
+                                lwUtc,
+                                wipByPo,
+                                pipeSizeByPo,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+
+                    if (backfillAction == BackfillBundlingAction.HoldReview)
+                    {
+                        var holdKey = (InputSlitCsvParsing.NormalizePo(bundleRecord.PoNumber), bundleRecord.MillNo);
+                        var (_, holdPipeSize) = ResolvePipeInfoForPo(
+                            bundleRecord.PoNumber,
+                            wipByPo,
+                            pipeSizeByPo);
+                        if (manualReviewFlagged.Add(holdKey))
+                        {
+                            _logger.LogWarning(
+                                "Backfill fill-to-target hold: PO {PO} Mill {Mill} file {File} LastWrite {LastWrite:o} — unpublished, Manual_Review (no stamp on next incomplete).",
+                                holdKey.Item1,
+                                holdKey.Item2,
+                                Path.GetFileName(fileFull),
+                                lwUtc);
+                            await _bundleRepository
+                                .MarkManualReviewAsync(holdKey.Item1, holdKey.Item2, cancellationToken)
+                                .ConfigureAwait(false);
+                        }
+
+                        await _csvFill
+                            .UpsertHoldAsync(
+                                fileFull,
+                                bundleRecord.PoNumber,
+                                bundleRecord.MillNo,
+                                holdPipeSize,
+                                CsvFillHoldReason.BackfillAfterTerminal,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+
+                        inputRowsForSql.Add((effectiveRecord, sourceRowNumber));
+                        anyEligibleMillRow = true;
+                        sourceRowNumber++;
+                        continue;
+                    }
 
                     if (backfillAction is BackfillBundlingAction.TraceabilityOnly or BackfillBundlingAction.ManualReview)
                     {
@@ -1217,6 +1286,69 @@ public sealed class SlitMonitoringWorker : BackgroundService
             NdtShortLengthPipe = r.NdtShortLengthPipe,
             RejectedShortLengthPipe = r.RejectedShortLengthPipe,
         };
+
+    private async Task<BackfillBundlingAction> ApplyBackfillTerminalFillGateAsync(
+        string fileFull,
+        InputSlitRecord bundleRecord,
+        DateTime fileLastWriteUtc,
+        IReadOnlyDictionary<string, PoPlanWipRow> wipByPo,
+        IReadOnlyDictionary<string, string> pipeSizeByPo,
+        CancellationToken cancellationToken)
+    {
+        var (_, pipeSize) = ResolvePipeInfoForPo(bundleRecord.PoNumber, wipByPo, pipeSizeByPo);
+        var hasTerminal = false;
+        try
+        {
+            hasTerminal = await _csvFill
+                .HasTerminalFillRowAsync(bundleRecord.PoNumber, bundleRecord.MillNo, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            hasTerminal = true;
+            _logger.LogWarning(
+                ex,
+                "Backfill terminal-fill lookup failed for PO {PO} Mill {Mill}; treating as terminal (hold).",
+                InputSlitCsvParsing.NormalizePo(bundleRecord.PoNumber),
+                bundleRecord.MillNo);
+        }
+
+        CsvFillIncompleteBundle? incomplete = null;
+        try
+        {
+            incomplete = await _csvFill
+                .TryGetOldestIncompleteAsync(
+                    bundleRecord.PoNumber,
+                    bundleRecord.MillNo,
+                    pipeSize,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Backfill oldest-incomplete lookup failed for PO {PO} Mill {Mill}.",
+                InputSlitCsvParsing.NormalizePo(bundleRecord.PoNumber),
+                bundleRecord.MillNo);
+        }
+
+        if (!InputSlitBackfillFillGate.ShouldHoldRatherThanStamp(
+                fileLastWriteUtc,
+                hasTerminal,
+                incomplete?.PrintedAtUtc))
+        {
+            return BackfillBundlingAction.NormalBundle;
+        }
+
+        _logger.LogInformation(
+            "Backfill fill-to-target gate: file {File} LastWrite {LastWrite:o} incompletePrintedAt {PrintedAt:o} hasTerminal={HasTerminal} — HoldReview.",
+            Path.GetFileName(fileFull),
+            fileLastWriteUtc,
+            incomplete?.PrintedAtUtc,
+            hasTerminal);
+        return BackfillBundlingAction.HoldReview;
+    }
 
     private static (string PipeType, string PipeSize) ResolvePipeInfoForPo(
         string poNumber,

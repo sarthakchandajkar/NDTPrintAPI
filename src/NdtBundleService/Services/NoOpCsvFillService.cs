@@ -19,6 +19,12 @@ public class NoOpCsvFillService : ICsvFillService
         CancellationToken cancellationToken) =>
         Task.FromResult<CsvFillIncompleteBundle?>(null);
 
+    public virtual Task<bool> HasTerminalFillRowAsync(
+        string poNumber,
+        int millNo,
+        CancellationToken cancellationToken) =>
+        Task.FromResult(false);
+
     public virtual Task<CsvFillStampResult?> TryStampFileAsync(
         string poNumber,
         int millNo,

@@ -35,4 +35,15 @@ public sealed class CsvFillBatchMoveSqlTests
             Assert.Contains("Csv_Fill_State IN (N'PlcClosed', N'CsvFilling')", sql, StringComparison.Ordinal);
         }
     }
+
+    [Fact]
+    public void HasTerminalFillRowSql_is_complete_short_overshoot_not_voided()
+    {
+        var sql = ICsvFillService.HasTerminalFillRowSql;
+        Assert.Contains("N'CsvComplete'", sql, StringComparison.Ordinal);
+        Assert.Contains("N'CsvShort'", sql, StringComparison.Ordinal);
+        Assert.Contains("N'CsvOvershoot'", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("N'Voided'", sql, StringComparison.Ordinal);
+        Assert.Contains("ISNULL(Voided, 0) = 0", sql, StringComparison.Ordinal);
+    }
 }

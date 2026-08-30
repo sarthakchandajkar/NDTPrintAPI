@@ -392,7 +392,8 @@ public class NdtBundleOptions
     /// <summary>
     /// Optional UTC cutoff (ISO-8601, e.g. <c>2026-04-05T00:00:00Z</c>). When set, only CSV files whose last write time (UTC)
     /// is on or after this instant are read for input slits, WIP merge, PO plan rotation, Input Slit Accepted, and bundle-output CSVs used for ndt-summary.
-    /// Leave empty to include all files.
+    /// Leave empty to include all files. A non-empty value that cannot be parsed fails startup
+    /// (<see cref="NdtBundleOptionsValidator"/>); it is never treated as "no floor".
     /// </summary>
     public string? MinSourceFileLastWriteUtc { get; set; }
 

@@ -815,12 +815,18 @@ WHERE Mill_No = @MillNo
             cmd.Parameters.AddWithValue("@Po", requested);
             cmd.Parameters.AddWithValue("@PoNormalized", normalized);
             var result = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-            return result is not null;
+            return InputSlitBackfillPolicy.FailClosedHasPrintedBundle(
+                found: result is not null,
+                lookupFailed: false);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to check printed bundle for Mill {MillNo} PO {Po} in database.", millNo, poNumber);
-            return false;
+            _logger.LogWarning(
+                ex,
+                "Failed to check printed bundle for Mill {MillNo} PO {Po} in database; treating as present (fail closed).",
+                millNo,
+                poNumber);
+            return InputSlitBackfillPolicy.FailClosedHasPrintedBundle(found: false, lookupFailed: true);
         }
     }
 

@@ -13,14 +13,37 @@ public static class SourceFileEligibility
     public static DateTime? ParseMinUtc(NdtBundleOptions options) =>
         ParseMinUtcFromRaw(options.MinSourceFileLastWriteUtc);
 
-    public static DateTime? ParseMinUtcFromRaw(string? rawValue)
+    /// <summary>
+    /// Empty/whitespace → success with no floor. A non-empty value that cannot be parsed returns <c>false</c>
+    /// (callers must not treat that as "no floor").
+    /// </summary>
+    public static bool TryParseMinUtcFromRaw(string? rawValue, out DateTime? minUtc)
     {
         var raw = rawValue?.Trim();
         if (string.IsNullOrEmpty(raw))
-            return null;
+        {
+            minUtc = null;
+            return true;
+        }
 
-        if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var u))
-            return DateTime.SpecifyKind(u, DateTimeKind.Utc);
+        if (DateTime.TryParse(
+                raw,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                out var parsed))
+        {
+            minUtc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
+            return true;
+        }
+
+        minUtc = null;
+        return false;
+    }
+
+    public static DateTime? ParseMinUtcFromRaw(string? rawValue)
+    {
+        if (TryParseMinUtcFromRaw(rawValue, out var minUtc))
+            return minUtc;
 
         return null;
     }

@@ -16,6 +16,7 @@ public sealed record CsvFillHoldReason
 {
     public const string NoOpenBundle = "NoOpenBundle";
     public const string QuietExpired = "HoldQuietExpired";
+    public const string BackfillAfterTerminal = "BackfillAfterTerminal";
 }
 
 public interface ICsvFillService
@@ -68,6 +69,24 @@ ORDER BY PrintedAt ASC, Bundle_No ASC;";
         int millNo,
         string? pipeSize,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// True when this PO+mill has a non-voided terminal fill row
+    /// (<c>CsvComplete</c> / <c>CsvShort</c> / <c>CsvOvershoot</c>).
+    /// </summary>
+    public const string HasTerminalFillRowSql = @"
+SELECT TOP 1 1
+FROM dbo.NDT_Bundle
+WHERE Mill_No = @MillNo
+  AND (PO_Number = @Po OR PO_Number = @PoNormalized)
+  AND Csv_Fill_State IN (N'CsvComplete', N'CsvShort', N'CsvOvershoot')
+  AND ISNULL(Voided, 0) = 0;";
+
+    Task<bool> HasTerminalFillRowAsync(
+        string poNumber,
+        int millNo,
+        CancellationToken cancellationToken) =>
+        Task.FromResult(false);
 
     /// <summary>
     /// Single transaction: stamp whole-file pipes onto the oldest incomplete bundle.
@@ -233,6 +252,37 @@ WHERE Bundle_No = @BundleNo;";
         {
             _logger.LogDebug(ex, "TryGetOldestIncomplete failed for PO {PO} Mill {Mill}.", normalized, millNo);
             return null;
+        }
+    }
+
+    public async Task<bool> HasTerminalFillRowAsync(
+        string poNumber,
+        int millNo,
+        CancellationToken cancellationToken)
+    {
+        if (!UseDatabase || millNo is < 1 or > 4)
+            return false;
+
+        var normalized = InputSlitCsvParsing.NormalizePo(poNumber);
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(ICsvFillService.HasTerminalFillRowSql, conn);
+            cmd.Parameters.AddWithValue("@MillNo", millNo);
+            cmd.Parameters.AddWithValue("@Po", poNumber.Trim());
+            cmd.Parameters.AddWithValue("@PoNormalized", normalized);
+            var result = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            return result is not null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "HasTerminalFillRow failed for PO {PO} Mill {Mill}; treating as terminal (fail closed).",
+                normalized,
+                millNo);
+            return true;
         }
     }
 

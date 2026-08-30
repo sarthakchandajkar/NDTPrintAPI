@@ -27,7 +27,10 @@ public static class NdtBundleServiceCollectionExtensions
 
         var role = roleSection.Get<InstanceRoleOptions>() ?? new InstanceRoleOptions();
 
-        services.Configure<NdtBundleOptions>(configuration.GetSection("NdtBundle"));
+        services.AddSingleton<IValidateOptions<NdtBundleOptions>, NdtBundleOptionsValidator>();
+        services.AddOptions<NdtBundleOptions>()
+            .Bind(configuration.GetSection("NdtBundle"))
+            .ValidateOnStart();
         services.Configure<FileLoggingOptions>(configuration.GetSection("Logging:File"));
 
         services.AddSingleton<IMillOwnership, MillOwnership>();
@@ -92,6 +95,7 @@ public static class NdtBundleServiceCollectionExtensions
         }
 
         services.AddHostedService<SqlTraceabilityStartupCheck>();
+        services.AddHostedService<SourceFileEligibilityStartupLog>();
         services.AddHostedService<PoPlanCacheWarmupService>();
     }
 

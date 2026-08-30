@@ -441,10 +441,12 @@ internal sealed class InMemoryTransactionalCsvFillService : ICsvFillService
 {
     private readonly Dictionary<string, BundleFill> _bundles = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<string> _holds = new();
+    private readonly List<(string File, string Reason)> _holdRecords = new();
 
     public bool FailAfterSourceAdjustOnMove { get; set; }
     public bool LastMoveRolledBack { get; private set; }
     public IReadOnlyList<string> HeldFiles => _holds;
+    public IReadOnlyList<(string File, string Reason)> HoldRecords => _holdRecords;
     public IReadOnlyCollection<string> AllBundleNos => _bundles.Keys;
 
     public void Seed(string bundleNo, int target, int filled, string state, DateTime? printedAt = null) =>
@@ -472,6 +474,14 @@ internal sealed class InMemoryTransactionalCsvFillService : ICsvFillService
             new CsvFillIncompleteBundle(oldest.BundleNo, oldest.Target, oldest.Filled, oldest.State, oldest.PrintedAtUtc, null));
     }
 
+    public Task<bool> HasTerminalFillRowAsync(
+        string poNumber, int millNo, CancellationToken cancellationToken)
+    {
+        var any = _bundles.Values.Any(b =>
+            b.State is CsvFillState.CsvComplete or CsvFillState.CsvShort or CsvFillState.CsvOvershoot);
+        return Task.FromResult(any);
+    }
+
     public Task<CsvFillStampResult?> TryStampFileAsync(
         string poNumber, int millNo, string? pipeSize, int fileNdtPipes, CancellationToken cancellationToken)
     {
@@ -495,6 +505,7 @@ internal sealed class InMemoryTransactionalCsvFillService : ICsvFillService
         string sourceFileName, string poNumber, int millNo, string? pipeSize, string reasonCode, CancellationToken cancellationToken)
     {
         _holds.Add(Path.GetFileName(sourceFileName));
+        _holdRecords.Add((Path.GetFileName(sourceFileName), reasonCode));
         return Task.CompletedTask;
     }
 
