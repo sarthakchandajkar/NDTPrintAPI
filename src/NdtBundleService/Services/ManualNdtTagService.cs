@@ -69,6 +69,7 @@ public sealed class ManualStationRecordResult
     public int RejectedPcs { get; init; }
     public int OutgoingPcs { get; init; }
     public string CsvPath { get; init; } = string.Empty;
+    public string UploadFilePath { get; init; } = string.Empty;
     public bool Printed { get; init; }
 }
 
@@ -86,6 +87,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
     private readonly IMillPrinterSettingsService _millPrinters;
     private readonly ITraceabilityRepository _traceability;
     private readonly IReconcileSyncService _reconcileSync;
+    private readonly IUploadNdtBundleFileService _uploadNdtBundle;
     private readonly ILogger<ManualNdtTagService> _logger;
 
     private static readonly object StateLock = new();
@@ -100,6 +102,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         IMillPrinterSettingsService millPrinters,
         ITraceabilityRepository traceability,
         IReconcileSyncService reconcileSync,
+        IUploadNdtBundleFileService uploadNdtBundle,
         ILogger<ManualNdtTagService> logger)
     {
         _optionsMonitor = optionsMonitor;
@@ -110,6 +113,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         _millPrinters = millPrinters;
         _traceability = traceability;
         _reconcileSync = reconcileSync;
+        _uploadNdtBundle = uploadNdtBundle;
         _logger = logger;
     }
 
@@ -178,9 +182,12 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
 
         string? csvPath = null;
+        string? uploadPath = null;
         if (request.Station == ManualTagStation.Revisual)
         {
-            csvPath = await CompleteRevisualExportAsync(state, cancellationToken).ConfigureAwait(false);
+            var export = await CompleteRevisualExportAsync(state, cancellationToken).ConfigureAwait(false);
+            csvPath = export.ProcessCsvPath;
+            uploadPath = export.UploadFilePath;
             state.LastNdtProcessCsvPath = csvPath;
             await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
         }
@@ -214,6 +221,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             RejectedPcs = request.RejectedPcs,
             OutgoingPcs = request.OkPcs,
             CsvPath = csvPath ?? string.Empty,
+            UploadFilePath = uploadPath ?? string.Empty,
             Printed = printed
         };
     }
@@ -279,9 +287,12 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
 
         string? csvPath = null;
+        string? uploadPath = null;
         if (request.Station == ManualTagStation.Revisual)
         {
-            csvPath = await CompleteRevisualExportAsync(state, cancellationToken).ConfigureAwait(false);
+            var export = await CompleteRevisualExportAsync(state, cancellationToken).ConfigureAwait(false);
+            csvPath = export.ProcessCsvPath;
+            uploadPath = export.UploadFilePath;
             state.LastNdtProcessCsvPath = csvPath;
             await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
         }
@@ -320,6 +331,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             RejectedPcs = request.RejectedPcs,
             OutgoingPcs = request.OkPcs,
             CsvPath = csvPath ?? string.Empty,
+            UploadFilePath = uploadPath ?? string.Empty,
             Printed = printed
         };
     }
@@ -387,7 +399,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         };
 
     /// <summary>Writes NDT process CSV to <see cref="NdtBundleOptions.NdtProcessOutputFolder"/> and persists consolidated SQL + final bundle total.</summary>
-    private async Task<string> CompleteRevisualExportAsync(FlowState state, CancellationToken cancellationToken)
+    private async Task<(string ProcessCsvPath, string? UploadFilePath)> CompleteRevisualExportAsync(FlowState state, CancellationToken cancellationToken)
     {
         var csvPath = await WriteConsolidatedNdtProcessCsvAsync(state, cancellationToken).ConfigureAwait(false);
         try
@@ -403,7 +415,21 @@ public sealed class ManualNdtTagService : IManualNdtTagService
                 state.NdtBatchNo);
         }
 
-        return csvPath;
+        string? uploadPath = null;
+        try
+        {
+            var upload = await _uploadNdtBundle.GenerateForBatchAsync(state.NdtBatchNo, cancellationToken).ConfigureAwait(false);
+            uploadPath = upload.FilePath;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Revisual completed for batch {BatchNo} but upload bundle CSV was not written.",
+                state.NdtBatchNo);
+        }
+
+        return (csvPath, uploadPath);
     }
 
     /// <summary>Single CSV after Revisual with Visual/Hydro/Revisual metrics; PO and batch tokens sanitized for the filename.</summary>

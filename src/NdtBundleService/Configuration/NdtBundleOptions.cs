@@ -146,7 +146,7 @@ public class NdtBundleOptions
     public string BundleSummaryOutputFolder { get; set; } = string.Empty;
 
     /// <summary>
-    /// Folder where scheduled/manual <c>UploadNdtBundle__PO__…</c> CSV files are written.
+    /// Folder where per-batch <c>UploadNdtBundle__PO__…</c> CSV files are written after Revisual completes.
     /// Production example: <c>Z:\To SAP\TM\NDT\MES PAS NDT\Bundle</c>.
     /// </summary>
     public string UploadNdtBundleFilesFolder { get; set; } = @"Z:\To SAP\TM\NDT\MES PAS NDT\Bundle";
@@ -326,12 +326,6 @@ public class NdtBundleOptions
 
     /// <summary>Accepted FG bundle folder. When empty, uses <see cref="MillSlitLiveOptions.WipBundleAcceptedFolder"/>.</summary>
     public string FgBundleAcceptedFolder { get; set; } = @"Z:\To SAP\TM\Bundle Accepted";
-
-    /// <summary>When true, the upload bundle CSV generator runs on a timer.</summary>
-    public bool EnableUploadNdtBundleScheduler { get; set; } = true;
-
-    /// <summary>Timer interval in hours for generating Upload NDT Bundle Files CSV.</summary>
-    public int UploadNdtBundleIntervalHours { get; set; } = 12;
 
     /// <summary>Optional local IP to bind to when connecting to the printer (e.g. 192.168.0.14). Use when the PC has multiple NICs and you want to force the same interface that can reach the printer. Leave empty to let the OS choose.</summary>
     public string NdtTagPrinterLocalBindAddress { get; set; } = string.Empty;

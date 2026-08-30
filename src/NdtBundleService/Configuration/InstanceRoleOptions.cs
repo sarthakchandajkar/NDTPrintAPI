@@ -23,8 +23,6 @@ public sealed class InstanceRoleOptions
 
     public bool EnablePoPlanWipImport { get; set; } = true;
 
-    public bool EnableUploadScheduler { get; set; } = true;
-
     /// <summary>Lease TTL seconds for <c>Mill_Instance_Lease</c> (Mill / Monolith). Default 45.</summary>
     public int LeaseTtlSeconds { get; set; } = 45;
 

@@ -72,8 +72,8 @@ export function RevisualStationScreen({ stationNumber }: { stationNumber: Statio
       });
       setSuccess(
         `${res.message ?? "Saved."} Batch: ${res.ndtBatchNo ?? "—"} | Final NDT: ${res.outgoingPcs ?? okPcs}${
-          res.csvPath ? ` | CSV: ${res.csvPath}` : ""
-        }`
+          res.csvPath ? ` | Process CSV: ${res.csvPath}` : ""
+        }${res.uploadFilePath ? ` | Upload CSV: ${res.uploadFilePath}` : ""}`
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : "Print failed.");
@@ -85,9 +85,14 @@ export function RevisualStationScreen({ stationNumber }: { stationNumber: Statio
   const generateUploadFile = async () => {
     setError(null);
     setSuccess(null);
+    const batch = ndtBatchNo.trim();
+    if (!batch) {
+      setError("Enter/scan NDT Batch No.");
+      return;
+    }
     setGeneratingUpload(true);
     try {
-      const res = await api.generateUploadBundleFile();
+      const res = await api.generateUploadBundleFile(batch);
       setSuccess(
         `${res.message ?? "Upload file generated."}${res.filePath ? ` Path: ${res.filePath}` : ""}${
           typeof res.rowCount === "number" ? ` | Rows: ${res.rowCount}` : ""
@@ -105,7 +110,8 @@ export function RevisualStationScreen({ stationNumber }: { stationNumber: Statio
       <h1 className="text-2xl font-bold text-gray-900">Revisual — Station {stationNumber}</h1>
       <p className="text-gray-600 text-sm">
         Scan/enter the NDT Batch No, then enter OK and Rejected pipe counts for Revisual. Incoming pcs come from
-        Hydrotesting OK. Revisual OK becomes the final NDT count.
+        Hydrotesting OK. Revisual OK becomes the final NDT count. Saving Revisual writes the process CSV and the
+        MES PAS NDT upload file for this batch.
       </p>
 
       {error && <div className="rounded-md bg-red-50 border border-red-200 p-4 text-red-700 text-sm">{error}</div>}
@@ -199,10 +205,10 @@ export function RevisualStationScreen({ stationNumber }: { stationNumber: Statio
           <button
             type="button"
             onClick={generateUploadFile}
-            disabled={generatingUpload}
+            disabled={generatingUpload || !ndtBatchNo.trim()}
             className="px-4 py-2 bg-gray-700 text-white text-sm font-medium rounded-md hover:bg-gray-800 disabled:opacity-50 disabled:pointer-events-none"
           >
-            {generatingUpload ? "Generating…" : "Generate Upload CSV Now"}
+            {generatingUpload ? "Generating…" : "Retry upload CSV"}
           </button>
         </div>
       </div>

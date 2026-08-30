@@ -15,8 +15,7 @@ internal static class TestMillOwnership
             OwnedMillNos = [millNo],
             EnableMillWorkers = true,
             EnableDashboardApi = false,
-            EnablePoPlanWipImport = false,
-            EnableUploadScheduler = false
+            EnablePoPlanWipImport = false
         }));
 
     public static IMillOwnership Shared() =>
@@ -26,7 +25,6 @@ internal static class TestMillOwnership
             OwnedMillNos = [],
             EnableMillWorkers = false,
             EnableDashboardApi = true,
-            EnablePoPlanWipImport = true,
-            EnableUploadScheduler = true
+            EnablePoPlanWipImport = true
         }));
 }

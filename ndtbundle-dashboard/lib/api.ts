@@ -494,6 +494,7 @@ export interface ManualTagPrintResponse {
   outgoingPcs?: number;
   printed?: boolean;
   csvPath?: string;
+  uploadFilePath?: string;
 }
 
 export interface ManualStationContext {
@@ -665,9 +666,10 @@ export const api = {
         operatorStationNumber: args.operatorStationNumber ?? 1,
       }),
     }),
-  generateUploadBundleFile: () =>
+  generateUploadBundleFile: (ndtBatchNo: string) =>
     fetchApi<UploadBundleGenerationResponse>("/api/UploadNdtBundle/generate-now", {
       method: "POST",
+      body: JSON.stringify({ ndtBatchNo }),
     }),
 
   settingsStatus: () => fetchApi<SettingsStatus>("/api/Settings/status"),

@@ -87,7 +87,6 @@ public sealed class CompositionRootTests : IDisposable
         Assert.Contains(typeof(FillCutoverStartupCheck), types);
         Assert.Contains(typeof(MillSequenceStartupGuard), types);
         Assert.DoesNotContain(typeof(PoPlanWipImportHostedService), types);
-        Assert.DoesNotContain(typeof(UploadNdtBundleSchedulerWorker), types);
         Assert.DoesNotContain(typeof(NdtInputSlitSapStatusWorker), types);
 
         Assert.IsType<SqlZplGenerationToggle>(provider.GetRequiredService<IZplGenerationToggle>());
@@ -117,7 +116,6 @@ public sealed class CompositionRootTests : IDisposable
         ["InstanceRole:EnableDashboardApi"] = "true",
         ["InstanceRole:EnableMillWorkers"] = "false",
         ["InstanceRole:EnablePoPlanWipImport"] = "true",
-        ["InstanceRole:EnableUploadScheduler"] = "true",
     };
 
     private static Dictionary<string, string?> MillRoleOverrides(int millNo) => new()
@@ -127,7 +125,6 @@ public sealed class CompositionRootTests : IDisposable
         ["InstanceRole:EnableDashboardApi"] = "false",
         ["InstanceRole:EnableMillWorkers"] = "true",
         ["InstanceRole:EnablePoPlanWipImport"] = "false",
-        ["InstanceRole:EnableUploadScheduler"] = "false",
     };
 
     private static void AssertMonolithHostedServices(ServiceProvider provider)
@@ -200,7 +197,6 @@ public sealed class CompositionRootTests : IDisposable
                 ["NdtBundle:ConnectionString"] = "",
                 ["NdtBundle:PreferSqlForPoPlanWip"] = "false",
                 ["NdtBundle:ImportPoPlanWipFromFolder"] = "false",
-                ["NdtBundle:EnableUploadNdtBundleScheduler"] = "false",
                 ["NdtBundle:EnableNdtBundleRuntimeStatePersistence"] = "false",
                 ["NdtBundle:RuntimeStatePruning:RunOnStartup"] = "false",
                 ["NdtBundle:BackfillReconciliationEnabled"] = "false",

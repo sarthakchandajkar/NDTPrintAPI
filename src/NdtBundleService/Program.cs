@@ -21,7 +21,7 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions
     EnvironmentName = Environments.Production
 });
 
-ConfigureSerilog(builder);
+ConfigureSerilog(builder, args);
 
 builder.Host.UseDefaultServiceProvider(options =>
 {
@@ -85,7 +85,7 @@ finally
     Log.CloseAndFlush();
 }
 
-static void ConfigureSerilog(WebApplicationBuilder builder)
+static void ConfigureSerilog(WebApplicationBuilder builder, string[] args)
 {
     var fileLogging = builder.Configuration.GetSection("Logging:File").Get<FileLoggingOptions>() ?? new FileLoggingOptions();
     var role = builder.Configuration.GetSection(InstanceRoleOptions.SectionName).Get<InstanceRoleOptions>()
@@ -111,9 +111,8 @@ static void ConfigureSerilog(WebApplicationBuilder builder)
 
     if (fileLogging.Enabled)
     {
-        var logFolder = string.IsNullOrWhiteSpace(fileLogging.Folder)
-            ? Path.Combine(builder.Environment.ContentRootPath, "Logs")
-            : fileLogging.Folder.Trim();
+        var logFolder = fileLogging.ResolveFolder(
+            TryGetContentRootArg(args) ?? builder.Environment.ContentRootPath);
         Directory.CreateDirectory(logFolder);
 
         var prefix = string.IsNullOrWhiteSpace(fileLogging.FileNamePrefix) ? "ndtbundle" : fileLogging.FileNamePrefix.Trim();
@@ -139,4 +138,19 @@ static void ConfigureSerilog(WebApplicationBuilder builder)
 
     Log.Logger = loggerConfig.CreateLogger();
     builder.Host.UseSerilog();
+}
+
+static string? TryGetContentRootArg(string[] args)
+{
+    for (var i = 0; i < args.Length - 1; i++)
+    {
+        if (string.Equals(args[i], "--contentRoot", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(args[i], "--contentroot", StringComparison.OrdinalIgnoreCase))
+        {
+            var path = (args[i + 1] ?? string.Empty).Trim().Trim('"');
+            return string.IsNullOrEmpty(path) ? null : Path.GetFullPath(path);
+        }
+    }
+
+    return null;
 }

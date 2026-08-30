@@ -6,17 +6,25 @@ namespace NdtBundleService.Services;
 
 public interface IUploadNdtBundleFileService
 {
-    Task<UploadNdtBundleGenerationResult> GenerateAsync(CancellationToken cancellationToken);
+    /// <summary>
+    /// Writes one <c>UploadNdtBundle__PO__…</c> CSV for a single NDT batch after Visual, Hydrotesting,
+    /// and Revisual have produced an <c>NDT_process_</c> file (OK pcs = Revisual OK).
+    /// </summary>
+    Task<UploadNdtBundleGenerationResult> GenerateForBatchAsync(string ndtBatchNo, CancellationToken cancellationToken);
 }
 
 public sealed class UploadNdtBundleGenerationResult
 {
     public string FilePath { get; init; } = string.Empty;
     public int RowCount { get; init; }
+    public string NdtBatchNo { get; init; } = string.Empty;
 }
 
 public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
 {
+    internal const string RevisualRequiredMessage =
+        "Upload CSV is written only after Visual, Hydrotesting, and Revisual are complete for this NDT batch.";
+
     private readonly NdtBundleOptions _options;
     private readonly INdtBundleRepository _bundleRepository;
     private readonly ITraceabilityRepository _traceability;
@@ -34,8 +42,14 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
         _logger = logger;
     }
 
-    public async Task<UploadNdtBundleGenerationResult> GenerateAsync(CancellationToken cancellationToken)
+    public async Task<UploadNdtBundleGenerationResult> GenerateForBatchAsync(
+        string ndtBatchNo,
+        CancellationToken cancellationToken)
     {
+        var batch = (ndtBatchNo ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(batch))
+            throw new InvalidOperationException("NdtBatchNo is required.");
+
         var ndtProcessFolder = (_options.NdtProcessOutputFolder ?? string.Empty).Trim();
         var uploadFolder = (_options.UploadNdtBundleFilesFolder ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(ndtProcessFolder) || !Directory.Exists(ndtProcessFolder))
@@ -43,136 +57,96 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
         if (string.IsNullOrWhiteSpace(uploadFolder))
             throw new InvalidOperationException("UploadNdtBundleFilesFolder is not configured.");
 
+        var processPath = NdtProcessCsvReconcileHelper.FindLatestNdtProcessFileForBatch(ndtProcessFolder, batch);
+        if (processPath is null)
+            throw new InvalidOperationException(RevisualRequiredMessage);
+
+        var metrics = NdtProcessCsvReconcileHelper.TryReadMetricsForBatch(_options, batch);
+        if (metrics is null)
+            throw new InvalidOperationException(RevisualRequiredMessage);
+
+        var poNo = (metrics.Value.Po ?? string.Empty).Trim();
+        var okPcs = metrics.Value.Ok;
+        var bundle = await _bundleRepository.GetByBatchNoAsync(batch, cancellationToken).ConfigureAwait(false);
+        var sourceSlitNo = bundle?.SlitNo?.Trim() ?? string.Empty;
+        var millNo = bundle?.MillNo ?? 0;
+        if (string.IsNullOrWhiteSpace(poNo))
+            poNo = bundle?.PoNumber?.Trim() ?? string.Empty;
+
+        var hrcNumber = ExtractHrcNumber(sourceSlitNo);
+        var wip = await ReadWipByPoAndMillAsync(poNo, millNo is >= 1 and <= 4 ? millNo : null, cancellationToken)
+            .ConfigureAwait(false);
+        var slitWidth = await SlitAcceptedCsvLookup.ResolveSlitWidthAsync(_options, sourceSlitNo, cancellationToken)
+            .ConfigureAwait(false);
+        var slitGrade = await FgBundleCsvLookup.ResolvePipeGradeAsync(
+                _options,
+                poNo,
+                millNo is >= 1 and <= 4 ? millNo : null,
+                _logger,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(slitGrade))
+            slitGrade = wip.PipeGrade;
+        var slitThick = wip.PipeThickness;
+        var lenPerPipe = wip.PipeLength;
+        var totalBundleWt = NdtBundleWeightCalculator.FormatBundleWeight(
+            wip.PipeWeightPerMeter,
+            lenPerPipe,
+            okPcs);
+
+        var header = "PO_NO,Slit_No,HRC Number,Slit Width,Slit Thick,NSS,Slit Grade,Bundle Number,NumOfPipes,TotalBundleWt,LenPerPipe,IsFullBundle";
+        var outputLine = string.Join(",",
+            Escape(poNo),
+            Escape(sourceSlitNo),
+            Escape(hrcNumber),
+            Escape(slitWidth),
+            Escape(slitThick),
+            "",
+            Escape(slitGrade),
+            Escape(batch),
+            okPcs.ToString(CultureInfo.InvariantCulture),
+            Escape(totalBundleWt),
+            Escape(lenPerPipe),
+            "");
+
         Directory.CreateDirectory(uploadFolder);
+        var ts = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+        var safePo = CsvOutputFileNaming.SanitizeToken(string.IsNullOrWhiteSpace(poNo) ? "NA" : poNo);
+        var safeBatch = CsvOutputFileNaming.SanitizeToken(batch);
+        var fileName = $"UploadNdtBundle__PO__{safePo}__{safeBatch}-{millNo}__TS-{ts}.csv";
+        var fullPath = Path.Combine(uploadFolder, fileName);
+        await File.WriteAllLinesAsync(fullPath, new[] { header, outputLine }, cancellationToken).ConfigureAwait(false);
 
-        var rows = new List<string>
+        var uploadRow = new UploadBundleRow
         {
-            "PO_NO,Slit_No,HRC Number,Slit Width,Slit Thick,NSS,Slit Grade,Bundle Number,NumOfPipes,TotalBundleWt,LenPerPipe,IsFullBundle"
+            PoNo = poNo,
+            SlitNo = sourceSlitNo,
+            HrcNumber = hrcNumber,
+            SlitWidth = slitWidth,
+            SlitThick = slitThick,
+            Nss = string.Empty,
+            SlitGrade = slitGrade,
+            BundleNumber = batch,
+            NumOfPipes = okPcs,
+            TotalBundleWt = totalBundleWt,
+            LenPerPipe = lenPerPipe,
+            IsFullBundle = null
         };
-        var uploadRowsForSql = new List<UploadBundleRow>();
-        string? firstPo = null;
-        string? firstBatch = null;
-        int? firstMill = null;
-
-        var revisualFiles = Directory.EnumerateFiles(ndtProcessFolder, "*.csv")
-            .Where(p =>
-            {
-                var name = Path.GetFileName(p);
-                return name.StartsWith("NDT_process_", StringComparison.OrdinalIgnoreCase) ||
-                       name.StartsWith("NDT process_", StringComparison.OrdinalIgnoreCase);
-            })
-            .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        foreach (var file in revisualFiles)
+        try
         {
-            try
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var lines = await ReadAllLinesSharedAsync(file, cancellationToken).ConfigureAwait(false);
-                if (lines.Length < 2)
-                    continue;
-
-                // Consolidated NDT process CSV: header + one data row (final OK count at column index 3).
-                // Be defensive and use the last non-empty line as the data row.
-                var dataLine = lines
-                    .LastOrDefault(static line => !string.IsNullOrWhiteSpace(line));
-                if (string.IsNullOrWhiteSpace(dataLine))
-                    continue;
-
-                var values = SplitCsvLine(dataLine);
-                if (values.Count < 4)
-                    continue;
-
-                var poNo = values[0].Trim();
-                var batchNo = values[1].Trim();
-                var okPcs = ParseInt(values[3]);
-
-                if (string.IsNullOrWhiteSpace(batchNo))
-                    continue;
-
-                var bundle = await _bundleRepository.GetByBatchNoAsync(batchNo, cancellationToken).ConfigureAwait(false);
-                var sourceSlitNo = bundle?.SlitNo?.Trim() ?? string.Empty;
-                var hrcNumber = ExtractHrcNumber(sourceSlitNo);
-
-                var wip = await ReadWipByPoAndMillAsync(poNo, bundle?.MillNo, cancellationToken).ConfigureAwait(false);
-                var slitWidth = await SlitAcceptedCsvLookup.ResolveSlitWidthAsync(_options, sourceSlitNo, cancellationToken)
-                    .ConfigureAwait(false);
-                var slitGrade = await FgBundleCsvLookup.ResolvePipeGradeAsync(
-                        _options,
-                        poNo,
-                        bundle?.MillNo,
-                        _logger,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-                if (string.IsNullOrWhiteSpace(slitGrade))
-                    slitGrade = wip.PipeGrade;
-                var slitThick = wip.PipeThickness;
-                var lenPerPipe = wip.PipeLength;
-                var totalBundleWt = NdtBundleWeightCalculator.FormatBundleWeight(
-                    wip.PipeWeightPerMeter,
-                    lenPerPipe,
-                    okPcs);
-
-                var outputLine = string.Join(",",
-                    Escape(poNo),
-                    Escape(sourceSlitNo),
-                    Escape(hrcNumber),
-                    Escape(slitWidth),
-                    Escape(slitThick),
-                    "", // NSS
-                    Escape(slitGrade),
-                    Escape(batchNo),
-                    okPcs.ToString(CultureInfo.InvariantCulture),
-                    Escape(totalBundleWt),
-                    Escape(lenPerPipe),
-                    ""); // IsFullBundle
-
-                rows.Add(outputLine);
-
-                uploadRowsForSql.Add(new UploadBundleRow
-                {
-                    PoNo = poNo,
-                    SlitNo = sourceSlitNo,
-                    HrcNumber = hrcNumber,
-                    SlitWidth = slitWidth,
-                    SlitThick = slitThick,
-                    Nss = string.Empty,
-                    SlitGrade = slitGrade,
-                    BundleNumber = batchNo,
-                    NumOfPipes = okPcs,
-                    TotalBundleWt = totalBundleWt,
-                    LenPerPipe = lenPerPipe,
-                    IsFullBundle = null
-                });
-
-                if (firstPo is null)
-                {
-                    firstPo = poNo;
-                    firstBatch = batchNo;
-                    firstMill = bundle?.MillNo ?? 0;
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Skipping NDT process CSV {File} during upload bundle generation.", file);
-            }
+            await _traceability.RecordUploadBundleRowsAsync(fullPath, [uploadRow], cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Upload CSV {Path} was written but SQL traceability failed for batch {BatchNo}.", fullPath, batch);
         }
 
-        var ts = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
-        var safePo = CsvOutputFileNaming.SanitizeToken(firstPo ?? "NA");
-        var safeBatch = CsvOutputFileNaming.SanitizeToken(firstBatch ?? "NA");
-        var mill = firstMill ?? 0;
-        // UploadNdtBundle__PO__<PO>__<NDT Bundle Number>-<MillNo>__TS-<yyyyMMdd_HHmmss>.csv
-        var fileName = $"UploadNdtBundle__PO__{safePo}__{safeBatch}-{mill}__TS-{ts}.csv";
-        var fullPath = Path.Combine(uploadFolder, fileName);
-        await File.WriteAllLinesAsync(fullPath, rows, cancellationToken).ConfigureAwait(false);
-
-        // Best-effort SQL traceability; do not fail generation if SQL is down.
-        await _traceability.RecordUploadBundleRowsAsync(fullPath, uploadRowsForSql, cancellationToken).ConfigureAwait(false);
-
-        _logger.LogInformation("Generated upload NDT bundle CSV: {Path} with {Rows} row(s).", fullPath, rows.Count - 1);
-        return new UploadNdtBundleGenerationResult { FilePath = fullPath, RowCount = Math.Max(0, rows.Count - 1) };
+        _logger.LogInformation(
+            "Generated upload NDT bundle CSV for batch {BatchNo} ({OkPcs} OK pcs): {Path}",
+            batch,
+            okPcs,
+            fullPath);
+        return new UploadNdtBundleGenerationResult { FilePath = fullPath, RowCount = 1, NdtBatchNo = batch };
     }
 
     private async Task<(string PipeGrade, string PipeThickness, string PipeLength, string PipeWeightPerMeter)> ReadWipByPoAndMillAsync(
@@ -218,42 +192,10 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
         return idx > 0 ? slitNo[..idx].Trim() : slitNo.Trim();
     }
 
-    private static int ParseInt(string value)
-    {
-        return int.TryParse(value.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : 0;
-    }
-
     private static string Escape(string value)
     {
         if (value.IndexOfAny(new[] { ',', '"', '\r', '\n' }) >= 0)
             return "\"" + value.Replace("\"", "\"\"") + "\"";
         return value;
     }
-
-    private static List<string> SplitCsvLine(string line)
-    {
-        return line.Split(',').Select(c => c.Trim()).ToList();
-    }
-
-    private static async Task<string[]> ReadAllLinesSharedAsync(string path, CancellationToken cancellationToken)
-    {
-        await using var stream = new FileStream(
-            path,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete);
-        using var reader = new StreamReader(stream);
-        var list = new List<string>();
-        while (true)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
-            if (line is null)
-                break;
-            list.Add(line);
-        }
-
-        return list.ToArray();
-    }
 }
-

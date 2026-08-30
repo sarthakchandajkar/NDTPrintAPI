@@ -37,7 +37,6 @@ public sealed class MillInstanceLeaseTests
             EnableMillWorkers = true,
             EnableDashboardApi = false,
             EnablePoPlanWipImport = false,
-            EnableUploadScheduler = false,
             InstanceDisplayName = "Mill-1"
         });
 
@@ -167,7 +166,6 @@ public sealed class MillInstanceLeaseTests
             EnableMillWorkers = true,
             EnableDashboardApi = false,
             EnablePoPlanWipImport = false,
-            EnableUploadScheduler = false,
             InstanceDisplayName = "Mill-1",
             LeaseRenewMaxTransientAttempts = transientAttempts,
             LeaseRenewTransientRetryDelaySeconds = transientDelaySeconds

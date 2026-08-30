@@ -40,9 +40,6 @@ public sealed class InstanceRoleOptionsValidator : IValidateOptions<InstanceRole
 
             if (options.EnablePoPlanWipImport)
                 errors.Add("Mode=Mill requires EnablePoPlanWipImport=false.");
-
-            if (options.EnableUploadScheduler)
-                errors.Add("Mode=Mill requires EnableUploadScheduler=false.");
         }
         else if (options.IsShared)
         {
@@ -57,9 +54,6 @@ public sealed class InstanceRoleOptionsValidator : IValidateOptions<InstanceRole
 
             if (!options.EnablePoPlanWipImport)
                 errors.Add("Mode=Shared requires EnablePoPlanWipImport=true.");
-
-            if (!options.EnableUploadScheduler)
-                errors.Add("Mode=Shared requires EnableUploadScheduler=true.");
         }
         else
         {

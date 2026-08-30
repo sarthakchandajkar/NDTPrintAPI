@@ -87,7 +87,7 @@ public sealed class ManualTagsController : ControllerBase
             return Ok(new
             {
                 Message = st == ManualTagStation.Revisual
-                    ? "Station recorded; consolidated NDT process CSV generated."
+                    ? "Station recorded; consolidated NDT process CSV and upload bundle CSV generated."
                     : "Station recorded.",
                 Station = station,
                 result.NdtBatchNo,
@@ -96,7 +96,8 @@ public sealed class ManualTagsController : ControllerBase
                 result.RejectedPcs,
                 result.OutgoingPcs,
                 result.Printed,
-                result.CsvPath
+                result.CsvPath,
+                result.UploadFilePath
             });
         }
         catch (InvalidOperationException ex)
@@ -141,7 +142,7 @@ public sealed class ManualTagsController : ControllerBase
             return Ok(new
             {
                 Message = st == ManualTagStation.Revisual
-                    ? "Station reconciled; consolidated NDT process CSV replaced."
+                    ? "Station reconciled; consolidated NDT process CSV and upload bundle CSV replaced."
                     : "Station reconciled. Downstream steps may need to be re-entered if the flow was reset.",
                 Station = station,
                 result.NdtBatchNo,
@@ -150,7 +151,8 @@ public sealed class ManualTagsController : ControllerBase
                 result.RejectedPcs,
                 result.OutgoingPcs,
                 result.Printed,
-                result.CsvPath
+                result.CsvPath,
+                result.UploadFilePath
             });
         }
         catch (InvalidOperationException ex)

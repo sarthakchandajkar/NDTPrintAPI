@@ -24,8 +24,7 @@ public sealed class InstanceRoleOptionsValidatorTests
             OwnedMillNos = [1],
             EnableMillWorkers = true,
             EnableDashboardApi = false,
-            EnablePoPlanWipImport = false,
-            EnableUploadScheduler = false
+            EnablePoPlanWipImport = false
         };
         Assert.True(_sut.Validate(null, ok).Succeeded);
 
@@ -35,8 +34,7 @@ public sealed class InstanceRoleOptionsValidatorTests
             OwnedMillNos = [1, 2],
             EnableMillWorkers = true,
             EnableDashboardApi = false,
-            EnablePoPlanWipImport = false,
-            EnableUploadScheduler = false
+            EnablePoPlanWipImport = false
         };
         Assert.False(_sut.Validate(null, bad).Succeeded);
         Assert.Contains(_sut.Validate(null, bad).Failures!, f => f.Contains("exactly one", StringComparison.Ordinal));
@@ -51,8 +49,7 @@ public sealed class InstanceRoleOptionsValidatorTests
             OwnedMillNos = [2],
             EnableMillWorkers = true,
             EnableDashboardApi = true,
-            EnablePoPlanWipImport = false,
-            EnableUploadScheduler = false
+            EnablePoPlanWipImport = false
         };
         var result = _sut.Validate(null, options);
         Assert.False(result.Succeeded);
@@ -68,8 +65,7 @@ public sealed class InstanceRoleOptionsValidatorTests
             OwnedMillNos = [],
             EnableMillWorkers = false,
             EnableDashboardApi = true,
-            EnablePoPlanWipImport = true,
-            EnableUploadScheduler = true
+            EnablePoPlanWipImport = true
         };
         Assert.True(_sut.Validate(null, ok).Succeeded);
 
@@ -79,8 +75,7 @@ public sealed class InstanceRoleOptionsValidatorTests
             OwnedMillNos = [1],
             EnableMillWorkers = false,
             EnableDashboardApi = true,
-            EnablePoPlanWipImport = true,
-            EnableUploadScheduler = true
+            EnablePoPlanWipImport = true
         };
         Assert.False(_sut.Validate(null, withMill).Succeeded);
     }
@@ -94,8 +89,7 @@ public sealed class InstanceRoleOptionsValidatorTests
             OwnedMillNos = [1, 1],
             EnableMillWorkers = true,
             EnableDashboardApi = false,
-            EnablePoPlanWipImport = false,
-            EnableUploadScheduler = false
+            EnablePoPlanWipImport = false
         };
         Assert.False(_sut.Validate(null, dup).Succeeded);
 
@@ -105,8 +99,7 @@ public sealed class InstanceRoleOptionsValidatorTests
             OwnedMillNos = [5],
             EnableMillWorkers = true,
             EnableDashboardApi = false,
-            EnablePoPlanWipImport = false,
-            EnableUploadScheduler = false
+            EnablePoPlanWipImport = false
         };
         Assert.False(_sut.Validate(null, badRange).Succeeded);
     }

@@ -18,10 +18,7 @@ public sealed class AppLogReader
 
     public string ResolveLogFolder()
     {
-        var folder = (_options.CurrentValue.Folder ?? string.Empty).Trim();
-        return string.IsNullOrEmpty(folder)
-            ? Path.Combine(_environment.ContentRootPath, "Logs")
-            : folder;
+        return _options.CurrentValue.ResolveFolder(_environment.ContentRootPath);
     }
 
     public async Task<AppLogTailResult> ReadTailAsync(int maxLines, CancellationToken cancellationToken)

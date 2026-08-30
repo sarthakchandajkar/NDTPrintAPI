@@ -202,11 +202,5 @@ public static class NdtBundleServiceCollectionExtensions
             if (PoPlanWipImportSettings.IsEnabled(bundleOptions))
                 services.AddHostedService<PoPlanWipImportHostedService>();
         }
-
-        if (role.IsMonolith || role.EnableUploadScheduler)
-        {
-            if (bundleOptions.EnableUploadNdtBundleScheduler)
-                services.AddHostedService<UploadNdtBundleSchedulerWorker>();
-        }
     }
 }

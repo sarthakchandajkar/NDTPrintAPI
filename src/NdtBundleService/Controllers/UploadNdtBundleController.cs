@@ -18,16 +18,23 @@ public sealed class UploadNdtBundleController : ControllerBase
     }
 
     [HttpPost("generate-now")]
-    public async Task<IActionResult> GenerateNow(CancellationToken cancellationToken)
+    public async Task<IActionResult> GenerateNow(
+        [FromBody] GenerateUploadNdtBundleRequest? request,
+        CancellationToken cancellationToken)
     {
+        var batch = request?.NdtBatchNo?.Trim();
+        if (string.IsNullOrWhiteSpace(batch))
+            return BadRequest(new { Message = "NdtBatchNo is required. Upload CSV is generated per bundle after Revisual." });
+
         try
         {
-            var result = await _service.GenerateAsync(cancellationToken).ConfigureAwait(false);
+            var result = await _service.GenerateForBatchAsync(batch, cancellationToken).ConfigureAwait(false);
             return Ok(new
             {
                 Message = "Upload NDT bundle CSV generated.",
                 result.FilePath,
-                result.RowCount
+                result.RowCount,
+                result.NdtBatchNo
             });
         }
         catch (InvalidOperationException ex)
@@ -41,3 +48,7 @@ public sealed class UploadNdtBundleController : ControllerBase
     }
 }
 
+public sealed class GenerateUploadNdtBundleRequest
+{
+    public string? NdtBatchNo { get; set; }
+}
