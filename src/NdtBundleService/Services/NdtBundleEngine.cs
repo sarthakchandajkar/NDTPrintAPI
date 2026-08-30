@@ -10,6 +10,7 @@ namespace NdtBundleService.Services;
 /// <summary>
 /// Aggregates NDT pipe counts per PO/mill/size and decides when bundles are complete.
 /// Bundle sequence and partial totals are persisted via <see cref="INdtBundleRuntimeStateStore"/>.
+/// Accumulation is cleared only after the close callback (SQL allocate+insert) succeeds.
 /// </summary>
 public sealed class NdtBundleEngine : IBundleEngine
 {
@@ -20,6 +21,7 @@ public sealed class NdtBundleEngine : IBundleEngine
     private readonly IS7ConnectionProviderRegistry _s7Registry;
     private readonly ILogger<NdtBundleEngine> _logger;
     private readonly TimeProvider _time;
+    private readonly IMillSequenceService? _millSequence;
 
     /// <summary>UTC when file-side count first reached threshold while PLC path owned closes (grace clock).</summary>
     private readonly Dictionary<string, DateTimeOffset> _plcCloseGraceStartedUtc = new(StringComparer.OrdinalIgnoreCase);
@@ -36,7 +38,8 @@ public sealed class NdtBundleEngine : IBundleEngine
         IOptions<NdtBundleOptions> options,
         IS7ConnectionProviderRegistry s7Registry,
         ILogger<NdtBundleEngine> logger,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IMillSequenceService? millSequence = null)
     {
         _formationChartProvider = formationChartProvider;
         _pipeSizeProvider = pipeSizeProvider;
@@ -45,6 +48,7 @@ public sealed class NdtBundleEngine : IBundleEngine
         _s7Registry = s7Registry;
         _logger = logger;
         _time = timeProvider ?? TimeProvider.System;
+        _millSequence = millSequence;
     }
 
     public async Task ProcessSlitRecordAsync(
@@ -53,7 +57,7 @@ public sealed class NdtBundleEngine : IBundleEngine
         CancellationToken cancellationToken,
         string? knownPipeSize = null)
     {
-        if (record.NdtPipes <= 0)
+        if (record.NdtPipes < 0)
             return;
 
         await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
@@ -72,7 +76,8 @@ public sealed class NdtBundleEngine : IBundleEngine
         var formation = await _formationChartProvider.GetFormationChartAsync(cancellationToken).ConfigureAwait(false);
         var sizeThreshold = FormationChartLookup.ResolveThreshold(formation, pipeSize);
 
-        _runtimeState.SetLastRecord(record.PoNumber, record.MillNo, record);
+        if (record.NdtPipes > 0)
+            _runtimeState.SetLastRecord(record.PoNumber, record.MillNo, record);
 
         var sizeKey = FormationChartLookup.NormalizePipeSizeKey(pipeSize);
         if (string.IsNullOrEmpty(sizeKey))
@@ -84,7 +89,7 @@ public sealed class NdtBundleEngine : IBundleEngine
         // PLC leads open accumulation (sizeCounts/MW56); CSV reconciles only — never adds to the same counters.
         if (PlcOpenCsvIngestPolicy.ShouldIngestTraceabilityOnly(trigger, plcHealthy))
         {
-            if (trigger == BundleCloseTrigger.PlcWithFileFallback)
+            if (trigger == BundleCloseTrigger.PlcWithFileFallback && record.NdtPipes > 0)
             {
                 await TryPlcGraceFileSideCloseAsync(
                         record,
@@ -98,14 +103,30 @@ public sealed class NdtBundleEngine : IBundleEngine
             return;
         }
 
+        var allowFileClose = BundleClosePolicy.AllowFileThresholdClose(trigger, plcHealthy);
+
+        if (allowFileClose)
+        {
+            await TryCommitPendingFileCloseAsync(
+                    record,
+                    sizeKey,
+                    sizeThreshold,
+                    onBundleClosedAsync,
+                    missedPlcClose: false,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        if (record.NdtPipes <= 0)
+            return;
+
         var sizeCounts = _runtimeState.GetSizeCounts(record.PoNumber, record.MillNo);
         if (!sizeCounts.TryGetValue(sizeKey, out var currentSizeCount))
             currentSizeCount = 0;
         currentSizeCount += record.NdtPipes;
 
-        var allowFileClose = BundleClosePolicy.AllowFileThresholdClose(trigger, plcHealthy);
-        var graceKey = GraceKey(record.PoNumber, record.MillNo, sizeKey);
         var missedPlcClose = false;
+        var graceKey = GraceKey(record.PoNumber, record.MillNo, sizeKey);
 
         if (currentSizeCount < sizeThreshold)
         {
@@ -131,47 +152,21 @@ public sealed class NdtBundleEngine : IBundleEngine
             }
         }
 
-        // File-driven close when PLC path does not own accumulation.
-        if (allowFileClose && currentSizeCount >= sizeThreshold && currentSizeCount > 0)
-        {
-            var totalForBatch = currentSizeCount;
-            currentSizeCount = 0;
-            _plcCloseGraceStartedUtc.Remove(graceKey);
-
-            var alloc = _runtimeState.CloseBundle(record.PoNumber, record.MillNo, totalForBatch, sizeThreshold);
-            var batchNo = alloc.FinalSequence;
-            if (missedPlcClose)
-            {
-                _logger.LogWarning(
-                    "Missed PLC close for PO {PO} Mill {Mill} Size {Size}: file-side count {Count} ≥ threshold {Threshold} for {GraceSeconds}s with healthy S7; executing file-driven close (PlcCloseGraceSeconds safety-net).",
-                    record.PoNumber,
-                    record.MillNo,
-                    sizeKey,
-                    totalForBatch,
-                    sizeThreshold,
-                    Math.Max(0, _options.Value.PlcCloseGraceSeconds));
-            }
-
-            _logger.LogInformation(
-                "Closing size-based bundle {BatchNo} for PO {PO} Mill {Mill} Size {Size} threshold={Threshold} total={Total} (includes slit overshoot)",
-                batchNo,
-                record.PoNumber,
-                record.MillNo,
-                sizeKey,
-                sizeThreshold,
-                totalForBatch);
-
-            sizeCounts[sizeKey] = currentSizeCount;
-            _runtimeState.SetSizeCounts(record.PoNumber, record.MillNo, sizeCounts);
-            await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
-
-            await onBundleClosedAsync(record, batchNo, totalForBatch).ConfigureAwait(false);
-            return;
-        }
-
         sizeCounts[sizeKey] = currentSizeCount;
         _runtimeState.SetSizeCounts(record.PoNumber, record.MillNo, sizeCounts);
         await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
+
+        if (allowFileClose && currentSizeCount >= sizeThreshold && currentSizeCount > 0)
+        {
+            await TryCommitPendingFileCloseAsync(
+                    record,
+                    sizeKey,
+                    sizeThreshold,
+                    onBundleClosedAsync,
+                    missedPlcClose,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
     }
 
     public async Task CloseBundleFromPlcAsync(
@@ -215,30 +210,29 @@ public sealed class NdtBundleEngine : IBundleEngine
         if (string.IsNullOrEmpty(sizeKey))
             sizeKey = "Default";
 
-        var sizeCounts = _runtimeState.GetSizeCounts(poNumber, millNo);
-        sizeCounts[sizeKey] = 0;
-        _runtimeState.SetSizeCounts(poNumber, millNo, sizeCounts);
-        ClearPlcCloseGrace(poNumber, millNo, sizeKey);
-
         var contextRecord = _runtimeState.GetLastRecord(poNumber, millNo) ?? CreateSyntheticRecord(poNumber, millNo);
-        var alloc = _runtimeState.CloseBundle(poNumber, millNo, plcCount, sizeThreshold);
-        var batchNo = alloc.FinalSequence;
-        // Align RunningTotal/BatchOffset after close; CSV fill reads Target_Ndt_Pcs from SQL.
-        _runtimeState.AdvanceOnPoEnd(poNumber, millNo, sizeThreshold);
-        await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation(
             allowPartial
-                ? "Closing PO-end remainder bundle {BatchNo} for PO {PO} Mill {Mill} Size {Size} threshold={Threshold} total={Total} Close_Source=Plc (partialAllowed)"
-                : "Closing size-based bundle {BatchNo} for PO {PO} Mill {Mill} Size {Size} threshold={Threshold} total={Total} Close_Source=Plc",
-            batchNo,
+                ? "Closing PO-end remainder bundle for PO {PO} Mill {Mill} Size {Size} threshold={Threshold} total={Total} Close_Source=Plc (partialAllowed)"
+                : "Closing size-based bundle for PO {PO} Mill {Mill} Size {Size} threshold={Threshold} total={Total} Close_Source=Plc",
             poNumber,
             millNo,
             sizeKey,
             sizeThreshold,
             plcCount);
 
-        await onBundleClosedAsync(contextRecord, batchNo, plcCount).ConfigureAwait(false);
+        await CommitCloseAfterWriteAsync(
+                contextRecord,
+                poNumber,
+                millNo,
+                plcCount,
+                sizeThreshold,
+                sizeKey,
+                onBundleClosedAsync,
+                cancellationToken,
+                advanceOnPoEnd: true)
+            .ConfigureAwait(false);
     }
 
     public async Task HandlePoEndAsync(
@@ -280,17 +274,23 @@ public sealed class NdtBundleEngine : IBundleEngine
                 continue;
 
             closedFromSizeCounts = true;
-            var alloc = _runtimeState.CloseBundle(poNumber, millNo, count, sizeThreshold);
-            var batchNo = alloc.FinalSequence;
-            sizeCounts[sizeKey] = 0;
             _logger.LogInformation(
-                "Closing partial size-based bundle {BatchNo} for PO {PO} Mill {Mill} Size {Size} due to PO end. CorrelationId {CorrelationId}",
-                batchNo,
+                "Closing partial size-based bundle for PO {PO} Mill {Mill} Size {Size} due to PO end. CorrelationId {CorrelationId}",
                 poNumber,
                 millNo,
                 sizeKey,
                 correlationId);
-            await onBundleClosedAsync(contextRecord, batchNo, count).ConfigureAwait(false);
+            await CommitCloseAfterWriteAsync(
+                    contextRecord,
+                    poNumber,
+                    millNo,
+                    count,
+                    sizeThreshold,
+                    sizeKey,
+                    onBundleClosedAsync,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            sizeCounts = _runtimeState.GetSizeCounts(poNumber, millNo);
         }
 
         if (!closedFromSizeCounts)
@@ -298,21 +298,196 @@ public sealed class NdtBundleEngine : IBundleEngine
             var runningTotal = _runtimeState.GetRunningTotal(poNumber, millNo);
             if (runningTotal > 0)
             {
-                var alloc = _runtimeState.CloseBundle(poNumber, millNo, runningTotal, sizeThreshold);
-                var batchNo = alloc.FinalSequence;
                 _logger.LogInformation(
-                    "Closing partial running-total bundle {BatchNo} for PO {PO} Mill {Mill} ({Total} pcs) due to PO end. CorrelationId {CorrelationId}",
-                    batchNo,
+                    "Closing partial running-total bundle for PO {PO} Mill {Mill} ({Total} pcs) due to PO end. CorrelationId {CorrelationId}",
                     poNumber,
                     millNo,
                     runningTotal,
                     correlationId);
-                await onBundleClosedAsync(contextRecord, batchNo, runningTotal).ConfigureAwait(false);
+                await CommitCloseAfterWriteAsync(
+                        contextRecord,
+                        poNumber,
+                        millNo,
+                        runningTotal,
+                        sizeThreshold,
+                        sizeKeyToZero: null,
+                        onBundleClosedAsync,
+                        cancellationToken)
+                    .ConfigureAwait(false);
             }
         }
 
-        _runtimeState.SetSizeCounts(poNumber, millNo, sizeCounts);
         _runtimeState.ClearRunningTotal(poNumber, millNo);
+        await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// File-close leftover: sizeCounts still at threshold after a failed allocate. Retry the same pipes
+    /// before adding another slit.
+    /// </summary>
+    private async Task TryCommitPendingFileCloseAsync(
+        InputSlitRecord record,
+        string sizeKey,
+        int sizeThreshold,
+        Func<InputSlitRecord, int, int, Task> onBundleClosedAsync,
+        bool missedPlcClose,
+        CancellationToken cancellationToken)
+    {
+        var sizeCounts = _runtimeState.GetSizeCounts(record.PoNumber, record.MillNo);
+        if (!sizeCounts.TryGetValue(sizeKey, out var totalForBatch) || totalForBatch < sizeThreshold || totalForBatch <= 0)
+            return;
+
+        if (missedPlcClose)
+        {
+            _logger.LogWarning(
+                "Missed PLC close for PO {PO} Mill {Mill} Size {Size}: file-side count {Count} ≥ threshold {Threshold} for {GraceSeconds}s with healthy S7; executing file-driven close (PlcCloseGraceSeconds safety-net).",
+                record.PoNumber,
+                record.MillNo,
+                sizeKey,
+                totalForBatch,
+                sizeThreshold,
+                Math.Max(0, _options.Value.PlcCloseGraceSeconds));
+        }
+
+        _logger.LogInformation(
+            "Closing size-based bundle for PO {PO} Mill {Mill} Size {Size} threshold={Threshold} total={Total} (includes slit overshoot)",
+            record.PoNumber,
+            record.MillNo,
+            sizeKey,
+            sizeThreshold,
+            totalForBatch);
+
+        _plcCloseGraceStartedUtc.Remove(GraceKey(record.PoNumber, record.MillNo, sizeKey));
+        await CommitCloseAfterWriteAsync(
+                record,
+                record.PoNumber,
+                record.MillNo,
+                totalForBatch,
+                sizeThreshold,
+                sizeKey,
+                onBundleClosedAsync,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Invoke allocate+insert (callback) first. Only then zero RunningTotal / sizeCounts.
+    /// On failure: no ZPL path from the caller, accumulation intact, exception propagates.
+    /// Crash after SQL commit: in-flight marker + Mill_Sequence ahead of lastAck skips a second allocate.
+    /// </summary>
+    private async Task CommitCloseAfterWriteAsync(
+        InputSlitRecord contextRecord,
+        string poNumber,
+        int millNo,
+        int totalPcs,
+        int sizeThreshold,
+        string? sizeKeyToZero,
+        Func<InputSlitRecord, int, int, Task> onBundleClosedAsync,
+        CancellationToken cancellationToken,
+        bool advanceOnPoEnd = false)
+    {
+        if (await TryCompleteCommittedInFlightAsync(
+                poNumber, millNo, totalPcs, sizeThreshold, sizeKeyToZero, advanceOnPoEnd, cancellationToken)
+            .ConfigureAwait(false))
+        {
+            return;
+        }
+
+        _runtimeState.MarkCloseInFlight(poNumber, millNo, totalPcs);
+        await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            await onBundleClosedAsync(contextRecord, 0, totalPcs).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _runtimeState.ClearCloseInFlight(poNumber, millNo);
+            await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
+            _logger.LogError(
+                ex,
+                "Bundle close failed for PO {PO} Mill {Mill} ({Pcs} pcs); accumulation left intact.",
+                poNumber,
+                millNo,
+                totalPcs);
+            throw;
+        }
+
+        await CompleteSuccessfulCloseAsync(
+                poNumber, millNo, totalPcs, sizeThreshold, sizeKeyToZero, advanceOnPoEnd, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<bool> TryCompleteCommittedInFlightAsync(
+        string poNumber,
+        int millNo,
+        int totalPcs,
+        int sizeThreshold,
+        string? sizeKeyToZero,
+        bool advanceOnPoEnd,
+        CancellationToken cancellationToken)
+    {
+        if (!_runtimeState.HasCloseInFlight(poNumber, millNo))
+            return false;
+        if (_millSequence is not { IsEnabled: true })
+            return false;
+
+        var snap = await _millSequence.GetSnapshotAsync(millNo, cancellationToken).ConfigureAwait(false);
+        if (snap is null)
+            return false;
+
+        var lastAck = _runtimeState.GetLastAcknowledgedMillSequence(poNumber, millNo);
+        if (!NdtBundleRuntimeStateLogic.ShouldCompleteInFlightWithoutAllocate(
+                closeInFlight: true,
+                millCurrentSequence: snap.CurrentSequence,
+                lastAcknowledgedMillSequence: lastAck))
+        {
+            return false;
+        }
+
+        _logger.LogWarning(
+            "Completing in-flight close for PO {PO} Mill {Mill} ({Pcs} pcs) without re-allocate (Mill_Sequence={Seq}, lastAck={Ack}).",
+            poNumber,
+            millNo,
+            totalPcs,
+            snap.CurrentSequence,
+            lastAck);
+
+        await CompleteSuccessfulCloseAsync(
+                poNumber, millNo, totalPcs, sizeThreshold, sizeKeyToZero, advanceOnPoEnd, cancellationToken)
+            .ConfigureAwait(false);
+        return true;
+    }
+
+    private async Task CompleteSuccessfulCloseAsync(
+        string poNumber,
+        int millNo,
+        int totalPcs,
+        int sizeThreshold,
+        string? sizeKeyToZero,
+        bool advanceOnPoEnd,
+        CancellationToken cancellationToken)
+    {
+        _runtimeState.CloseBundle(poNumber, millNo, totalPcs, sizeThreshold);
+        if (!string.IsNullOrEmpty(sizeKeyToZero))
+        {
+            var sizeCounts = _runtimeState.GetSizeCounts(poNumber, millNo);
+            sizeCounts[sizeKeyToZero] = 0;
+            _runtimeState.SetSizeCounts(poNumber, millNo, sizeCounts);
+            ClearPlcCloseGrace(poNumber, millNo, sizeKeyToZero);
+        }
+
+        if (advanceOnPoEnd)
+            _runtimeState.AdvanceOnPoEnd(poNumber, millNo, sizeThreshold);
+
+        if (_millSequence is { IsEnabled: true })
+        {
+            var snap = await _millSequence.GetSnapshotAsync(millNo, cancellationToken).ConfigureAwait(false);
+            if (snap is not null)
+                _runtimeState.SetLastAcknowledgedMillSequence(poNumber, millNo, snap.CurrentSequence);
+        }
+
+        _runtimeState.ClearCloseInFlight(poNumber, millNo);
         await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -359,8 +534,6 @@ public sealed class NdtBundleEngine : IBundleEngine
         _plcCloseGraceFileSum.Remove(graceKey);
 
         var totalForBatch = fileSum;
-        var alloc = _runtimeState.CloseBundle(record.PoNumber, record.MillNo, totalForBatch, sizeThreshold);
-        var batchNo = alloc.FinalSequence;
 
         _logger.LogWarning(
             "Missed PLC close for PO {PO} Mill {Mill} Size {Size}: file-side count {Count} ≥ threshold {Threshold} for {GraceSeconds}s with healthy S7; executing file-driven close (PlcCloseGraceSeconds safety-net).",
@@ -372,16 +545,23 @@ public sealed class NdtBundleEngine : IBundleEngine
             graceSeconds);
 
         _logger.LogInformation(
-            "Closing size-based bundle {BatchNo} for PO {PO} Mill {Mill} Size {Size} threshold={Threshold} total={Total} (PlcCloseGrace file-side safety-net)",
-            batchNo,
+            "Closing size-based bundle for PO {PO} Mill {Mill} Size {Size} threshold={Threshold} total={Total} (PlcCloseGrace file-side safety-net)",
             record.PoNumber,
             record.MillNo,
             sizeKey,
             sizeThreshold,
             totalForBatch);
 
-        await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
-        await onBundleClosedAsync(record, batchNo, totalForBatch).ConfigureAwait(false);
+        await CommitCloseAfterWriteAsync(
+                record,
+                record.PoNumber,
+                record.MillNo,
+                totalForBatch,
+                sizeThreshold,
+                sizeKeyToZero: null,
+                onBundleClosedAsync,
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private static string GraceKey(string poNumber, int millNo, string sizeKey) =>

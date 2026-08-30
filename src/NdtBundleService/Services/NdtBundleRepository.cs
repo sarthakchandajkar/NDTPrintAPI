@@ -143,6 +143,7 @@ SELECT
     Print_Error AS PrintError
 FROM dbo.NDT_Bundle
 WHERE Print_Status IN ('Pending', 'PrintFailed')
+  AND ISNULL(Voided, 0) = 0
   AND COALESCE(Print_Attempted_At, PrintedAt) < @CutoffUtc
 ORDER BY COALESCE(Print_Attempted_At, PrintedAt)";
             await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
@@ -281,6 +282,110 @@ END";
         await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task RecordBundlePendingPrintInTxAsync(
+        Microsoft.Data.SqlClient.SqlConnection conn,
+        Microsoft.Data.SqlClient.SqlTransaction tx,
+        NdtBundleRecord record,
+        CancellationToken cancellationToken)
+    {
+        const string sql = @"
+INSERT INTO dbo.NDT_Bundle
+    (PO_Number, Mill_No, Bundle_No, Total_NDT_Pcs, Target_Ndt_Pcs, Csv_Filled, Csv_Fill_State, Context_Slit_No, Slit_Start_Time, Slit_Finish_Time, Rejected_P, NDT_Short_Length_Pipe, Rejected_Short_Length_Pipe, IsReprint, Print_Status, Print_Attempted_At, Print_Error)
+VALUES
+    (@PoNumber, @MillNo, @BundleNo, @TotalNdtPcs, @TotalNdtPcs, 0, N'PlcClosed', @SlitNo, @SlitStartTime, @SlitFinishTime, @RejectedPipes, @NdtShortLengthPipe, @RejectedShortLengthPipe, 0, 'Pending', SYSDATETIME(), NULL);";
+        await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn, tx);
+        AddBundleUpsertParameters(cmd, record);
+        await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<string>> GetOutputSourceFilesForBatchAsync(
+        string batchNo,
+        CancellationToken cancellationToken)
+    {
+        if (!UseDatabase || string.IsNullOrWhiteSpace(batchNo))
+            return Array.Empty<string>();
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(@"
+SELECT DISTINCT Source_File
+FROM dbo.Output_Slit_Row
+WHERE NDT_Batch_No = @BatchNo
+  AND Source_File IS NOT NULL
+  AND LTRIM(RTRIM(Source_File)) <> N'';", conn);
+            cmd.Parameters.AddWithValue("@BatchNo", batchNo.Trim());
+            var list = new List<string>();
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (!reader.IsDBNull(0))
+                    list.Add(reader.GetString(0).Trim());
+            }
+
+            return list;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GetOutputSourceFilesForBatch failed for {Batch}.", batchNo);
+            return Array.Empty<string>();
+        }
+    }
+
+    public async Task<int> RewriteNdtBatchNoInOutputCsvsAsync(
+        string oldBatchNo,
+        string newBatchNo,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(oldBatchNo) || string.IsNullOrWhiteSpace(newBatchNo))
+            return 0;
+        if (string.Equals(oldBatchNo, newBatchNo, StringComparison.OrdinalIgnoreCase))
+            return 0;
+
+        var oldTrim = oldBatchNo.Trim();
+        var newTrim = newBatchNo.Trim();
+        var files = TryListPerSlitOutputCsvFiles();
+        var ioToken = CancellationToken.None;
+        var updated = 0;
+        foreach (var path in files)
+        {
+            try
+            {
+                var lines = await File.ReadAllLinesAsync(path, ioToken).ConfigureAwait(false);
+                if (lines.Length == 0)
+                    continue;
+                var columns = ReconcileCsvParsing.ResolveOutputCsvColumns(lines[0]);
+                var changed = false;
+                for (var i = 1; i < lines.Length; i++)
+                {
+                    if (string.IsNullOrWhiteSpace(lines[i]))
+                        continue;
+                    var cols = ReconcileCsvParsing.SplitCsvLine(lines[i]);
+                    if (cols.Count < columns.MinColumns)
+                        continue;
+                    if (!columns.TryGetField(cols, columns.NdtBatchNo, out var batchCell)
+                        || !batchCell.Equals(oldTrim, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    lines[i] = ReconcileCsvParsing.ReplaceFieldAtIndex(lines[i], columns.NdtBatchNo, newTrim);
+                    changed = true;
+                }
+
+                if (changed)
+                {
+                    await File.WriteAllLinesAsync(path, lines, ioToken).ConfigureAwait(false);
+                    updated++;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to rewrite NDT Batch No in {Path}.", path);
+            }
+        }
+
+        return updated;
+    }
+
     private static void AddBundleUpsertParameters(Microsoft.Data.SqlClient.SqlCommand cmd, NdtBundleRecord record)
     {
         cmd.Parameters.AddWithValue("@PoNumber", record.PoNumber);
@@ -362,6 +467,7 @@ WITH Ranked AS (
         Manual_Recon_Reason,
         Manual_Recon_Original_Total,
         Post_Recon_Csv_Sum,
+        ISNULL(Voided, 0) AS Voided,
         ROW_NUMBER() OVER (PARTITION BY Bundle_No ORDER BY PrintedAt DESC) AS rn
     FROM dbo.NDT_Bundle
 ),
@@ -400,6 +506,7 @@ SELECT
 FROM Ranked r
 LEFT JOIN SlitSum s ON s.NDT_Batch_No = r.Bundle_No
 WHERE r.rn = 1
+  AND r.Voided = 0
 ORDER BY r.PrintedAt DESC";
         await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
         var list = new List<NdtBundleRecord>();
@@ -615,7 +722,13 @@ SELECT TOP 1
     Manual_Recon_At AS ManualReconAt,
     Manual_Recon_Reason AS ManualReconReason,
     Manual_Recon_Original_Total AS ManualReconOriginalTotal,
-    Post_Recon_Csv_Sum AS PostReconCsvSum
+    Post_Recon_Csv_Sum AS PostReconCsvSum,
+    Target_Ndt_Pcs AS TargetNdtPcs,
+    Csv_Filled AS CsvFilled,
+    Csv_Fill_State AS CsvFillState,
+    CAST(ISNULL(Voided, 0) AS bit) AS Voided,
+    Original_Bundle_No AS OriginalBundleNo,
+    Merged_Into_Bundle_No AS MergedIntoBundleNo
 FROM dbo.NDT_Bundle WHERE Bundle_No = @BatchNo ORDER BY PrintedAt DESC";
                 await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
                 cmd.Parameters.AddWithValue("@BatchNo", batchNo.Trim());
@@ -663,7 +776,7 @@ SELECT TOP 1
     Print_Attempted_At AS PrintAttemptedAt,
     Print_Error AS PrintError
 FROM dbo.NDT_Bundle
-WHERE Mill_No = @MillNo AND Total_NDT_Pcs > 0
+WHERE Mill_No = @MillNo AND Total_NDT_Pcs > 0 AND ISNULL(Voided, 0) = 0
 ORDER BY PrintedAt DESC";
             await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("@MillNo", millNo);
@@ -1218,7 +1331,13 @@ WHERE Bundle_No = @BatchNo AND Manual_Recon = 1;";
             ManualReconAt = record.ManualReconAt,
             ManualReconReason = record.ManualReconReason,
             ManualReconOriginalTotal = record.ManualReconOriginalTotal,
-            PostReconCsvSum = record.PostReconCsvSum
+            PostReconCsvSum = record.PostReconCsvSum,
+            TargetNdtPcs = record.TargetNdtPcs,
+            CsvFilled = record.CsvFilled,
+            CsvFillState = record.CsvFillState,
+            Voided = record.Voided,
+            OriginalBundleNo = record.OriginalBundleNo,
+            MergedIntoBundleNo = record.MergedIntoBundleNo
         };
 
     private async Task<int?> TryReadBundleSummaryTotalAsync(string batchNo, CancellationToken cancellationToken)
@@ -2092,8 +2211,24 @@ ORDER BY PrintedAt DESC";
             ManualReconAt = reader.FieldCount > 19 && !reader.IsDBNull(19) ? reader.GetDateTime(19) : null,
             ManualReconReason = reader.FieldCount > 20 && !reader.IsDBNull(20) ? reader.GetString(20) : null,
             ManualReconOriginalTotal = reader.FieldCount > 21 && !reader.IsDBNull(21) ? reader.GetInt32(21) : null,
-            PostReconCsvSum = reader.FieldCount > 22 && !reader.IsDBNull(22) ? reader.GetInt32(22) : null
+            PostReconCsvSum = reader.FieldCount > 22 && !reader.IsDBNull(22) ? reader.GetInt32(22) : null,
+            TargetNdtPcs = reader.FieldCount > 23 && !reader.IsDBNull(23) ? reader.GetInt32(23) : null,
+            CsvFilled = reader.FieldCount > 24 && !reader.IsDBNull(24) ? reader.GetInt32(24) : 0,
+            CsvFillState = reader.FieldCount > 25 && !reader.IsDBNull(25) ? reader.GetString(25) : CsvFillState.PlcClosed,
+            Voided = reader.FieldCount > 26 && !reader.IsDBNull(26) && ReadBoolOrInt(reader, 26),
+            OriginalBundleNo = reader.FieldCount > 27 && !reader.IsDBNull(27) ? reader.GetString(27) : null,
+            MergedIntoBundleNo = reader.FieldCount > 28 && !reader.IsDBNull(28) ? reader.GetString(28) : null
         };
+    }
+
+    private static bool ReadBoolOrInt(Microsoft.Data.SqlClient.SqlDataReader reader, int ordinal)
+    {
+        var type = reader.GetFieldType(ordinal);
+        if (type == typeof(bool))
+            return reader.GetBoolean(ordinal);
+        if (type == typeof(int) || type == typeof(byte) || type == typeof(short) || type == typeof(long))
+            return Convert.ToInt32(reader.GetValue(ordinal), System.Globalization.CultureInfo.InvariantCulture) != 0;
+        return false;
     }
 
     /// <summary>

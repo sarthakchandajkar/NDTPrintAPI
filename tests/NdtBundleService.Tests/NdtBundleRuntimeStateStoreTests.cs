@@ -131,9 +131,38 @@ public sealed class NdtBundleRuntimeStateStoreTests : IDisposable
         store.ApplySlitContribution("PO-200", 2, ndtPipes: 0, threshold: 15, out _);
 
         var closed = store.CloseBundle("PO-200", 2, closedTotalPcs: 15, threshold: 15);
-        Assert.Equal(1, closed.FinalSequence);
-        Assert.Equal(1, store.GetBatchOffset("PO-200", 2));
+        Assert.Equal(0, closed.FinalSequence);
+        Assert.Equal(0, store.GetBatchOffset("PO-200", 2));
         Assert.Equal(0, store.GetRunningTotal("PO-200", 2));
+    }
+
+    [Fact]
+    public async Task SaveAsync_omits_millMaxSequence()
+    {
+        WriteStateFile(new
+        {
+            version = 1,
+            millMaxSequence = new Dictionary<string, int> { ["1"] = 36 },
+            mills = new Dictionary<string, object>
+            {
+                ["PO-300|3"] = new
+                {
+                    poNumber = "PO-300",
+                    millNo = 3,
+                    batchOffset = 0,
+                    runningTotal = 4,
+                    engineBatchNo = 0,
+                    lastActivityUtc = "2026-06-10T10:00:00Z"
+                }
+            }
+        });
+
+        var store = CreateStore(new Dictionary<int, string>(), gracePeriodDays: 14);
+        await store.EnsureInitializedAsync(CancellationToken.None);
+        await store.SaveAsync(CancellationToken.None);
+
+        var json = await File.ReadAllTextAsync(_statePath);
+        Assert.DoesNotContain("millMaxSequence", json, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

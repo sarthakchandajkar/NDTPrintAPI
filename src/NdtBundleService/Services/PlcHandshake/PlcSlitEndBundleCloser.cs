@@ -81,29 +81,22 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
         if (!BundleClosePolicy.AllowPlcClose(trigger, s7.IsHealthy))
             return;
 
-        if (!TryDetectSlitEnd(millNo, handshake, s7, liveNdtCount, liveSlitId, out var edgeReason, out var slitNdtPcs))
-            return;
-
-        if (_closedThisSlitByMill.Contains(millNo))
-            return;
-
         var formation = await _formationChart.GetFormationChartAsync(cancellationToken).ConfigureAwait(false);
         var poByMill = await _activePo.GetLatestPoByMillAsync(cancellationToken).ConfigureAwait(false);
-        if (!poByMill.TryGetValue(millNo, out var po) || string.IsNullOrWhiteSpace(po))
-        {
-            _logger.LogDebug("{MillName}: slit-end detected ({Reason}) but no active PO; skip PLC accumulate/close.", mill.Name, edgeReason);
-            return;
-        }
+        poByMill.TryGetValue(millNo, out var po);
+        var poNorm = string.IsNullOrWhiteSpace(po) ? null : InputSlitCsvParsing.NormalizePo(po.Trim());
 
-        var poNorm = InputSlitCsvParsing.NormalizePo(po.Trim());
         string? pipeSize = null;
-        try
+        if (poNorm is not null)
         {
-            pipeSize = await _pipeSizeProvider.TryGetPipeSizeForPoAsync(poNorm, cancellationToken).ConfigureAwait(false);
-        }
-        catch
-        {
-            /* use default threshold */
+            try
+            {
+                pipeSize = await _pipeSizeProvider.TryGetPipeSizeForPoAsync(poNorm, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                /* use default threshold */
+            }
         }
 
         var threshold = FormationChartLookup.ResolveThreshold(formation, pipeSize);
@@ -113,8 +106,38 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
 
         using (await _millLock.AcquireAsync(millNo, cancellationToken).ConfigureAwait(false))
         {
+            if (poNorm is not null)
+            {
+                await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
+                var leftoverCounts = _runtimeState.GetSizeCounts(poNorm, millNo);
+                leftoverCounts.TryGetValue(sizeKey, out var leftover);
+                if (leftover >= threshold && leftover > 0)
+                {
+                    await CloseAccumulatedAsync(
+                            millNo,
+                            mill,
+                            poNorm,
+                            pipeSize,
+                            leftover,
+                            "retry after failed allocate",
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    _closedThisSlitByMill.Add(millNo);
+                    return;
+                }
+            }
+
+            if (!TryDetectSlitEnd(millNo, handshake, s7, liveNdtCount, liveSlitId, out var edgeReason, out var slitNdtPcs))
+                return;
+
             if (_closedThisSlitByMill.Contains(millNo))
                 return;
+
+            if (poNorm is null)
+            {
+                _logger.LogDebug("{MillName}: slit-end detected ({Reason}) but no active PO; skip PLC accumulate/close.", mill.Name, edgeReason);
+                return;
+            }
 
             await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
 
@@ -144,32 +167,52 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
                 return;
             }
 
-            await _bundleEngine.CloseBundleFromPlcAsync(
-                poNorm,
-                millNo,
-                pipeSize,
-                accumulated,
-                async (contextRecord, batchNo, totalNdtPcs) =>
-                {
-                    if (totalNdtPcs <= 0)
-                        return;
-
-                    await _outputWriter.WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken)
-                        .ConfigureAwait(false);
-                    await _bundleRepository.TrySetPlcCloseMetadataAsync(batchNo, contextRecord.MillNo, cancellationToken)
-                        .ConfigureAwait(false);
-
-                    _logger.LogInformation(
-                        "{MillName}: PLC slit-end close printed bundle sequence {BatchNo} ({Total} pcs) — {Reason}.",
-                        mill.Name,
-                        batchNo,
-                        totalNdtPcs,
-                        edgeReason);
-                },
-                cancellationToken).ConfigureAwait(false);
+            await CloseAccumulatedAsync(
+                    millNo,
+                    mill,
+                    poNorm,
+                    pipeSize,
+                    accumulated,
+                    edgeReason,
+                    cancellationToken)
+                .ConfigureAwait(false);
 
             _closedThisSlitByMill.Add(millNo);
         }
+    }
+
+    private async Task CloseAccumulatedAsync(
+        int millNo,
+        MillConfig mill,
+        string poNorm,
+        string? pipeSize,
+        int accumulated,
+        string edgeReason,
+        CancellationToken cancellationToken)
+    {
+        await _bundleEngine.CloseBundleFromPlcAsync(
+            poNorm,
+            millNo,
+            pipeSize,
+            accumulated,
+            async (contextRecord, _, totalNdtPcs) =>
+            {
+                if (totalNdtPcs <= 0)
+                    return;
+
+                var seq = await _outputWriter.WriteBundleAsync(contextRecord, 0, totalNdtPcs, cancellationToken)
+                    .ConfigureAwait(false);
+                await _bundleRepository.TrySetPlcCloseMetadataAsync(seq, contextRecord.MillNo, cancellationToken)
+                    .ConfigureAwait(false);
+
+                _logger.LogInformation(
+                    "{MillName}: PLC slit-end close printed bundle sequence {BatchNo} ({Total} pcs) — {Reason}.",
+                    mill.Name,
+                    seq,
+                    totalNdtPcs,
+                    edgeReason);
+            },
+            cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

@@ -144,10 +144,10 @@ public sealed class PoEndImmediateRemainderTests
     {
         private readonly List<(int Batch, int Pcs)> _closed;
         public CapturingWriter(List<(int Batch, int Pcs)> closed) => _closed = closed;
-        public Task WriteBundleAsync(InputSlitRecord contextRecord, int ndtBatchNo, int totalNdtPcs, CancellationToken cancellationToken, Guid? correlationId = null)
+        public Task<int> WriteBundleAsync(InputSlitRecord contextRecord, int ndtBatchNo, int totalNdtPcs, CancellationToken cancellationToken, Guid? correlationId = null)
         {
             _closed.Add((ndtBatchNo, totalNdtPcs));
-            return Task.CompletedTask;
+            return Task.FromResult(ndtBatchNo);
         }
     }
 

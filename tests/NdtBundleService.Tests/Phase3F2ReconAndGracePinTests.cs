@@ -93,7 +93,8 @@ public sealed class Phase3F2ReconAndGracePinTests
 
         Assert.Single(closed);
         Assert.Equal(11, closed[0].Pcs);
-        Assert.Equal(2, closed[0].Batch);
+        Assert.Equal(0, closed[0].Batch);
+        Assert.Equal(2, runtime.GetEngineBatchNo("1000060163", 1));
         Assert.Equal(0, runtime.GetSizeCounts("1000060163", 1).GetValueOrDefault("Default"));
     }
 

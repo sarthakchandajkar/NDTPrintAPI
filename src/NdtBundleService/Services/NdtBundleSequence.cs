@@ -44,4 +44,24 @@ public static class NdtBundleSequence
 
         return int.TryParse(s.AsSpan(5, 5), NumberStyles.None, CultureInfo.InvariantCulture, out sequence);
     }
+
+    /// <summary>
+    /// Unique tombstone after merge: original 10-char number plus <c>V</c> (11 chars).
+    /// <see cref="TryParseSequence"/> requires length 10, so tombstones cannot raise mill scans.
+    /// </summary>
+    public static string ToTombstone(string liveBundleNo)
+    {
+        var s = (liveBundleNo ?? string.Empty).Trim();
+        if (s.Length == 0)
+            throw new ArgumentException("Bundle number is required.", nameof(liveBundleNo));
+        if (s.EndsWith("V", StringComparison.OrdinalIgnoreCase) && s.Length == BatchNoLength + 1)
+            return s;
+        return s + "V";
+    }
+
+    public static bool IsTombstone(string? bundleNo)
+    {
+        var s = (bundleNo ?? string.Empty).Trim();
+        return s.Length == BatchNoLength + 1 && s.EndsWith("V", StringComparison.OrdinalIgnoreCase);
+    }
 }

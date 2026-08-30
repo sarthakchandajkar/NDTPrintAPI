@@ -64,7 +64,10 @@ public sealed class CompositionRootTests : IDisposable
         Assert.DoesNotContain(typeof(PoReopenWipConfirmationBridge), types);
         Assert.DoesNotContain(typeof(MillInstanceLeaseHostedService), types);
         Assert.DoesNotContain(typeof(FillCutoverStartupCheck), types);
+        Assert.DoesNotContain(typeof(MillSequenceStartupGuard), types);
         Assert.IsType<SqlZplGenerationToggle>(provider.GetRequiredService<IZplGenerationToggle>());
+        Assert.NotNull(provider.GetRequiredService<IMillSequenceService>());
+        Assert.NotNull(provider.GetRequiredService<IBundleMergeService>());
     }
 
     [Theory]
@@ -82,12 +85,20 @@ public sealed class CompositionRootTests : IDisposable
         Assert.Contains(typeof(PoReopenWipConfirmationBridge), types);
         Assert.Contains(typeof(MillInstanceLeaseHostedService), types);
         Assert.Contains(typeof(FillCutoverStartupCheck), types);
+        Assert.Contains(typeof(MillSequenceStartupGuard), types);
         Assert.DoesNotContain(typeof(PoPlanWipImportHostedService), types);
         Assert.DoesNotContain(typeof(UploadNdtBundleSchedulerWorker), types);
         Assert.DoesNotContain(typeof(NdtInputSlitSapStatusWorker), types);
 
         Assert.IsType<SqlZplGenerationToggle>(provider.GetRequiredService<IZplGenerationToggle>());
         Assert.Equal(millNo, provider.GetRequiredService<IMillOwnership>().SingleOwnedMill);
+        Assert.NotNull(provider.GetRequiredService<IMillSequenceService>());
+        Assert.Null(provider.GetService<IBundleMergeService>());
+
+        var hosted = provider.GetServices<IHostedService>().Select(s => s.GetType()).ToList();
+        Assert.True(
+            hosted.IndexOf(typeof(MillInstanceLeaseHostedService))
+            < hosted.IndexOf(typeof(SlitMonitoringWorker)));
     }
 
     [Fact]
@@ -127,7 +138,20 @@ public sealed class CompositionRootTests : IDisposable
         Assert.Contains(typeof(SlitMonitoringWorker), types);
         Assert.Contains(typeof(NdtInputSlitSapStatusWorker), types);
         Assert.Contains(typeof(MillInstanceLeaseHostedService), types);
+        Assert.Contains(typeof(MillSequenceStartupGuard), types);
         Assert.IsType<ZplGenerationToggle>(provider.GetRequiredService<IZplGenerationToggle>());
+        Assert.NotNull(provider.GetRequiredService<IMillSequenceService>());
+        Assert.NotNull(provider.GetRequiredService<IBundleMergeService>());
+
+        var hosted = provider.GetServices<IHostedService>().Select(s => s.GetType()).ToList();
+        var lease = hosted.IndexOf(typeof(MillInstanceLeaseHostedService));
+        var worker = hosted.IndexOf(typeof(SlitMonitoringWorker));
+        var guard = hosted.IndexOf(typeof(MillSequenceStartupGuard));
+        var fill = hosted.IndexOf(typeof(FillCutoverStartupCheck));
+        Assert.True(guard >= 0 && fill >= 0 && lease >= 0 && worker >= 0);
+        Assert.True(guard < fill, "MillSequenceStartupGuard must start before FillCutover (leftover JSON millMaxSequence).");
+        Assert.True(fill < lease, "FillCutover must start after sequence seed.");
+        Assert.True(lease < worker, "MillInstanceLeaseHostedService must start before mill workers.");
 
         foreach (var hostedService in provider.GetServices<IHostedService>())
             Assert.NotNull(hostedService);

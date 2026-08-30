@@ -1253,7 +1253,7 @@ ORDER BY
         await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
         await _runtimeState.SyncBatchSequencesFromBundlesAsync(cancellationToken).ConfigureAwait(false);
         await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
-        return Ok(new { Message = "NDT bundle runtime state synced from SQL/CSV bundle records." });
+        return Ok(new { Message = "PO/mill runtime slots saved. Mill sequence is allocated from Mill_Sequence, not this JSON file." });
     }
 
     /// <summary>

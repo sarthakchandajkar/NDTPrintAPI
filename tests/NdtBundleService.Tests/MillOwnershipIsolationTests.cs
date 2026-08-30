@@ -268,41 +268,33 @@ public sealed class MillOwnershipIsolationTests : IDisposable
     }
 
     [Fact]
-    public async Task RuntimeStateStore_hydrate_ignores_foreign_mill_bundles()
+    public async Task RuntimeStateStore_save_strips_foreign_mill_slots()
     {
         var path = Path.Combine(_wipFolder, "runtime-m1.json");
+        File.WriteAllText(
+            path,
+            """
+            {
+              "version": 1,
+              "millMaxSequence": { "1": 1, "4": 99 },
+              "mills": {
+                "1000000001|1": { "poNumber": "1000000001", "millNo": 1, "batchOffset": 1 },
+                "1000000004|4": { "poNumber": "1000000004", "millNo": 4, "batchOffset": 99 }
+              }
+            }
+            """);
+
         var options = new TestOptionsMonitor<NdtBundleOptions>(new NdtBundleOptions
         {
             EnableNdtBundleRuntimeStatePersistence = true,
             NdtBundleRuntimeStateFile = path,
             UseSqlServerForBundles = false,
-            SyncRuntimeStateFromPrintedBundlesOnly = false,
             RuntimeStatePruning = new RuntimeStatePruningOptions { Enabled = false }
         });
 
-        var repo = new SeedBundles(
-        [
-            new NdtBundleRecord
-            {
-                BundleNo = NdtBundleSequence.Format(1, 1),
-                MillNo = 1,
-                PoNumber = "1000000001",
-                PrintedAt = DateTime.UtcNow,
-                TotalNdtPcs = 10
-            },
-            new NdtBundleRecord
-            {
-                BundleNo = NdtBundleSequence.Format(99, 4),
-                MillNo = 4,
-                PoNumber = "1000000004",
-                PrintedAt = DateTime.UtcNow,
-                TotalNdtPcs = 10
-            }
-        ]);
-
         var store = new NdtBundleRuntimeStateStore(
             options,
-            repo,
+            new EmptyBundles(),
             new StubActivePo(),
             TestMillOwnership.Mill(1),
             NullLogger<NdtBundleRuntimeStateStore>.Instance);
@@ -313,7 +305,7 @@ public sealed class MillOwnershipIsolationTests : IDisposable
         var json = await File.ReadAllTextAsync(path);
         Assert.Contains("1000000001|1", json, StringComparison.Ordinal);
         Assert.DoesNotContain("1000000004|4", json, StringComparison.Ordinal);
-        Assert.DoesNotContain("\"4\":", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("millMaxSequence", json, StringComparison.OrdinalIgnoreCase);
     }
 
     private void WriteWip(string name, DateTime stampUtc)
@@ -488,13 +480,13 @@ public sealed class MillOwnershipIsolationTests : IDisposable
 
     private sealed class NoOpOutput : IBundleOutputWriter
     {
-        public Task WriteBundleAsync(
+        public Task<int> WriteBundleAsync(
             InputSlitRecord contextRecord,
             int ndtBatchNo,
             int totalNdtPcs,
             CancellationToken cancellationToken,
             Guid? correlationId = null) =>
-            Task.CompletedTask;
+            Task.FromResult(0);
     }
 
     private sealed class FormationStub : IFormationChartProvider

@@ -16,6 +16,25 @@ public interface INdtBundleRepository
     /// <summary>Upserts bundle row with <see cref="BundlePrintStatus.Pending"/> before ZPL print attempt.</summary>
     Task RecordBundlePendingPrintAsync(NdtBundleRecord record, CancellationToken cancellationToken);
 
+    /// <summary>Same as pending-print upsert on an existing connection/transaction (allocate+insert TX).</summary>
+    Task RecordBundlePendingPrintInTxAsync(
+        Microsoft.Data.SqlClient.SqlConnection conn,
+        Microsoft.Data.SqlClient.SqlTransaction tx,
+        NdtBundleRecord record,
+        CancellationToken cancellationToken) =>
+        RecordBundlePendingPrintAsync(record, cancellationToken);
+
+    Task<IReadOnlyList<string>> GetOutputSourceFilesForBatchAsync(
+        string batchNo,
+        CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
+
+    Task<int> RewriteNdtBatchNoInOutputCsvsAsync(
+        string oldBatchNo,
+        string newBatchNo,
+        CancellationToken cancellationToken) =>
+        Task.FromResult(0);
+
     /// <summary>Updates <c>Print_Status</c> and optional <c>Print_Error</c> after a print attempt.</summary>
     Task UpdateBundlePrintStatusAsync(string bundleNo, string printStatus, string? printError, CancellationToken cancellationToken);
 
@@ -312,7 +331,8 @@ public interface IBundleLabelInfoProvider
 
 public interface IBundleOutputWriter
 {
-    Task WriteBundleAsync(InputSlitRecord contextRecord, int ndtBatchNo, int totalNdtPcs, CancellationToken cancellationToken, Guid? correlationId = null);
+    /// <summary>Returns the allocated mill sequence (0 when skipped for zero pcs).</summary>
+    Task<int> WriteBundleAsync(InputSlitRecord contextRecord, int ndtBatchNo, int totalNdtPcs, CancellationToken cancellationToken, Guid? correlationId = null);
 }
 
 /// <summary>

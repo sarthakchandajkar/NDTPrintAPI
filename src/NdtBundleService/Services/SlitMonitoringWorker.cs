@@ -833,23 +833,21 @@ public sealed class SlitMonitoringWorker : BackgroundService
                                                 {
                                                     await _bundleEngine.ProcessSlitRecordAsync(
                                                         bundleRecord,
-                                                        async (contextRecord, batchNo, totalNdtPcs) =>
+                                                        async (contextRecord, _, totalNdtPcs) =>
                                                         {
                                                             if (totalNdtPcs <= 0)
                                                                 return;
 
-                                                            closedPrintedBatch = batchNo;
-                                                            try
+                                                            var seq = await _outputWriter
+                                                                .WriteBundleAsync(contextRecord, 0, totalNdtPcs, cancellationToken)
+                                                                .ConfigureAwait(false);
+                                                            closedPrintedBatch = seq;
+                                                            if (seq > 0)
                                                             {
-                                                                await _outputWriter.WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken).ConfigureAwait(false);
                                                                 _logger.LogInformation(
                                                                     "Bundle output completed for {BatchNo} ({Pcs} pcs).",
-                                                                    FormatNdtBatchNo(batchNo, contextRecord.MillNo),
+                                                                    FormatNdtBatchNo(seq, contextRecord.MillNo),
                                                                     totalNdtPcs);
-                                                            }
-                                                            catch (Exception ex)
-                                                            {
-                                                                _logger.LogError(ex, "Tag print failed for bundle {BatchNo}.", FormatNdtBatchNo(batchNo, contextRecord.MillNo));
                                                             }
                                                         },
                                                         cancellationToken,
@@ -857,7 +855,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                                                 }
                                                 catch (Exception ex)
                                                 {
-                                                    _logger.LogError(ex, "Bundle engine failed for record in {File}.", fileFull);
+                                                    _logger.LogError(ex, "Bundle close failed for record in {File}.", fileFull);
                                                 }
                                             }
 

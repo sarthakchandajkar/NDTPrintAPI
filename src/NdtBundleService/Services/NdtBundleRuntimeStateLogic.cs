@@ -28,8 +28,16 @@ public static class NdtBundleRuntimeStateLogic
     /// <summary>Legacy open stamp (completed count + 1). Sequence allocation is close-only under fill-to-target.</summary>
     public static int ResolveOpenBatchNumber(int batchOffset) => batchOffset + 1;
 
-    /// <summary>Next printed sequence for the mill (single source of truth at close).</summary>
-    public static int AllocateNextMillSequence(int millMaxSequence) => Math.Max(0, millMaxSequence) + 1;
+    /// <summary>
+    /// After SQL allocate+insert, JSON may still hold those pipes (crash before clear).
+    /// If Mill_Sequence is already ahead of the last acknowledged close, complete the clear
+    /// without allocating again.
+    /// </summary>
+    public static bool ShouldCompleteInFlightWithoutAllocate(
+        bool closeInFlight,
+        int millCurrentSequence,
+        int lastAcknowledgedMillSequence) =>
+        closeInFlight && millCurrentSequence > lastAcknowledgedMillSequence;
 
     /// <summary>
     /// Raises <paramref name="batchOffset"/> and <paramref name="engineBatchNo"/> to the mill floor

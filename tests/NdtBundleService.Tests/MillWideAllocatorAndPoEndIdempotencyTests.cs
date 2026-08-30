@@ -39,11 +39,13 @@ public sealed class MillWideAllocatorAndPoEndIdempotencyTests : IDisposable
 
         store.SetSizeCounts("1000060364", 1, new Dictionary<string, int> { ["Default"] = 5 });
         var b1 = store.CloseBundle("1000060363", 1, 15, 15);
-        Assert.Equal(1, b1.FinalSequence);
+        Assert.Equal(0, b1.FinalSequence);
         var b2 = store.CloseBundle("1000060363", 1, 15, 15);
-        Assert.Equal(2, b2.FinalSequence);
+        Assert.Equal(0, b2.FinalSequence);
         var aFlush = store.CloseBundle("1000060364", 1, 5, 15);
-        Assert.Equal(3, aFlush.FinalSequence);
+        Assert.Equal(0, aFlush.FinalSequence);
+        Assert.Equal(0, store.GetRunningTotal("1000060363", 1));
+        Assert.Equal(0, store.GetRunningTotal("1000060364", 1));
     }
 
     [Fact]
@@ -58,7 +60,7 @@ public sealed class MillWideAllocatorAndPoEndIdempotencyTests : IDisposable
         Assert.Equal(30, total2);
 
         var close = store.CloseBundle("PO-A", 1, 20, 15);
-        Assert.Equal(1, close.FinalSequence);
+        Assert.Equal(0, close.FinalSequence);
     }
 
     [Fact]

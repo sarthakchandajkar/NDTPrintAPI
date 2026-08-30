@@ -9,6 +9,7 @@ import {
   type SettingsPlcMill,
   type SettingsPoChangeTestResult,
   type SettingsPrinterMill,
+  type MillSequenceSnapshot,
 } from "@/lib/api";
 import { LineRunningLamp } from "@/components/LineRunningLamp";
 import {
@@ -17,7 +18,7 @@ import {
   setSettingsToken,
 } from "@/lib/settingsAuth";
 
-type Tab = "formation" | "plc" | "printers";
+type Tab = "formation" | "plc" | "printers" | "sequence";
 
 /** Auto-refresh interval — uses GET /api/Status/plc-live (in-memory snapshot, no TCP/MES). */
 const PLC_STATUS_POLL_MS = 30_000;
@@ -329,6 +330,11 @@ export default function SettingsPage() {
   const [formationSource, setFormationSource] = useState<string | null>(null);
   const [plc, setPlc] = useState<SettingsPlcDiagnostics | null>(null);
   const [printers, setPrinters] = useState<SettingsPrinterMill[]>([]);
+  const [millSequences, setMillSequences] = useState<MillSequenceSnapshot[]>([]);
+  const [seqDraft, setSeqDraft] = useState<Record<number, string>>({});
+  const [seqReason, setSeqReason] = useState("");
+  const [seqForce, setSeqForce] = useState(false);
+  const [seqSavingMill, setSeqSavingMill] = useState<number | null>(null);
   const [poChangeTestingMill, setPoChangeTestingMill] = useState<number | null>(null);
   const [poChangeTestResult, setPoChangeTestResult] = useState<SettingsPoChangeTestResult | null>(null);
   const [plcConnectionBusyMill, setPlcConnectionBusyMill] = useState<number | null>(null);
@@ -363,13 +369,22 @@ export default function SettingsPage() {
         setFormationSource(typeof r.sourcePath === "string" ? r.sourcePath : null);
       } else if (tab === "plc") {
         setPlc(await api.settingsPlc(t, { live: !options?.plcFull }));
-      } else {
+      } else if (tab === "printers") {
         const r = await api.settingsPrinters(t);
         const mills = Array.isArray(r.mills) ? r.mills : [];
         setPrinters(
           mills.length > 0
             ? mills
             : [1, 2, 3, 4].map((m) => ({ millNo: m, address: "", port: 9100 }))
+        );
+      } else if (tab === "sequence") {
+        const r = await api.settingsMillSequence(t);
+        const mills = Array.isArray(r.mills) ? r.mills : [];
+        setMillSequences(mills);
+        setSeqDraft(
+          Object.fromEntries(
+            mills.map((m) => [m.millNo ?? 0, String(m.currentSequence ?? 0)])
+          )
         );
       }
     } catch (e) {
@@ -518,6 +533,42 @@ export default function SettingsPage() {
     }
   };
 
+  const saveMillSequence = async (millNo: number) => {
+    const t = getSettingsToken();
+    if (!t) return;
+    const reason = seqReason.trim();
+    if (!reason) {
+      setError("Reason is required to set mill sequence.");
+      return;
+    }
+    const parsed = parseInt(seqDraft[millNo] ?? "", 10);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      setError("Current sequence must be a non-negative integer.");
+      return;
+    }
+    setMessage(null);
+    setError(null);
+    setSeqSavingMill(millNo);
+    try {
+      const res = await api.settingsSetMillSequence(t, {
+        millNo,
+        currentSequence: parsed,
+        reason,
+        forceBelowLiveMax: seqForce,
+      });
+      const warn = res.warning ? ` ${res.warning}` : "";
+      setMessage(
+        `Mill ${res.millNo}: sequence ${res.oldSequence} → ${res.newSequence}. Next bundle ${res.nextBundleNo}.${warn}`
+      );
+      setSeqForce(false);
+      await loadTabData();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Set sequence failed");
+    } finally {
+      setSeqSavingMill(null);
+    }
+  };
+
   const testPrinter = async (millNo: number) => {
     const t = getSettingsToken();
     if (!t) return;
@@ -628,6 +679,7 @@ export default function SettingsPage() {
             ["formation", "NDT bundle thresholds"],
             ["plc", "PLC connections"],
             ["printers", "Printers"],
+            ["sequence", "Mill sequence"],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -957,7 +1009,7 @@ export default function SettingsPage() {
             Refresh PLC status (full check)
           </button>
         </div>
-      ) : (
+      ) : tab === "printers" ? (
         <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
           <p className="px-5 py-3 text-sm text-gray-600 border-b border-gray-100">
             One network printer per mill (TCP port 9100). Mill 1 falls back to legacy{" "}
@@ -1058,7 +1110,85 @@ export default function SettingsPage() {
             </button>
           </div>
         </div>
-      )}
+      ) : tab === "sequence" ? (
+        <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-3 border-b border-gray-100 text-sm text-gray-600 space-y-1">
+            <p>
+              <code className="text-xs bg-gray-100 px-1">Mill_Sequence.Current_Sequence</code> is the allocation
+              high-water. Next printed bundle is that value + 1. Setting below live max is refused unless Force is
+              checked.
+            </p>
+            <label className="block text-sm font-medium text-gray-700 pt-2">
+              Reason (required)
+              <input
+                value={seqReason}
+                onChange={(e) => setSeqReason(e.target.value)}
+                className="mt-1 w-full border border-gray-300 rounded px-2 py-1 text-sm"
+                placeholder="Why this sequence is being set"
+              />
+            </label>
+            <label className="flex items-center gap-2 text-sm text-gray-700 pt-1">
+              <input
+                type="checkbox"
+                checked={seqForce}
+                onChange={(e) => setSeqForce(e.target.checked)}
+              />
+              Force below live max (second confirmation)
+            </label>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-4 py-2 text-left font-medium text-gray-500">Mill</th>
+                  <th className="px-4 py-2 text-left font-medium text-gray-500">Current</th>
+                  <th className="px-4 py-2 text-left font-medium text-gray-500">Live max</th>
+                  <th className="px-4 py-2 text-left font-medium text-gray-500">Next bundle</th>
+                  <th className="px-4 py-2 text-left font-medium text-gray-500">Set to</th>
+                  <th className="px-4 py-2 text-left font-medium text-gray-500"></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200">
+                {millSequences.map((m) => {
+                  const millNo = m.millNo ?? 0;
+                  return (
+                    <tr key={millNo}>
+                      <td className="px-4 py-2 font-medium">{millNo}</td>
+                      <td className="px-4 py-2 tabular-nums">{m.currentSequence ?? "—"}</td>
+                      <td className="px-4 py-2 tabular-nums">
+                        {m.liveMaxSequence ?? 0}
+                        {m.liveMaxBundleNo ? ` (${m.liveMaxBundleNo})` : ""}
+                      </td>
+                      <td className="px-4 py-2 font-mono text-xs">{m.nextBundleNo ?? "—"}</td>
+                      <td className="px-4 py-2">
+                        <input
+                          type="number"
+                          min={0}
+                          className="w-28 border border-gray-300 rounded px-2 py-1"
+                          value={seqDraft[millNo] ?? ""}
+                          onChange={(e) =>
+                            setSeqDraft((prev) => ({ ...prev, [millNo]: e.target.value }))
+                          }
+                        />
+                      </td>
+                      <td className="px-4 py-2">
+                        <button
+                          type="button"
+                          disabled={seqSavingMill !== null}
+                          onClick={() => void saveMillSequence(millNo)}
+                          className="px-3 py-1 bg-primary-600 text-white rounded text-sm disabled:opacity-50"
+                        >
+                          {seqSavingMill === millNo ? "Saving…" : "Set"}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

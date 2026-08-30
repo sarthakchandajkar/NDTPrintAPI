@@ -30,6 +30,19 @@ public sealed class NdtBundleRuntimeStateLogicTests
         Assert.Equal(expected, NdtBundleRuntimeStateLogic.HasOpenPartialBundle(runningTotal, sizeCounts));
     }
 
+    [Theory]
+    [InlineData(true, 1, 0, true)]
+    [InlineData(true, 1, 1, false)]
+    [InlineData(true, 0, 0, false)]
+    [InlineData(false, 1, 0, false)]
+    public void ShouldCompleteInFlightWithoutAllocate_when_sql_seq_ahead_of_json_ack(
+        bool inFlight, int millCurrent, int lastAck, bool expected)
+    {
+        Assert.Equal(
+            expected,
+            NdtBundleRuntimeStateLogic.ShouldCompleteInFlightWithoutAllocate(inFlight, millCurrent, lastAck));
+    }
+
     [Fact]
     public void ApplyMillFloorIfAllowed_PartialBundle_DoesNotRaiseBatchOffsetWhenMillFloorIsHigher()
     {

@@ -211,8 +211,22 @@ public sealed class FillToTargetIntegrationTests
             reconcileTagService: new OkTagService(),
             new SapStatusRepo(sapStatus),
             ppc,
+            new NoOpMerge(),
             new OptMon(),
             NullLogger<ReconcileController>.Instance);
+
+    private sealed class NoOpMerge : IBundleMergeService
+    {
+        public Task<BundleMergePreview?> TryPreviewAsync(string sourceBundleNo, CancellationToken cancellationToken) =>
+            Task.FromResult<BundleMergePreview?>(null);
+
+        public Task<BundleMergeResult> MergeIntoPreviousAsync(
+            string sourceBundleNo,
+            string reason,
+            string updatedBy,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+    }
 
     private static object? GetProp(object obj, string name) =>
         obj.GetType().GetProperty(name)?.GetValue(obj);

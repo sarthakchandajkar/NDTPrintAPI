@@ -29,6 +29,7 @@ public sealed class SettingsController : ControllerBase
     private readonly OpenAccumulationOverrideService _openAccumulationOverride;
     private readonly INetworkPrinterSender _networkPrinterSender;
     private readonly IZplGenerationToggle _zplToggle;
+    private readonly IMillSequenceService _millSequence;
     private readonly NdtBundleOptions _options;
     private readonly ILogger<SettingsController> _logger;
 
@@ -45,6 +46,7 @@ public sealed class SettingsController : ControllerBase
         OpenAccumulationOverrideService openAccumulationOverride,
         INetworkPrinterSender networkPrinterSender,
         IZplGenerationToggle zplToggle,
+        IMillSequenceService millSequence,
         IOptions<NdtBundleOptions> options,
         ILogger<SettingsController> logger)
     {
@@ -60,6 +62,7 @@ public sealed class SettingsController : ControllerBase
         _openAccumulationOverride = openAccumulationOverride;
         _networkPrinterSender = networkPrinterSender;
         _zplToggle = zplToggle;
+        _millSequence = millSequence;
         _options = options.Value;
         _logger = logger;
     }
@@ -771,6 +774,62 @@ public sealed class SettingsController : ControllerBase
         }
     }
 
+    [HttpGet("mill-sequence")]
+    public async Task<IActionResult> GetMillSequence(CancellationToken cancellationToken)
+    {
+        if (!TryAuthorize(out var denied))
+            return denied!;
+
+        if (!_millSequence.IsEnabled)
+            return StatusCode(503, new { Message = "Mill_Sequence requires SQL mode." });
+
+        var mills = await _millSequence.GetSnapshotsAsync(cancellationToken).ConfigureAwait(false);
+        return Ok(new { mills });
+    }
+
+    [HttpPost("mill-sequence")]
+    public async Task<IActionResult> SetMillSequence(
+        [FromBody] MillSequenceSetRequest? request,
+        CancellationToken cancellationToken)
+    {
+        if (!TryAuthorize(out var denied))
+            return denied!;
+
+        if (request is null)
+            return BadRequest(new { Message = "Request body is required." });
+        if (request.MillNo is < 1 or > 4)
+            return BadRequest(new { Message = "MillNo must be 1–4." });
+        if (string.IsNullOrWhiteSpace(request.Reason))
+            return BadRequest(new { Message = "Reason is required." });
+
+        try
+        {
+            var result = await _millSequence
+                .SetCurrentSequenceAsync(
+                    request.MillNo,
+                    request.CurrentSequence,
+                    request.Reason.Trim(),
+                    string.IsNullOrWhiteSpace(request.UpdatedBy) ? "Settings" : request.UpdatedBy.Trim(),
+                    request.ForceBelowLiveMax,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { Message = ex.Message });
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { Message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Settings mill-sequence set failed for mill {Mill}.", request.MillNo);
+            return StatusCode(500, new { Message = ex.Message });
+        }
+    }
+
     private int ResolveDummyLabelLengthMm(int millNo)
     {
         if (millNo >= 1
@@ -890,5 +949,14 @@ public sealed class SettingsController : ControllerBase
 
         /// <summary>Optional formation-chart size key; defaults from running PO pipe size.</summary>
         public string? SizeKey { get; set; }
+    }
+
+    public sealed class MillSequenceSetRequest
+    {
+        public int MillNo { get; set; }
+        public int CurrentSequence { get; set; }
+        public string Reason { get; set; } = string.Empty;
+        public string? UpdatedBy { get; set; }
+        public bool ForceBelowLiveMax { get; set; }
     }
 }

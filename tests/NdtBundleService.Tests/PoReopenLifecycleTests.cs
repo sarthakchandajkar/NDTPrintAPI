@@ -29,7 +29,7 @@ public sealed class PoReopenLifecycleTests
 
         var engine = TestEngineFactory.Create(new FormationStub(Threshold), new PipeSizeStub(), runtime);
         var closed = new List<(string Po, int Batch, int Pcs)>();
-        var output = new CapturingOutputWriter((po, batch, pcs) => closed.Add((po, batch, pcs)));
+        var output = new CapturingOutputWriter(runtime, (po, batch, pcs) => closed.Add((po, batch, pcs)));
         var wip = new MutableWipProvider(PoA);
         var repo = new NoOpPlcCloseRepo();
         var poReopen = CreatePoReopen(lifecycle, runtime, repo, opts);
@@ -109,7 +109,7 @@ public sealed class PoReopenLifecycleTests
         await runtime.EnsureInitializedAsync(CancellationToken.None);
         var engine = TestEngineFactory.Create(new FormationStub(Threshold), new PipeSizeStub(), runtime);
         var closed = new List<(string Po, int Batch, int Pcs)>();
-        var output = new CapturingOutputWriter((po, batch, pcs) => closed.Add((po, batch, pcs)));
+        var output = new CapturingOutputWriter(runtime, (po, batch, pcs) => closed.Add((po, batch, pcs)));
         var wip = new MutableWipProvider(PoA);
         var repo = new NoOpPlcCloseRepo();
         var poReopen = CreatePoReopen(lifecycle, runtime, repo, opts);
@@ -157,7 +157,7 @@ public sealed class PoReopenLifecycleTests
         await runtime.EnsureInitializedAsync(CancellationToken.None);
         var engine = TestEngineFactory.Create(new FormationStub(Threshold), new PipeSizeStub(), runtime);
         var closed = new List<(string Po, int Batch, int Pcs)>();
-        var output = new CapturingOutputWriter((po, batch, pcs) => closed.Add((po, batch, pcs)));
+        var output = new CapturingOutputWriter(runtime, (po, batch, pcs) => closed.Add((po, batch, pcs)));
         var wip = new MutableWipProvider(PoB);
         var workflow = CreateWorkflow(engine, output, runtime, wip, lifecycle, opts);
 
@@ -211,7 +211,7 @@ public sealed class PoReopenLifecycleTests
         var wip = new MutableWipProvider(null);
         var engine = TestEngineFactory.Create(new FormationStub(Threshold), new PipeSizeStub(), runtime, closeTrigger: "Plc");
         var closed = new List<(string Po, int Batch, int Pcs)>();
-        var output = new CapturingOutputWriter((po, batch, pcs) => closed.Add((po, batch, pcs)));
+        var output = new CapturingOutputWriter(runtime, (po, batch, pcs) => closed.Add((po, batch, pcs)));
         var poReopen = CreatePoReopen(lifecycle, runtime, repo, opts);
 
         lifecycle.TryMarkDraining(Mill, PoA, DateTime.UtcNow.AddHours(-1));
@@ -285,7 +285,7 @@ public sealed class PoReopenLifecycleTests
 
         var engine = TestEngineFactory.Create(new FormationStub(Threshold), new PipeSizeStub(), runtime);
         var closed = new List<(string Po, int Batch, int Pcs)>();
-        var output = new CapturingOutputWriter((po, batch, pcs) => closed.Add((po, batch, pcs)));
+        var output = new CapturingOutputWriter(runtime, (po, batch, pcs) => closed.Add((po, batch, pcs)));
         var workflow = CreateWorkflow(engine, output, runtime, wip, lifecycle, opts);
         var sweep = CreateSweep(lifecycle, workflow, runtime, engine, output, wip, opts);
         await sweep.SweepOnceAsync(CancellationToken.None);
@@ -498,21 +498,25 @@ public sealed class PoReopenLifecycleTests
     private sealed class CapturingOutputWriter : IBundleOutputWriter
     {
         private readonly Action<string, int, int> _onClose;
+        private readonly TestRuntimeStore _runtime;
 
-        public CapturingOutputWriter(Action<string, int, int> onClose) => _onClose = onClose;
+        public CapturingOutputWriter(TestRuntimeStore runtime, Action<string, int, int> onClose)
+        {
+            _runtime = runtime;
+            _onClose = onClose;
+        }
 
-        public Task WriteBundleAsync(
+        public Task<int> WriteBundleAsync(
             InputSlitRecord contextRecord,
             int batchNo,
             int totalNdtPcs,
             CancellationToken cancellationToken,
             Guid? correlationId = null)
         {
-            _onClose(
-                InputSlitCsvParsing.NormalizePo(contextRecord.PoNumber),
-                batchNo,
-                totalNdtPcs);
-            return Task.CompletedTask;
+            var po = InputSlitCsvParsing.NormalizePo(contextRecord.PoNumber);
+            var seq = _runtime.PeekNextSequence(po, contextRecord.MillNo);
+            _onClose(po, seq, totalNdtPcs);
+            return Task.FromResult(seq);
         }
     }
 
@@ -795,6 +799,12 @@ public sealed class PoReopenLifecycleTests
             slot.RunningTotal = 0;
             slot.ProvisionalBatchNo = 0;
             slot.SizeCounts.Clear();
+        }
+
+        public int PeekNextSequence(string poNumber, int millNo)
+        {
+            var floor = _millMax.GetValueOrDefault(millNo);
+            return Math.Max(floor, S(poNumber, millNo).EngineBatchNo) + 1;
         }
 
         public DateTime GetLastActivityUtc(string poNumber, int millNo) => S(poNumber, millNo).LastActivityUtc;

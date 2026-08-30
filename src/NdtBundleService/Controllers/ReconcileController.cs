@@ -28,6 +28,7 @@ public sealed class ReconcileController : ControllerBase
     private readonly IReconcileBundleTagService _reconcileTagService;
     private readonly IOutputSlitSapStatusRepository _sapStatus;
     private readonly IPpcCorrectionRepository _ppcCorrections;
+    private readonly IBundleMergeService _bundleMerge;
     private readonly IOptionsMonitor<NdtBundleOptions> _options;
     private readonly ILogger<ReconcileController> _logger;
 
@@ -40,6 +41,7 @@ public sealed class ReconcileController : ControllerBase
         IReconcileBundleTagService reconcileTagService,
         IOutputSlitSapStatusRepository sapStatus,
         IPpcCorrectionRepository ppcCorrections,
+        IBundleMergeService bundleMerge,
         IOptionsMonitor<NdtBundleOptions> options,
         ILogger<ReconcileController> logger)
     {
@@ -51,6 +53,7 @@ public sealed class ReconcileController : ControllerBase
         _reconcileTagService = reconcileTagService;
         _sapStatus = sapStatus;
         _ppcCorrections = ppcCorrections;
+        _bundleMerge = bundleMerge;
         _options = options;
         _logger = logger;
     }
@@ -863,9 +866,67 @@ public sealed class ReconcileController : ControllerBase
     }
 
     /// <summary>
-    /// PPC correction items for a bundle (Phase 3). Open items make the bundle "PPC correction
-    /// pending"; pass includeCleared=true for the full history.
+    /// Preview merge of this live bundle into the immediately previous live bundle (same PO + mill).
     /// </summary>
+    [HttpGet("bundles/{ndtBatchNo}/merge-preview")]
+    public async Task<IActionResult> GetMergePreview(string ndtBatchNo, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(ndtBatchNo))
+            return BadRequest(new { Message = "NdtBatchNo is required." });
+
+        try
+        {
+            var preview = await _bundleMerge.TryPreviewAsync(ndtBatchNo.Trim(), cancellationToken).ConfigureAwait(false);
+            if (preview is null)
+                return NotFound(new { Message = "No immediately previous live bundle for this PO and mill." });
+            return Ok(preview);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Merge preview failed for {Batch}.", ndtBatchNo);
+            return StatusCode(500, new { Message = ex.Message });
+        }
+    }
+
+    /// <summary>Merge this bundle into the immediately previous live bundle. Reason is required.</summary>
+    [HttpPost("bundles/{ndtBatchNo}/merge-into-previous")]
+    public async Task<IActionResult> MergeIntoPrevious(
+        string ndtBatchNo,
+        [FromBody] MergeIntoPreviousRequest? request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(ndtBatchNo))
+            return BadRequest(new { Message = "NdtBatchNo is required." });
+        if (request is null || string.IsNullOrWhiteSpace(request.Reason))
+            return BadRequest(new { Message = "Reason is required." });
+
+        try
+        {
+            var result = await _bundleMerge
+                .MergeIntoPreviousAsync(
+                    ndtBatchNo.Trim(),
+                    request.Reason.Trim(),
+                    string.IsNullOrWhiteSpace(request.UpdatedBy) ? "Reconcile" : request.UpdatedBy.Trim(),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { Message = ex.Message });
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { Message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Merge into previous failed for {Batch}.", ndtBatchNo);
+            return StatusCode(500, new { Message = ex.Message });
+        }
+    }
+
+    /// <summary>
     [HttpGet("bundles/{ndtBatchNo}/ppc-corrections")]
     public async Task<IActionResult> GetPpcCorrections(
         string ndtBatchNo,
@@ -1006,6 +1067,12 @@ public sealed class ReconcileController : ControllerBase
         public string? OldBatchNo { get; set; }
         public string? NewBatchNo { get; set; }
         public string? ChangeNotes { get; set; }
+    }
+
+    public sealed class MergeIntoPreviousRequest
+    {
+        public string Reason { get; set; } = string.Empty;
+        public string? UpdatedBy { get; set; }
     }
 
     public sealed class ManualBundleReconcileRequest

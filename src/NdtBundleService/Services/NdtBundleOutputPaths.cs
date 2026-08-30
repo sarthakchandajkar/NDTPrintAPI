@@ -25,6 +25,27 @@ internal static class NdtBundleOutputPaths
     public static string GetBundleZplFileName(string ndtBatchNoFormatted) =>
         $"NDT_Bundle_{ndtBatchNoFormatted}.zpl";
 
+    /// <summary>
+    /// After merge tombstone: <c>NDT_Bundle_{live}.csv/.zpl</c> → <c>NDT_Bundle_{live}V.csv/.zpl</c>.
+    /// </summary>
+    internal static void ArchiveBundleArtifacts(NdtBundleOptions options, string sourceBundleNo, string tombstone)
+    {
+        var folder = ResolveBundleArtifactsFolder(options);
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+            return;
+
+        TryMove(GetBundleCsvFileName(sourceBundleNo), GetBundleCsvFileName(tombstone));
+        TryMove(GetBundleZplFileName(sourceBundleNo), GetBundleZplFileName(tombstone));
+
+        void TryMove(string fromName, string toName)
+        {
+            var from = Path.Combine(folder, fromName);
+            var to = Path.Combine(folder, toName);
+            if (File.Exists(from) && !File.Exists(to))
+                File.Move(from, to);
+        }
+    }
+
     public static async Task TrySaveBundleZplAsync(
         NdtBundleOptions options,
         string ndtBatchNoFormatted,

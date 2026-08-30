@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { api, type PpcCorrectionItem, type ReconcileBundle, type ReconcileSlitItem } from "@/lib/api";
+import { api, type BundleMergePreview, type PpcCorrectionItem, type ReconcileBundle, type ReconcileSlitItem } from "@/lib/api";
 import { DateRangeFilter } from "@/components/DateRangeFilter";
 import { MillFilter } from "@/components/MillFilter";
 import {
@@ -50,6 +50,10 @@ export default function ReconcilePage() {
   const [reconcileEnabled, setReconcileEnabled] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [mergePreview, setMergePreview] = useState<BundleMergePreview | null>(null);
+  const [mergeReason, setMergeReason] = useState("");
+  const [mergeConfirm, setMergeConfirm] = useState(false);
+  const [merging, setMerging] = useState(false);
 
   // Station reconcile (Visual / Hydro / Revisual)
   const [stationBatchNo, setStationBatchNo] = useState("");
@@ -116,6 +120,8 @@ export default function ReconcilePage() {
       setBundlePpcPending(false);
       setPpcItems([]);
       setBundlePostReconCsvSum(null);
+      setMergePreview(null);
+      setMergeConfirm(false);
       return;
     }
 
@@ -160,6 +166,13 @@ export default function ReconcilePage() {
         setSlits([]);
       })
       .finally(() => setSlitsLoading(false));
+
+    setMergePreview(null);
+    setMergeConfirm(false);
+    api
+      .mergePreview(selectedBatchNo)
+      .then((p) => setMergePreview(p?.targetBundleNo ? p : null))
+      .catch(() => setMergePreview(null));
   }, [selectedBatchNo, bundles, mode]);
 
   useEffect(() => {
@@ -256,6 +269,44 @@ export default function ReconcilePage() {
       setError(e instanceof Error ? e.message : "Reconcile failed.");
     } finally {
       setStationReconciling(false);
+    }
+  };
+
+  const mergeIntoPrevious = async () => {
+    if (!selectedBatchNo.trim()) {
+      setError("Enter or select an NDT Batch No.");
+      return;
+    }
+    if (!mergeReason.trim()) {
+      setError("Reason is required to merge.");
+      return;
+    }
+    if (!mergeConfirm) {
+      setError("Confirm the merge by checking the box.");
+      return;
+    }
+
+    setMerging(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const res = await api.mergeIntoPrevious(selectedBatchNo.trim(), mergeReason.trim());
+      const printNote = res.printSuccess
+        ? " Target tag reprinted."
+        : res.printMessage
+          ? ` Print: ${res.printMessage}`
+          : "";
+      setSuccess(
+        `Merged ${res.sourceBundleNo} into ${res.targetBundleNo} (${res.resultingTotal} pcs). ${res.sequenceMessage ?? ""}${printNote}`
+      );
+      setMergeReason("");
+      setMergeConfirm(false);
+      setSelectedBatchNo(res.targetBundleNo ?? "");
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Merge failed.");
+    } finally {
+      setMerging(false);
     }
   };
 
@@ -759,6 +810,46 @@ export default function ReconcilePage() {
             >
               {manualReconciling ? "Reconciling & printing…" : "Reconcile & Reprint"}
             </button>
+
+            {mergePreview?.targetBundleNo && (
+              <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-3 space-y-2">
+                <p className="text-sm font-semibold text-amber-950">Merge into previous live bundle</p>
+                <p className="text-sm text-amber-900">
+                  {mergePreview.sourceBundleNo} ({mergePreview.sourcePcs} pcs) → {mergePreview.targetBundleNo}{" "}
+                  ({mergePreview.targetPcs} pcs) = {mergePreview.resultingTotal} pcs.
+                  {mergePreview.pipeSize ? ` Size ${mergePreview.pipeSize}.` : ""}{" "}
+                  {mergePreview.sequenceMessage}
+                  {mergePreview.acceptedFileCount
+                    ? ` ${mergePreview.acceptedFileCount} SAP-Accepted file(s) will raise PPC correction.`
+                    : ""}
+                </p>
+                <label className="block text-sm font-medium text-amber-950">
+                  Reason
+                  <input
+                    value={mergeReason}
+                    onChange={(e) => setMergeReason(e.target.value)}
+                    className="mt-1 w-full border border-amber-300 rounded-md px-3 py-2 text-sm bg-white"
+                    placeholder="Why these two bundles are the same physical bundle"
+                  />
+                </label>
+                <label className="flex items-center gap-2 text-sm text-amber-950">
+                  <input
+                    type="checkbox"
+                    checked={mergeConfirm}
+                    onChange={(e) => setMergeConfirm(e.target.checked)}
+                  />
+                  Confirm merge into {mergePreview.targetBundleNo} (source will be voided)
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void mergeIntoPrevious()}
+                  disabled={merging || !mergeReason.trim() || !mergeConfirm}
+                  className="px-4 py-2 bg-amber-700 text-white text-sm font-medium rounded-md hover:bg-amber-800 disabled:opacity-50"
+                >
+                  {merging ? "Merging…" : "Merge into previous"}
+                </button>
+              </div>
+            )}
           </div>
         </section>
 

@@ -62,6 +62,7 @@ public static class NdtBundleServiceCollectionExtensions
         services.AddSingleton<ITraceabilityRepository, TraceabilityRepository>();
         services.AddSingleton<IOutputSlitSapStatusRepository, OutputSlitSapStatusRepository>();
         services.AddSingleton<IPpcCorrectionRepository, PpcCorrectionRepository>();
+        services.AddSingleton<IMillSequenceService, MillSequenceService>();
         services.AddSingleton<IResubmitDriftService, ResubmitDriftService>();
         services.AddSingleton<IReconcileSyncService, ReconcileSyncService>();
         services.AddSingleton<ISqlTraceabilityWriteTracker, SqlTraceabilityWriteTracker>();
@@ -87,6 +88,7 @@ public static class NdtBundleServiceCollectionExtensions
         {
             services.AddSingleton<IManualNdtTagService, ManualNdtTagService>();
             services.AddSingleton<IReconcileBundleTagService, ReconcileBundleTagService>();
+            services.AddSingleton<IBundleMergeService, BundleMergeService>();
         }
 
         services.AddHostedService<SqlTraceabilityStartupCheck>();
@@ -172,7 +174,13 @@ public static class NdtBundleServiceCollectionExtensions
         var bundleOptions = configuration.GetSection("NdtBundle").Get<NdtBundleOptions>() ?? new NdtBundleOptions();
 
         if (role.IsMonolith || role.IsMill)
+        {
+            // Seed/guard Mill_Sequence before FillCutover EnsureInitialized (which may rewrite runtime JSON).
+            services.AddHostedService<MillSequenceStartupGuard>();
             services.AddHostedService<FillCutoverStartupCheck>();
+            // Lease claim must complete before mill workers StartAsync (registration order = start order).
+            services.AddHostedService<MillInstanceLeaseHostedService>();
+        }
 
         if (role.IsMonolith || role.EnableMillWorkers)
         {
@@ -200,8 +208,5 @@ public static class NdtBundleServiceCollectionExtensions
             if (bundleOptions.EnableUploadNdtBundleScheduler)
                 services.AddHostedService<UploadNdtBundleSchedulerWorker>();
         }
-
-        if (role.IsMonolith || role.IsMill)
-            services.AddHostedService<MillInstanceLeaseHostedService>();
     }
 }

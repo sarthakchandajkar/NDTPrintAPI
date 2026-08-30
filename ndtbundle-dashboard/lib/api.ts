@@ -225,6 +225,50 @@ export interface PpcCorrectionItem {
   clearedNote?: string | null;
 }
 
+export interface MillSequenceSnapshot {
+  millNo?: number;
+  currentSequence?: number;
+  liveMaxSequence?: number;
+  nextBundleNo?: string;
+  liveMaxBundleNo?: string | null;
+  updatedAtUtc?: string | null;
+  updatedBy?: string | null;
+  reason?: string | null;
+}
+
+export interface MillSequenceSetResult {
+  millNo?: number;
+  oldSequence?: number;
+  newSequence?: number;
+  nextBundleNo?: string;
+  warning?: string | null;
+}
+
+export interface BundleMergePreview {
+  sourceBundleNo?: string;
+  targetBundleNo?: string;
+  sourcePcs?: number;
+  targetPcs?: number;
+  resultingTotal?: number;
+  sequenceMessage?: string;
+  sequenceWillRollback?: boolean;
+  acceptedFileCount?: number;
+  pipeSize?: string | null;
+}
+
+export interface BundleMergeResult {
+  sourceBundleNo?: string;
+  targetBundleNo?: string;
+  tombstoneBundleNo?: string;
+  sourcePcs?: number;
+  resultingTotal?: number;
+  sequenceRolledBack?: boolean;
+  sequenceMessage?: string;
+  ppcItemsCreated?: number;
+  printSuccess?: boolean;
+  printMessage?: string | null;
+}
+
 export interface PpcCorrectionsResponse {
   ndtBatchNo?: string;
   ppcCorrectionPending?: boolean;
@@ -548,6 +592,18 @@ export const api = {
     fetchApi<PpcCorrectionsResponse>(
       `/api/Reconcile/bundles/${encodeURIComponent(ndtBatchNo)}/ppc-corrections${includeCleared ? "?includeCleared=true" : ""}`
     ),
+  mergePreview: (ndtBatchNo: string) =>
+    fetchApi<BundleMergePreview>(
+      `/api/Reconcile/bundles/${encodeURIComponent(ndtBatchNo)}/merge-preview`
+    ),
+  mergeIntoPrevious: (ndtBatchNo: string, reason: string, updatedBy?: string) =>
+    fetchApi<BundleMergeResult>(
+      `/api/Reconcile/bundles/${encodeURIComponent(ndtBatchNo)}/merge-into-previous`,
+      {
+        method: "POST",
+        body: JSON.stringify({ reason, updatedBy }),
+      }
+    ),
   clearPpcCorrection: (id: number, clearedBy?: string, note?: string) =>
     fetchApi<{ message?: string; id?: number }>(`/api/Reconcile/ppc-corrections/${id}/clear`, {
       method: "POST",
@@ -705,5 +761,21 @@ export const api = {
     }>("/api/Settings/printers/test-print", token, {
       method: "POST",
       body: JSON.stringify({ millNo }),
+    }),
+  settingsMillSequence: (token: string) =>
+    fetchSettingsApi<{ mills?: MillSequenceSnapshot[] }>("/api/Settings/mill-sequence", token),
+  settingsSetMillSequence: (
+    token: string,
+    body: {
+      millNo: number;
+      currentSequence: number;
+      reason: string;
+      forceBelowLiveMax?: boolean;
+      updatedBy?: string;
+    }
+  ) =>
+    fetchSettingsApi<MillSequenceSetResult>("/api/Settings/mill-sequence", token, {
+      method: "POST",
+      body: JSON.stringify(body),
     }),
 };

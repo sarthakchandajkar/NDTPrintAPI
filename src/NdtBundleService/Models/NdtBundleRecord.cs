@@ -5,7 +5,7 @@ namespace NdtBundleService.Models;
 /// </summary>
 public sealed class NdtBundleRecord
 {
-    public string BundleNo { get; init; } = string.Empty;
+    public string BundleNo { get; set; } = string.Empty;
     public string PoNumber { get; init; } = string.Empty;
     public int MillNo { get; init; }
     public int TotalNdtPcs { get; init; }
@@ -50,4 +50,10 @@ public sealed class NdtBundleRecord
 
     /// <summary>Full recompute of slit-row sum after manual lock; audit only.</summary>
     public int? PostReconCsvSum { get; init; }
+
+    public bool Voided { get; init; }
+
+    public string? OriginalBundleNo { get; init; }
+
+    public string? MergedIntoBundleNo { get; init; }
 }

@@ -318,8 +318,8 @@ public sealed class PlcOpenCsvDoubleCountReplayTests
 
     private sealed class NoOpOutputWriter : IBundleOutputWriter
     {
-        public Task WriteBundleAsync(InputSlitRecord contextRecord, int ndtBatchNo, int totalNdtPcs, CancellationToken cancellationToken, Guid? correlationId = null) =>
-            Task.CompletedTask;
+        public Task<int> WriteBundleAsync(InputSlitRecord contextRecord, int ndtBatchNo, int totalNdtPcs, CancellationToken cancellationToken, Guid? correlationId = null) =>
+            Task.FromResult(0);
     }
 
     private sealed class NoOpPlcCloseRepo : INdtBundleRepository

@@ -209,14 +209,14 @@ public sealed class PoLifecycleSweepWorker : BackgroundService
                         if (totalNdtPcs <= 0)
                             return;
 
-                        await _outputWriter
-                            .WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken, correlationId)
+                        var seq = await _outputWriter
+                            .WriteBundleAsync(contextRecord, 0, totalNdtPcs, cancellationToken, correlationId)
                             .ConfigureAwait(false);
                         _logger.LogInformation(
                             "Orphan bundle closed: PO {PO} Mill {Mill} Batch {Batch} NdtPcs {Pcs}. CorrelationId {CorrelationId}",
                             entry.PoNumber,
                             entry.MillNo,
-                            batchNo,
+                            seq,
                             totalNdtPcs,
                             correlationId);
                     },

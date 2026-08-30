@@ -8,12 +8,13 @@ public static class CsvFillState
     public const string CsvComplete = "CsvComplete";
     public const string CsvShort = "CsvShort";
     public const string CsvOvershoot = "CsvOvershoot";
+    public const string Voided = "Voided";
 
     public static bool IsIncomplete(string? state) =>
         state is PlcClosed or CsvFilling;
 
     public static bool IsTerminal(string? state) =>
-        state is CsvComplete or CsvShort or CsvOvershoot;
+        state is CsvComplete or CsvShort or CsvOvershoot or Voided;
 }
 
 /// <summary>Outcome of assigning one whole slit file to a fill-to-target bundle.</summary>

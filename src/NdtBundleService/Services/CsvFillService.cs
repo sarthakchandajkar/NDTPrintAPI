@@ -30,8 +30,39 @@ public interface ICsvFillService
         CancellationToken cancellationToken);
 
     /// <summary>
-    /// Oldest incomplete fill slot for PO+mill (optionally filtered by pipe size via Bundle_Label).
+    /// Oldest incomplete fill slot. Voided bundles are excluded in SQL, not only via
+    /// <see cref="CsvFillState.IsIncomplete"/>.
     /// </summary>
+    public const string OldestIncompleteSelectSql = @"
+SELECT TOP 1
+    Bundle_No,
+    COALESCE(Target_Ndt_Pcs, Total_NDT_Pcs) AS TargetPcs,
+    Csv_Filled,
+    Csv_Fill_State,
+    PrintedAt,
+    Csv_Last_Row_AtUtc
+FROM dbo.NDT_Bundle
+WHERE Mill_No = @MillNo
+  AND (PO_Number = @Po OR PO_Number = @PoNormalized)
+  AND Target_Ndt_Pcs IS NOT NULL
+  AND Csv_Fill_State IN (N'PlcClosed', N'CsvFilling')
+  AND ISNULL(Voided, 0) = 0
+ORDER BY PrintedAt ASC, Bundle_No ASC;";
+
+    /// <summary>Stamp queue: same incomplete states, voided excluded in SQL.</summary>
+    public const string StampFindIncompleteSql = @"
+SELECT TOP 1
+    Bundle_No,
+    COALESCE(Target_Ndt_Pcs, Total_NDT_Pcs),
+    Csv_Filled
+FROM dbo.NDT_Bundle WITH (UPDLOCK, ROWLOCK)
+WHERE Mill_No = @MillNo
+  AND (PO_Number = @Po OR PO_Number = @PoNormalized)
+  AND Target_Ndt_Pcs IS NOT NULL
+  AND Csv_Fill_State IN (N'PlcClosed', N'CsvFilling')
+  AND ISNULL(Voided, 0) = 0
+ORDER BY PrintedAt ASC, Bundle_No ASC;";
+
     Task<CsvFillIncompleteBundle?> TryGetOldestIncompleteAsync(
         string poNumber,
         int millNo,
@@ -79,6 +110,20 @@ public interface ICsvFillService
         int oldNdtPipes,
         int newNdtPipes,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Output_Slit_Row batch reassignment for one file basename (resubmit §5.3).
+    /// Matches <c>Source_File</c> by basename (full path or name). Not <c>Source_File_Name</c>.
+    /// </summary>
+    public const string OutputSlitRowBatchMoveSql = @"
+UPDATE dbo.Output_Slit_Row
+SET NDT_Batch_No = @NewBatch
+WHERE NDT_Batch_No = @OldBatch
+  AND (
+    Source_File = @File
+    OR Source_File LIKE @LikeWin
+    OR Source_File LIKE @LikeUnix
+  );";
 
     /// <summary>Atomic batch move for one file basename (source loses n, target gains n).</summary>
     Task<Guid> ApplyBatchMoveAsync(
@@ -168,22 +213,7 @@ WHERE Bundle_No = @BundleNo;";
         {
             await using var conn = SqlTraceabilityConnection.Create(Opt);
             await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
-            // Bundle_Label / size filter is best-effort; incomplete fill state is authoritative.
-            const string sql = @"
-SELECT TOP 1
-    Bundle_No,
-    COALESCE(Target_Ndt_Pcs, Total_NDT_Pcs) AS TargetPcs,
-    Csv_Filled,
-    Csv_Fill_State,
-    PrintedAt,
-    Csv_Last_Row_AtUtc
-FROM dbo.NDT_Bundle
-WHERE Mill_No = @MillNo
-  AND (PO_Number = @Po OR PO_Number = @PoNormalized)
-  AND Target_Ndt_Pcs IS NOT NULL
-  AND Csv_Fill_State IN (N'PlcClosed', N'CsvFilling')
-ORDER BY PrintedAt ASC, Bundle_No ASC;";
-            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(ICsvFillService.OldestIncompleteSelectSql, conn);
             cmd.Parameters.AddWithValue("@MillNo", millNo);
             cmd.Parameters.AddWithValue("@Po", poNumber.Trim());
             cmd.Parameters.AddWithValue("@PoNormalized", normalized);
@@ -231,17 +261,7 @@ ORDER BY PrintedAt ASC, Bundle_No ASC;";
             int filled;
             // PrintedAt is NOT NULL (schema default + pending-print upsert). PrintFailed never clears it.
             // Bundle_No tiebreak keeps same-tick closes deterministic.
-            await using (var find = new Microsoft.Data.SqlClient.SqlCommand(@"
-SELECT TOP 1
-    Bundle_No,
-    COALESCE(Target_Ndt_Pcs, Total_NDT_Pcs),
-    Csv_Filled
-FROM dbo.NDT_Bundle WITH (UPDLOCK, ROWLOCK)
-WHERE Mill_No = @MillNo
-  AND (PO_Number = @Po OR PO_Number = @PoNormalized)
-  AND Target_Ndt_Pcs IS NOT NULL
-  AND Csv_Fill_State IN (N'PlcClosed', N'CsvFilling')
-ORDER BY PrintedAt ASC, Bundle_No ASC;", conn, tx))
+            await using (var find = new Microsoft.Data.SqlClient.SqlCommand(ICsvFillService.StampFindIncompleteSql, conn, tx))
             {
                 find.Parameters.AddWithValue("@MillNo", millNo);
                 find.Parameters.AddWithValue("@Po", poNumber.Trim());
@@ -340,6 +360,7 @@ SELECT Bundle_No, COALESCE(Target_Ndt_Pcs, Total_NDT_Pcs), Csv_Filled, Csv_Last_
 FROM dbo.NDT_Bundle
 WHERE Target_Ndt_Pcs IS NOT NULL
   AND Csv_Fill_State IN (N'PlcClosed', N'CsvFilling')
+  AND ISNULL(Voided, 0) = 0
   AND (@MillNo IS NULL OR Mill_No = @MillNo)
   AND (@Po IS NULL OR PO_Number = @Po OR PO_Number = @PoNormalized);";
             await using var list = new Microsoft.Data.SqlClient.SqlCommand(listSql, conn);
@@ -385,7 +406,8 @@ SET Csv_Fill_State = @State,
     Manual_Review = CASE WHEN @ManualReview = 1 THEN 1 ELSE Manual_Review END,
     Awaiting_Csv_Recon = 0
 WHERE Bundle_No = @BundleNo
-  AND Csv_Fill_State IN (N'PlcClosed', N'CsvFilling');", conn);
+  AND Csv_Fill_State IN (N'PlcClosed', N'CsvFilling')
+  AND ISNULL(Voided, 0) = 0;", conn);
                 upd.Parameters.AddWithValue("@State", state);
                 upd.Parameters.AddWithValue("@Discrepancy", discrepancy ? 1 : 0);
                 upd.Parameters.AddWithValue("@ManualReview", manual ? 1 : 0);
@@ -608,15 +630,15 @@ WHERE Bundle_No = @Batch;", conn, tx))
                 await AdjustFilledInTxAsync(conn, tx, newBatchNo.Trim(), ndtPipes, threshold, cancellationToken)
                     .ConfigureAwait(false);
 
-                await using (var updRows = new Microsoft.Data.SqlClient.SqlCommand(@"
-UPDATE dbo.Output_Slit_Row
-SET NDT_Batch_No = @NewBatch
-WHERE Source_File_Name = @File
-  AND NDT_Batch_No = @OldBatch;", conn, tx))
+                var fileBase = Path.GetFileName(sourceFileName);
+                await using (var updRows = new Microsoft.Data.SqlClient.SqlCommand(
+                    ICsvFillService.OutputSlitRowBatchMoveSql, conn, tx))
                 {
                     updRows.Parameters.AddWithValue("@NewBatch", newBatchNo.Trim());
                     updRows.Parameters.AddWithValue("@OldBatch", oldBatchNo.Trim());
-                    updRows.Parameters.AddWithValue("@File", Path.GetFileName(sourceFileName));
+                    updRows.Parameters.AddWithValue("@File", fileBase);
+                    updRows.Parameters.AddWithValue("@LikeWin", @"%\" + fileBase);
+                    updRows.Parameters.AddWithValue("@LikeUnix", "%/" + fileBase);
                     await updRows.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
                 }
 
@@ -707,6 +729,7 @@ WHERE Awaiting_Csv_Recon = 1
 FROM dbo.NDT_Bundle
 WHERE Target_Ndt_Pcs IS NULL
   AND Total_NDT_Pcs > 0
+  AND ISNULL(Voided, 0) = 0
   AND Csv_Fill_State IN (N'PlcClosed', N'CsvFilling')
   AND (@MillNo IS NULL OR Mill_No = @MillNo);",
                 conn);

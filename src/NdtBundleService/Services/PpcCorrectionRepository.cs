@@ -52,6 +52,16 @@ public interface IPpcCorrectionRepository
         int correctedNdtPipes,
         CancellationToken cancellationToken);
 
+    Task<PpcCorrectionUpsertResult?> UpsertOpenItemAsync(
+        string batchNo,
+        string fileName,
+        string slitNo,
+        int? oldNdtPipes,
+        int correctedNdtPipes,
+        CancellationToken cancellationToken,
+        string? replacementBatchNo) =>
+        UpsertOpenItemAsync(batchNo, fileName, slitNo, oldNdtPipes, correctedNdtPipes, cancellationToken);
+
     /// <summary>Items for a bundle, Open first then newest; optionally including Cleared history.</summary>
     Task<IReadOnlyList<PpcCorrectionItem>> GetItemsForBatchAsync(
         string batchNo,
@@ -87,6 +97,43 @@ public sealed class PpcCorrectionRepository : IPpcCorrectionRepository
     private NdtBundleOptions Opt => _optionsMonitor.CurrentValue;
 
     public bool Enabled => SqlTraceabilityConnection.IsSqlEnabled(Opt);
+
+    public async Task<PpcCorrectionUpsertResult?> UpsertOpenItemAsync(
+        string batchNo,
+        string fileName,
+        string slitNo,
+        int? oldNdtPipes,
+        int correctedNdtPipes,
+        CancellationToken cancellationToken,
+        string? replacementBatchNo)
+    {
+        var created = await UpsertOpenItemAsync(
+            batchNo, fileName, slitNo, oldNdtPipes, correctedNdtPipes, cancellationToken)
+            .ConfigureAwait(false);
+        if (created is null || string.IsNullOrWhiteSpace(replacementBatchNo))
+            return created;
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var cmd = new SqlCommand(@"
+UPDATE dbo.Ppc_Correction_Item
+SET Replacement_NDT_Batch_No = @Rep
+WHERE NDT_Batch_No = @Batch AND File_Name = @File AND Slit_No = @Slit AND Status = N'Open';", conn);
+            cmd.Parameters.AddWithValue("@Rep", replacementBatchNo.Trim());
+            cmd.Parameters.AddWithValue("@Batch", batchNo.Trim());
+            cmd.Parameters.AddWithValue("@File", fileName.Trim());
+            cmd.Parameters.AddWithValue("@Slit", ReconcileCsvParsing.NormalizeSlitKey(slitNo));
+            await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not set Replacement_NDT_Batch_No (run docs/Ppc_Correction_Item_Alter_ReplacementBatch.sql).");
+        }
+
+        return created;
+    }
 
     public async Task<PpcCorrectionUpsertResult?> UpsertOpenItemAsync(
         string batchNo,
@@ -194,7 +241,7 @@ VALUES
 SELECT Ppc_Correction_Item_ID, NDT_Batch_No, File_Name, Slit_No, Old_NDT_Pipes, Corrected_NDT_Pipes,
        Status, Created_AtUtc, Updated_AtUtc, Cleared_AtUtc, Cleared_By, Cleared_Note
 FROM dbo.Ppc_Correction_Item
-WHERE NDT_Batch_No = @Batch"
+WHERE (NDT_Batch_No = @Batch OR Replacement_NDT_Batch_No = @Batch)"
                 + (includeCleared ? string.Empty : " AND Status = N'Open'")
                 + @"
 ORDER BY CASE WHEN Status = N'Open' THEN 0 ELSE 1 END, Created_AtUtc DESC;";

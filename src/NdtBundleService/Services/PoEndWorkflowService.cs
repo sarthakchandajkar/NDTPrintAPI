@@ -255,15 +255,15 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
 
                 bundlesClosed++;
                 totalPcs += totalNdtPcs;
-                await _outputWriter.WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken, correlationId)
+                var seq = await _outputWriter.WriteBundleAsync(contextRecord, 0, totalNdtPcs, cancellationToken, correlationId)
                     .ConfigureAwait(false);
-                await _bundleRepository.TrySetPlcCloseMetadataAsync(batchNo, contextRecord.MillNo, cancellationToken)
+                await _bundleRepository.TrySetPlcCloseMetadataAsync(seq, contextRecord.MillNo, cancellationToken)
                     .ConfigureAwait(false);
                 _logger.LogInformation(
                     "PO end bundle closed: PO {PO} Mill {Mill} Batch index {Batch} NdtPcs {Pcs} Close_Source=Plc CorrelationId {CorrelationId}",
                     po,
                     millNo,
-                    batchNo,
+                    seq,
                     totalNdtPcs,
                     correlationId);
             },
@@ -294,12 +294,12 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
                     return;
 
                 onClosed?.Invoke(totalNdtPcs);
-                await _outputWriter.WriteBundleAsync(contextRecord, batchNo, totalNdtPcs, cancellationToken, correlationId).ConfigureAwait(false);
+                var seq = await _outputWriter.WriteBundleAsync(contextRecord, 0, totalNdtPcs, cancellationToken, correlationId).ConfigureAwait(false);
                 _logger.LogInformation(
                     "PO end bundle closed: PO {PO} Mill {Mill} Batch index {Batch} NdtPcs {Pcs} CorrelationId {CorrelationId}",
                     po,
                     millNo,
-                    batchNo,
+                    seq,
                     totalNdtPcs,
                     correlationId);
             },

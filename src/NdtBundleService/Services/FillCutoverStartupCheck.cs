@@ -17,19 +17,22 @@ public sealed class FillCutoverStartupCheck : IHostedService
     private readonly INdtBundleRuntimeStateStore _runtimeState;
     private readonly IMillOwnership _ownership;
     private readonly ILogger<FillCutoverStartupCheck> _logger;
+    private readonly IMillSequenceService? _millSequence;
 
     public FillCutoverStartupCheck(
         IOptionsMonitor<NdtBundleOptions> options,
         ICsvFillService csvFill,
         INdtBundleRuntimeStateStore runtimeState,
         IMillOwnership ownership,
-        ILogger<FillCutoverStartupCheck> logger)
+        ILogger<FillCutoverStartupCheck> logger,
+        IMillSequenceService? millSequence = null)
     {
         _options = options;
         _csvFill = csvFill;
         _runtimeState = runtimeState;
         _ownership = ownership;
         _logger = logger;
+        _millSequence = millSequence;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -43,6 +46,12 @@ public sealed class FillCutoverStartupCheck : IHostedService
         }
 
         await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
+
+        if (_millSequence is { IsEnabled: true })
+        {
+            await _runtimeState.ReconcileCommittedInFlightAsync(_millSequence, cancellationToken)
+                .ConfigureAwait(false);
+        }
 
         var millNo = _ownership.SingleOwnedMill;
         var awaiting = await _csvFill.HasAwaitingCsvReconRowsAsync(cancellationToken, millNo).ConfigureAwait(false);

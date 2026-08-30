@@ -505,11 +505,11 @@ public sealed class Phase1PoLifecycleTests
             _closed = closed;
         }
 
-        public Task WriteBundleAsync(InputSlitRecord contextRecord, int batchNo, int totalNdtPcs, CancellationToken cancellationToken, Guid? correlationId = null)
+        public Task<int> WriteBundleAsync(InputSlitRecord contextRecord, int batchNo, int totalNdtPcs, CancellationToken cancellationToken, Guid? correlationId = null)
         {
             _onPcs?.Invoke(totalNdtPcs);
             _closed?.Add((batchNo, totalNdtPcs));
-            return Task.CompletedTask;
+            return Task.FromResult(batchNo);
         }
     }
 

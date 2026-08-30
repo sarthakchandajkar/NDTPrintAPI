@@ -253,13 +253,13 @@ public sealed class PlcSlitEndSlitIdChangeTests
 
     private sealed class NoOpOutputWriter : IBundleOutputWriter
     {
-        public Task WriteBundleAsync(
+        public Task<int> WriteBundleAsync(
             InputSlitRecord contextRecord,
             int ndtBatchNo,
             int totalNdtPcs,
             CancellationToken cancellationToken,
             Guid? correlationId = null) =>
-            Task.CompletedTask;
+            Task.FromResult(0);
     }
 
     private sealed class NoOpPlcCloseRepo : INdtBundleRepository

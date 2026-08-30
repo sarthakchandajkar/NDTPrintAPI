@@ -9,6 +9,7 @@ namespace NdtBundleService.Services;
 
 /// <summary>
 /// Writes one CSV file per completed bundle. Sends ZPL to the printer only when NdtBundle:EnableNdtTagZplAndPrint is true.
+/// Sequence is allocated in SQL (Mill_Sequence) in the same transaction as the NDT_Bundle insert.
 /// </summary>
 public sealed class CsvBundleOutputWriter : IBundleOutputWriter
 {
@@ -18,6 +19,7 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
     private readonly INdtTagPrinter? _tagPrinter;
     private readonly ITraceabilityRepository? _traceability;
     private readonly IWipLabelProvider? _wipLabelProvider;
+    private readonly IMillSequenceService? _millSequence;
     private readonly ILogger<CsvBundleOutputWriter> _logger;
 
     public CsvBundleOutputWriter(
@@ -27,7 +29,8 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
         ILogger<CsvBundleOutputWriter> logger,
         INdtTagPrinter? tagPrinter = null,
         ITraceabilityRepository? traceability = null,
-        IWipLabelProvider? wipLabelProvider = null)
+        IWipLabelProvider? wipLabelProvider = null,
+        IMillSequenceService? millSequence = null)
     {
         _options = options.Value;
         _bundleRepository = bundleRepository;
@@ -35,18 +38,19 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
         _tagPrinter = tagPrinter;
         _traceability = traceability;
         _wipLabelProvider = wipLabelProvider;
+        _millSequence = millSequence;
         _logger = logger;
     }
 
-    public async Task WriteBundleAsync(InputSlitRecord contextRecord, int ndtBatchNo, int totalNdtPcs, CancellationToken cancellationToken, Guid? correlationId = null)
+    public async Task<int> WriteBundleAsync(InputSlitRecord contextRecord, int ndtBatchNo, int totalNdtPcs, CancellationToken cancellationToken, Guid? correlationId = null)
     {
         using (correlationId is { } id ? LogContext.PushProperty("CorrelationId", id) : null)
         {
-            await WriteBundleCoreAsync(contextRecord, ndtBatchNo, totalNdtPcs, cancellationToken, correlationId).ConfigureAwait(false);
+            return await WriteBundleCoreAsync(contextRecord, ndtBatchNo, totalNdtPcs, cancellationToken, correlationId).ConfigureAwait(false);
         }
     }
 
-    private async Task WriteBundleCoreAsync(InputSlitRecord contextRecord, int ndtBatchNo, int totalNdtPcs, CancellationToken cancellationToken, Guid? correlationId)
+    private async Task<int> WriteBundleCoreAsync(InputSlitRecord contextRecord, int ndtBatchNo, int totalNdtPcs, CancellationToken cancellationToken, Guid? correlationId)
     {
         if (totalNdtPcs <= 0)
         {
@@ -54,10 +58,12 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
                 "Skipping NDT bundle output for PO {PO} Mill {Mill}: zero NDT pipes.",
                 contextRecord.PoNumber,
                 contextRecord.MillNo);
-            return;
+            return 0;
         }
 
-        var ndtBatchNoFormatted = FormatNdtBatchNo(ndtBatchNo, contextRecord.MillNo);
+        var (sequence, ndtBatchNoFormatted) = await ResolveSequenceAndInsertAsync(
+            contextRecord, ndtBatchNo, totalNdtPcs, cancellationToken).ConfigureAwait(false);
+        ndtBatchNo = sequence;
         var bundleFolder = NdtBundleOutputPaths.ResolveBundleArtifactsFolder(_options);
         if (_options.EnableBundleSummaryCsvFiles)
         {
@@ -100,23 +106,12 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
             _logger.LogDebug("Skipping NDT_Bundle summary CSV for {BatchNo} (NdtBundle:EnableBundleSummaryCsvFiles=false).", ndtBatchNoFormatted);
         }
 
-        var record = new NdtBundleRecord
+        if (_millSequence is not { IsEnabled: true })
         {
-            BundleNo = ndtBatchNoFormatted,
-            PoNumber = contextRecord.PoNumber,
-            MillNo = contextRecord.MillNo,
-            TotalNdtPcs = totalNdtPcs,
-            TargetNdtPcs = totalNdtPcs,
-            CsvFilled = 0,
-            CsvFillState = CsvFillState.PlcClosed,
-            SlitNo = contextRecord.SlitNo,
-            SlitStartTime = contextRecord.SlitStartTime,
-            SlitFinishTime = contextRecord.SlitFinishTime,
-            RejectedPipes = contextRecord.RejectedPipes,
-            NdtShortLengthPipe = contextRecord.NdtShortLengthPipe,
-            RejectedShortLengthPipe = contextRecord.RejectedShortLengthPipe
-        };
-        await _bundleRepository.RecordBundlePendingPrintAsync(record, cancellationToken).ConfigureAwait(false);
+            var record = BuildPendingRecord(contextRecord, ndtBatchNoFormatted, totalNdtPcs);
+            await _bundleRepository.RecordBundlePendingPrintAsync(record, cancellationToken).ConfigureAwait(false);
+        }
+
         await _csvFill
             .TryInitializeFillTargetAsync(ndtBatchNoFormatted, totalNdtPcs, closeSource: null, cancellationToken)
             .ConfigureAwait(false);
@@ -185,6 +180,8 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
                     cancellationToken).ConfigureAwait(false);
             }
         }
+
+        return sequence;
     }
 
     private async Task TryRecordBundleLabelAsync(string poNumber, int millNo, CancellationToken cancellationToken)
@@ -214,19 +211,58 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
     }
 
     /// <summary>
-    /// Formats NDT_Batch_No per spec: 10 characters.
-    /// Position 1-2: Fixed "12"
-    /// Position 3-4: YY (2-digit year)
-    /// Position 5: Mill number (1..4)
-    /// Position 6-10: Sequence number (5 digits, zero-padded)
+    /// When SQL + Mill_Sequence is enabled, allocate and insert NDT_Bundle in one transaction.
+    /// Tests / CSV-only mode keep the engine-passed integer (must be &gt; 0).
     /// </summary>
-    private static string FormatNdtBatchNo(int sequenceNumber, int millNo)
+    private async Task<(int Sequence, string Formatted)> ResolveSequenceAndInsertAsync(
+        InputSlitRecord contextRecord,
+        int passedSequence,
+        int totalNdtPcs,
+        CancellationToken cancellationToken)
     {
-        var yy = (DateTime.Now.Year % 100).ToString("D2", CultureInfo.InvariantCulture);
-        var millDigit = (millNo >= 1 && millNo <= 4) ? millNo.ToString(CultureInfo.InvariantCulture) : "1";
-        var seq = sequenceNumber.ToString("D5", CultureInfo.InvariantCulture);
-        return "12" + yy + millDigit + seq;
+        if (_millSequence is { IsEnabled: true })
+        {
+            try
+            {
+                return await _millSequence
+                    .AllocateAndInsertBundleAsync(
+                        BuildPendingRecord(contextRecord, bundleNo: string.Empty, totalNdtPcs),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex, BundleCloseFailure.AllocateUnavailable);
+                throw new InvalidOperationException(BundleCloseFailure.AllocateUnavailable, ex);
+            }
+        }
+
+        if (passedSequence <= 0)
+        {
+            _logger.LogError(BundleCloseFailure.AllocateUnavailable);
+            throw new InvalidOperationException(BundleCloseFailure.AllocateUnavailable);
+        }
+
+        return (passedSequence, NdtBundleSequence.Format(passedSequence, contextRecord.MillNo));
     }
+
+    private static NdtBundleRecord BuildPendingRecord(InputSlitRecord contextRecord, string bundleNo, int totalNdtPcs) =>
+        new()
+        {
+            BundleNo = bundleNo,
+            PoNumber = contextRecord.PoNumber,
+            MillNo = contextRecord.MillNo,
+            TotalNdtPcs = totalNdtPcs,
+            TargetNdtPcs = totalNdtPcs,
+            CsvFilled = 0,
+            CsvFillState = CsvFillState.PlcClosed,
+            SlitNo = contextRecord.SlitNo,
+            SlitStartTime = contextRecord.SlitStartTime,
+            SlitFinishTime = contextRecord.SlitFinishTime,
+            RejectedPipes = contextRecord.RejectedPipes,
+            NdtShortLengthPipe = contextRecord.NdtShortLengthPipe,
+            RejectedShortLengthPipe = contextRecord.RejectedShortLengthPipe
+        };
 
     private static string Escape(string value)
     {
@@ -235,4 +271,3 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
         return value;
     }
 }
-

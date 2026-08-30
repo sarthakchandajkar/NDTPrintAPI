@@ -121,8 +121,7 @@ public class NdtBundleOptions
 
     /// <summary>
     /// Optional last-known NDT batch number per mill (keys <c>"1"</c>–<c>"4"</c>, values e.g. <c>1226100029</c>).
-    /// On startup the service never assigns a lower sequence for that mill than the maximum of these seeds,
-    /// bundles already in SQL/CSV, and persisted runtime state. Used for first deploy and as a safety floor after restart.
+    /// Used only to INSERT a <c>Mill_Sequence</c> row that does not exist yet. Ignored once the row is present.
     /// </summary>
     public Dictionary<string, string> InitialMillBatchNumbers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -201,6 +200,12 @@ public class NdtBundleOptions
     /// <summary>Resolved quiet timeout: prefers <see cref="CsvFillQuietMinutes"/> when &gt; 0, else <see cref="ReconWindowMinutes"/>.</summary>
     public int EffectiveCsvFillQuietMinutes =>
         CsvFillQuietMinutes > 0 ? CsvFillQuietMinutes : Math.Max(1, ReconWindowMinutes);
+
+    /// <summary>
+    /// When true (default), refuse to start if live bundle sequences exceed <c>Mill_Sequence.Current_Sequence</c>
+    /// for owned mills — allocation happened outside the table.
+    /// </summary>
+    public bool RequireMillSequenceMatchesBundles { get; set; } = true;
 
     /// <summary>
     /// When true (default in Production), refuse to start if <c>Awaiting_Csv_Recon=1</c> or open provisional
@@ -327,7 +332,11 @@ public class NdtBundleOptions
     /// <summary>Optional local IP to bind to when connecting to the printer (e.g. 192.168.0.14). Use when the PC has multiple NICs and you want to force the same interface that can reach the printer. Leave empty to let the OS choose.</summary>
     public string NdtTagPrinterLocalBindAddress { get; set; } = string.Empty;
 
-    /// <summary>When false, SQL Server is never used for bundles (reads/writes use CSV folders only), even if <see cref="ConnectionString"/> is set (e.g. env override).</summary>
+    /// <summary>
+    /// When false, SQL Server is never used for bundles (CSV-folder / unit-test mode), even if
+    /// <see cref="ConnectionString"/> is set. Not a production print path: sequence is not allocated
+    /// from Mill_Sequence, so a configured printer is refused at mill-instance startup.
+    /// </summary>
     public bool UseSqlServerForBundles { get; set; }
 
     /// <summary>Default age threshold in minutes for <see cref="INdtBundleRepository.GetStuckPrintsAsync"/>.</summary>

@@ -123,8 +123,22 @@ public sealed class PpcCorrectionPhase3Tests
             reconcileTagService: null!,
             sapRepo,
             ppcRepo,
+            new NoOpMerge(),
             new TestOptionsMonitor(),
             NullLogger<ReconcileController>.Instance);
+
+    private sealed class NoOpMerge : IBundleMergeService
+    {
+        public Task<BundleMergePreview?> TryPreviewAsync(string sourceBundleNo, CancellationToken cancellationToken) =>
+            Task.FromResult<BundleMergePreview?>(null);
+
+        public Task<BundleMergeResult> MergeIntoPreviousAsync(
+            string sourceBundleNo,
+            string reason,
+            string updatedBy,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+    }
 
     private sealed class TestOptionsMonitor : Microsoft.Extensions.Options.IOptionsMonitor<NdtBundleService.Configuration.NdtBundleOptions>
     {
