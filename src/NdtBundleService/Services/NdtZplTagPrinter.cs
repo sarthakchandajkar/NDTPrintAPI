@@ -98,8 +98,6 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
             isReprint,
             labelSize: ZplNdtLabelBuilder.NdtTagLabelSize.FromOptions(opt, record.MillNo));
 
-        // Always save a ZPL preview file alongside bundle output so the layout
-        // can be visualized in an external ZPL viewer without depending on the printer.
         await TrySaveBundleZplAsync(opt, zplBytes, ndtBatchNoFormatted, cancellationToken).ConfigureAwait(false);
 
         var sendResult = await _sender.SendAsync(address, printerPort, zplBytes, cancellationToken).ConfigureAwait(false);
@@ -118,12 +116,15 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
     {
         try
         {
-            var folder = NdtBundleOutputPaths.ResolveBundleArtifactsFolder(opt);
+            var saved = await NdtBundleOutputPaths.TrySaveBundleZplAsync(opt, ndtBatchNoFormatted, zplBytes, cancellationToken)
+                .ConfigureAwait(false);
+            if (!saved)
+                return;
+
+            var folder = NdtBundleOutputPaths.ResolveBundleSummaryWriteFolder(opt);
             if (string.IsNullOrWhiteSpace(folder))
                 return;
 
-            await NdtBundleOutputPaths.TrySaveBundleZplAsync(opt, ndtBatchNoFormatted, zplBytes, cancellationToken)
-                .ConfigureAwait(false);
             var fullPath = Path.Combine(folder, NdtBundleOutputPaths.GetBundleZplFileName(ndtBatchNoFormatted));
             _logger.LogInformation("Saved ZPL for NDT bundle {BatchNo} to {Path}", ndtBatchNoFormatted, fullPath);
         }

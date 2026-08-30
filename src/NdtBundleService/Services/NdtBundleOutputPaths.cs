@@ -46,19 +46,33 @@ internal static class NdtBundleOutputPaths
         }
     }
 
-    public static async Task TrySaveBundleZplAsync(
+    /// <summary>
+    /// Folder used only for new CSV/ZPL writes. Never falls back to <see cref="NdtBundleOptions.OutputBundleFolder"/>
+    /// (that path is SAP Input Slit pickup).
+    /// </summary>
+    public static string? ResolveBundleSummaryWriteFolder(NdtBundleOptions options)
+    {
+        var configured = (options.BundleSummaryOutputFolder ?? string.Empty).Trim();
+        return string.IsNullOrWhiteSpace(configured) ? null : configured;
+    }
+
+    public static async Task<bool> TrySaveBundleZplAsync(
         NdtBundleOptions options,
         string ndtBatchNoFormatted,
         byte[] zplBytes,
         CancellationToken cancellationToken)
     {
-        var folder = ResolveBundleArtifactsFolder(options);
+        if (!options.EnableBundleZplPreviewFiles)
+            return false;
+
+        var folder = ResolveBundleSummaryWriteFolder(options);
         if (string.IsNullOrWhiteSpace(folder))
-            return;
+            return false;
 
         Directory.CreateDirectory(folder);
         var fileName = GetBundleZplFileName(ndtBatchNoFormatted);
         var fullPath = Path.Combine(folder, fileName);
         await File.WriteAllBytesAsync(fullPath, zplBytes, cancellationToken).ConfigureAwait(false);
+        return true;
     }
 }

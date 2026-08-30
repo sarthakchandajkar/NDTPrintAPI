@@ -98,7 +98,7 @@ public class NdtBundleOptions
     /// <summary>Optional per-mill tag length override (keys <c>"1"</c>–<c>"4"</c>). Width uses <see cref="NdtTagLabelWidthMm"/>.</summary>
     public Dictionary<string, int> NdtTagLabelLengthMmByMill { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>When true, the service writes ZPL preview files to output folders and sends tags to NdtTagPrinterAddress. When false, only CSV outputs are produced (bundle CSV, slit CSV, manual station CSV); no ZPL files and no network print.</summary>
+    /// <summary>When true, the service sends tags to NdtTagPrinterAddress. When false, only CSV outputs are produced (slit CSV, manual station CSV); no network print. Disk ZPL previews are controlled separately by <see cref="EnableBundleZplPreviewFiles"/>.</summary>
     public bool EnableNdtTagZplAndPrint { get; set; }
 
     /// <summary>When true, manual station state is persisted as JSON files under OutputBundleFolder\ManualStationState. When false, state is kept in memory only and no files are generated in that folder.</summary>
@@ -131,13 +131,17 @@ public class NdtBundleOptions
     /// </summary>
     public bool SyncRuntimeStateFromPrintedBundlesOnly { get; set; } = true;
 
-    /// <summary>When true, writes <c>NDT_Bundle_{batchNo}.csv</c> to <see cref="BundleSummaryOutputFolder"/>. When false, bundle summary CSV is skipped (ZPL may still be written on print).</summary>
-    public bool EnableBundleSummaryCsvFiles { get; set; } = true;
+    /// <summary>When true, writes <c>NDT_Bundle_{batchNo}.csv</c> to <see cref="BundleSummaryOutputFolder"/>. Off by default — SQL is the source of truth; this folder is not a SAP pickup.</summary>
+    public bool EnableBundleSummaryCsvFiles { get; set; }
+
+    /// <summary>When true, writes <c>NDT_Bundle_{batchNo}.zpl</c> preview files to <see cref="BundleSummaryOutputFolder"/> on print. Off by default; tags still go to the printer when <see cref="EnableNdtTagZplAndPrint"/> is true.</summary>
+    public bool EnableBundleZplPreviewFiles { get; set; }
 
     /// <summary>
-    /// Folder for completed bundle artifacts: <c>NDT_Bundle_{batchNo}.csv</c> and <c>NDT_Bundle_{batchNo}.zpl</c>.
+    /// Optional folder for completed bundle artifacts: <c>NDT_Bundle_{batchNo}.csv</c> and <c>NDT_Bundle_{batchNo}.zpl</c>.
     /// Production example: <c>Z:\To SAP\TM\NDT\NDT Bundles</c>. Per-slit input-slit CSVs stay in <see cref="OutputBundleFolder"/>.
-    /// When empty, falls back to <see cref="OutputBundleFolder"/>.
+    /// Kept so existing files can still be scanned; new files are written only when the flags above are true.
+    /// When empty, reads fall back to <see cref="OutputBundleFolder"/>; writes never use that fallback.
     /// </summary>
     public string BundleSummaryOutputFolder { get; set; } = string.Empty;
 

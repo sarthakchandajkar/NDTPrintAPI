@@ -2148,6 +2148,9 @@ ORDER BY PrintedAt DESC";
 
     public async Task<bool> UpdateBundleSummaryCsvAsync(string batchNo, int newTotalPipes, CancellationToken cancellationToken)
     {
+        if (!Opt.EnableBundleSummaryCsvFiles)
+            return false;
+
         var folder = GetBundleSummaryFolder();
         if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder) || string.IsNullOrWhiteSpace(batchNo))
             return false;

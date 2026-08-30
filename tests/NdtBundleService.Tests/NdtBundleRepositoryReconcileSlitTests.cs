@@ -143,6 +143,7 @@ public sealed class NdtBundleRepositoryReconcileSlitTests : IDisposable
         {
             OutputBundleFolder = outputFolder,
             BundleSummaryOutputFolder = summaryFolder ?? outputFolder,
+            EnableBundleSummaryCsvFiles = true,
             UseSqlServerForBundles = false
         });
         var monitor = new TestOptionsMonitor<NdtBundleOptions>(options.Value);

@@ -64,13 +64,13 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
         var (sequence, ndtBatchNoFormatted) = await ResolveSequenceAndInsertAsync(
             contextRecord, ndtBatchNo, totalNdtPcs, cancellationToken).ConfigureAwait(false);
         ndtBatchNo = sequence;
-        var bundleFolder = NdtBundleOutputPaths.ResolveBundleArtifactsFolder(_options);
+        var bundleFolder = NdtBundleOutputPaths.ResolveBundleSummaryWriteFolder(_options);
         if (_options.EnableBundleSummaryCsvFiles)
         {
             if (string.IsNullOrWhiteSpace(bundleFolder))
             {
                 _logger.LogWarning(
-                    "BundleSummaryOutputFolder and OutputBundleFolder are not configured; NDT_Bundle CSV will not be written.");
+                    "BundleSummaryOutputFolder is not configured; NDT_Bundle CSV will not be written.");
             }
             else
             {
