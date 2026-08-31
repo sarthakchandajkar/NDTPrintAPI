@@ -108,7 +108,6 @@ public sealed class OpenAccumulationOverrideService
             [resolvedSizeKey] = accumulated
         };
         _runtimeState.SetSizeCounts(po, millNo, next);
-        _runtimeState.ClearRunningTotal(po, millNo);
         await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
 
         var hooterSynced = await _handshakeCoordinator

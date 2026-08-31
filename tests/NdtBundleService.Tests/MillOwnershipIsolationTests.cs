@@ -268,44 +268,18 @@ public sealed class MillOwnershipIsolationTests : IDisposable
     }
 
     [Fact]
-    public async Task RuntimeStateStore_save_strips_foreign_mill_slots()
+    public void RuntimeStateStore_mill_1_cannot_write_mill_4()
     {
-        var path = Path.Combine(_wipFolder, "runtime-m1.json");
-        File.WriteAllText(
-            path,
-            """
-            {
-              "version": 1,
-              "millMaxSequence": { "1": 1, "4": 99 },
-              "mills": {
-                "1000000001|1": { "poNumber": "1000000001", "millNo": 1, "batchOffset": 1 },
-                "1000000004|4": { "poNumber": "1000000004", "millNo": 4, "batchOffset": 99 }
-              }
-            }
-            """);
-
-        var options = new TestOptionsMonitor<NdtBundleOptions>(new NdtBundleOptions
-        {
-            EnableNdtBundleRuntimeStatePersistence = true,
-            NdtBundleRuntimeStateFile = path,
-            UseSqlServerForBundles = false,
-            RuntimeStatePruning = new RuntimeStatePruningOptions { Enabled = false }
-        });
-
         var store = new NdtBundleRuntimeStateStore(
-            options,
-            new EmptyBundles(),
-            new StubActivePo(),
+            new TestOptionsMonitor<NdtBundleOptions>(new NdtBundleOptions { UseSqlServerForBundles = false }),
             TestMillOwnership.Mill(1),
             NullLogger<NdtBundleRuntimeStateStore>.Instance);
 
-        await store.EnsureInitializedAsync(CancellationToken.None);
-        await store.SaveAsync(CancellationToken.None);
-
-        var json = await File.ReadAllTextAsync(path);
-        Assert.Contains("1000000001|1", json, StringComparison.Ordinal);
-        Assert.DoesNotContain("1000000004|4", json, StringComparison.Ordinal);
-        Assert.DoesNotContain("millMaxSequence", json, StringComparison.OrdinalIgnoreCase);
+        store.IncrementSizeCount("1000000001", 1, "Default", 2);
+        Assert.Equal(2, store.GetSizeCounts("1000000001", 1)["Default"]);
+        Assert.Throws<InvalidOperationException>(() =>
+            store.IncrementSizeCount("1000000004", 4, "Default", 1));
+        Assert.Empty(store.GetSizeCounts("1000000004", 4));
     }
 
     private void WriteWip(string name, DateTime stampUtc)

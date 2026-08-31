@@ -58,6 +58,7 @@ public sealed class CompositionRootTests : IDisposable
 
         var types = GetHostedServiceTypes(provider);
         Assert.Contains(typeof(SqlTraceabilityStartupCheck), types);
+        Assert.Contains(typeof(LegacyJsonStateStartupCheck), types);
         Assert.Contains(typeof(SourceFileEligibilityStartupLog), types);
         Assert.Contains(typeof(PoPlanCacheWarmupService), types);
         Assert.Contains(typeof(NdtInputSlitSapStatusWorker), types);
@@ -88,6 +89,7 @@ public sealed class CompositionRootTests : IDisposable
         Assert.Contains(typeof(MillInstanceLeaseHostedService), types);
         Assert.Contains(typeof(FillCutoverStartupCheck), types);
         Assert.Contains(typeof(MillSequenceStartupGuard), types);
+        Assert.Contains(typeof(LegacyJsonStateStartupCheck), types);
         Assert.DoesNotContain(typeof(PoPlanWipImportHostedService), types);
         Assert.DoesNotContain(typeof(NdtInputSlitSapStatusWorker), types);
 
@@ -113,6 +115,45 @@ public sealed class CompositionRootTests : IDisposable
         var ex = await Assert.ThrowsAsync<OptionsValidationException>(() => BuildProviderAsync(config));
         Assert.Contains("not-a-date", ex.Message, StringComparison.Ordinal);
         Assert.Contains("MinSourceFileLastWriteUtc", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AddNdtBundleServices_Mill_empty_OwnedMillNos_fails_ValidateOnStart()
+    {
+        // MillOwnership.Allows treats an empty owned set as Shared (all mills). A Mode=Mill
+        // process must never start in that state — ValidateOnStart is the gate, not Allows.
+        var unvalidated = new MillOwnership(Options.Create(new InstanceRoleOptions
+        {
+            Mode = InstanceRoleModes.Mill,
+            OwnedMillNos = [],
+            EnableMillWorkers = true,
+            EnableDashboardApi = false,
+            EnablePoPlanWipImport = false
+        }));
+        Assert.True(unvalidated.Allows(2));
+        Assert.True(unvalidated.Allows(4));
+
+        var config = BuildCompositionConfiguration(_tempRoot, new Dictionary<string, string?>
+        {
+            ["InstanceRole:Mode"] = InstanceRoleModes.Mill,
+            ["InstanceRole:EnableDashboardApi"] = "false",
+            ["InstanceRole:EnableMillWorkers"] = "true",
+            ["InstanceRole:EnablePoPlanWipImport"] = "false"
+        });
+
+        var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
+        {
+            DisableDefaults = true,
+            ContentRootPath = _tempRoot,
+            EnvironmentName = Environments.Development
+        });
+        builder.Configuration.AddConfiguration(config);
+        builder.Services.AddNdtBundleServices(builder.Configuration);
+
+        using var host = builder.Build();
+        var ex = await Assert.ThrowsAsync<OptionsValidationException>(() => host.StartAsync());
+        Assert.Contains("exactly one", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("OwnedMillNos", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -151,6 +192,7 @@ public sealed class CompositionRootTests : IDisposable
         Assert.Contains(typeof(NdtInputSlitSapStatusWorker), types);
         Assert.Contains(typeof(MillInstanceLeaseHostedService), types);
         Assert.Contains(typeof(MillSequenceStartupGuard), types);
+        Assert.Contains(typeof(LegacyJsonStateStartupCheck), types);
         Assert.IsType<ZplGenerationToggle>(provider.GetRequiredService<IZplGenerationToggle>());
         Assert.NotNull(provider.GetRequiredService<IMillSequenceService>());
         Assert.NotNull(provider.GetRequiredService<IBundleMergeService>());
@@ -161,7 +203,7 @@ public sealed class CompositionRootTests : IDisposable
         var guard = hosted.IndexOf(typeof(MillSequenceStartupGuard));
         var fill = hosted.IndexOf(typeof(FillCutoverStartupCheck));
         Assert.True(guard >= 0 && fill >= 0 && lease >= 0 && worker >= 0);
-        Assert.True(guard < fill, "MillSequenceStartupGuard must start before FillCutover (leftover JSON millMaxSequence).");
+        Assert.True(guard < fill, "MillSequenceStartupGuard must start before FillCutover.");
         Assert.True(fill < lease, "FillCutover must start after sequence seed.");
         Assert.True(lease < worker, "MillInstanceLeaseHostedService must start before mill workers.");
 
@@ -212,8 +254,6 @@ public sealed class CompositionRootTests : IDisposable
                 ["NdtBundle:ConnectionString"] = "",
                 ["NdtBundle:PreferSqlForPoPlanWip"] = "false",
                 ["NdtBundle:ImportPoPlanWipFromFolder"] = "false",
-                ["NdtBundle:EnableNdtBundleRuntimeStatePersistence"] = "false",
-                ["NdtBundle:RuntimeStatePruning:RunOnStartup"] = "false",
                 ["NdtBundle:BackfillReconciliationEnabled"] = "false",
                 ["NdtBundle:RequireCleanFillCutover"] = "false",
                 ["NdtBundle:InputSlitFolder"] = Path.Combine(tempRoot, "Input Slit"),

@@ -189,7 +189,6 @@ public sealed class ClosedPoLateSlitReplayTests
         runtime.SetLastActivityUtc(Po, Mill, DateTime.UtcNow.AddMinutes(-30));
 
         Assert.False(NdtBundleRuntimeStateLogic.HasOpenPartialBundle(
-            runtime.GetRunningTotal(Po, Mill),
             runtime.GetSizeCounts(Po, Mill)));
 
         Assert.True(OrphanSweepGuard.ShouldSweepClosedPo(
@@ -210,7 +209,6 @@ public sealed class ClosedPoLateSlitReplayTests
         runtime.SetLastActivityUtc(Po, Mill, DateTime.UtcNow.AddMinutes(-20));
 
         Assert.True(NdtBundleRuntimeStateLogic.HasOpenPartialBundle(
-            runtime.GetRunningTotal(Po, Mill),
             runtime.GetSizeCounts(Po, Mill)));
 
         Assert.True(OrphanSweepGuard.ShouldSweepClosedPo(

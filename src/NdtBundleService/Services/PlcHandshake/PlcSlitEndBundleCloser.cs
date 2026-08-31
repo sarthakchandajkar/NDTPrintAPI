@@ -144,10 +144,9 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
             var sizeCounts = _runtimeState.GetSizeCounts(poNorm, millNo);
             sizeCounts.TryGetValue(sizeKey, out var prevAccumulated);
             var slitPcs = Math.Max(0, slitNdtPcs);
-            var accumulated = prevAccumulated + slitPcs;
-            sizeCounts[sizeKey] = accumulated;
-            _runtimeState.SetSizeCounts(poNorm, millNo, sizeCounts);
+            _runtimeState.IncrementSizeCount(poNorm, millNo, sizeKey, slitPcs);
             await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
+            var accumulated = prevAccumulated + slitPcs;
 
             if (slitPcs > 0 || accumulated != prevAccumulated)
             {

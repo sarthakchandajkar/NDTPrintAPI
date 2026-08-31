@@ -62,7 +62,7 @@ public sealed class FillToTargetCutoverAndConfigTests
             NullLogger<FillCutoverStartupCheck>.Instance);
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => sut.StartAsync(CancellationToken.None));
-        Assert.Contains("ProvisionalBatchNo", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Bundle_Accumulation", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

@@ -75,7 +75,6 @@ public sealed class PoReopenLifecycleTests
         Assert.True(TryReopenFromWip(poReopen, wip, Mill, PoA));
         Assert.Equal(PoLifecyclePhase.Running, lifecycle.GetPhase(Mill, PoA));
         Assert.False(NdtBundleRuntimeStateLogic.HasOpenPartialBundle(
-            runtime.GetRunningTotal(PoA, Mill),
             runtime.GetSizeCounts(PoA, Mill)));
 
         poReopen.TryReopenIfClosed(Mill, PoA, PoA);
@@ -514,7 +513,7 @@ public sealed class PoReopenLifecycleTests
             Guid? correlationId = null)
         {
             var po = InputSlitCsvParsing.NormalizePo(contextRecord.PoNumber);
-            var seq = _runtime.PeekNextSequence(po, contextRecord.MillNo);
+            var seq = _runtime.CloseBundle(po, contextRecord.MillNo, totalNdtPcs, threshold: 1).FinalSequence;
             _onClose(po, seq, totalNdtPcs);
             return Task.FromResult(seq);
         }

@@ -1,4 +1,3 @@
-using System.Globalization;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
@@ -80,22 +79,10 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
 
                 var lines = new List<string>
                 {
-                    "PO Number,Slit No,NDT Pipes,Rejected P,Slit Start Time,Slit Finish Time,Mill No,NDT Short Length Pipe,Rejected Short Length Pipe,NDT Batch No"
+                    BundleCloseCsv.Header
                 };
 
-                var line = string.Join(",",
-                    Escape(contextRecord.PoNumber),
-                    Escape(contextRecord.SlitNo),
-                    totalNdtPcs.ToString(CultureInfo.InvariantCulture),
-                    contextRecord.RejectedPipes.ToString(CultureInfo.InvariantCulture),
-                    Escape(contextRecord.SlitStartTime?.ToString("O") ?? string.Empty),
-                    Escape(contextRecord.SlitFinishTime?.ToString("O") ?? string.Empty),
-                    contextRecord.MillNo.ToString(CultureInfo.InvariantCulture),
-                    Escape(contextRecord.NdtShortLengthPipe),
-                    Escape(contextRecord.RejectedShortLengthPipe),
-                    ndtBatchNoFormatted);
-
-                lines.Add(line);
+                lines.Add(BundleCloseCsv.FormatLine(contextRecord, totalNdtPcs, ndtBatchNoFormatted));
 
                 await File.WriteAllLinesAsync(path, lines, cancellationToken);
                 _logger.LogInformation("Wrote bundle CSV: {Path}", path);
@@ -132,14 +119,14 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
         {
             try
             {
-                var printed = await _tagPrinter.PrintBundleTagAsync(
+                var printResult = await _tagPrinter.PrintBundleTagAsync(
                     contextRecord,
                     ndtBatchNo,
                     totalNdtPcs,
                     isReprint: false,
                     cancellationToken).ConfigureAwait(false);
 
-                if (printed)
+                if (printResult.Success)
                 {
                     _logger.LogInformation(
                         "Bundle {BatchNo} tag print succeeded; Print_Status=Printed. CorrelationId {CorrelationId}",
@@ -153,7 +140,7 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
                 }
                 else
                 {
-                    const string error = "PrintBundleTagAsync returned false (ZPL disabled or printer not configured).";
+                    var error = printResult.ErrorDetail ?? "PrintBundleTagAsync returned false.";
                     _logger.LogError(
                         "Bundle {BatchNo} tag print failed: {Error} CorrelationId {CorrelationId}",
                         ndtBatchNoFormatted,
@@ -263,11 +250,4 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
             NdtShortLengthPipe = contextRecord.NdtShortLengthPipe,
             RejectedShortLengthPipe = contextRecord.RejectedShortLengthPipe
         };
-
-    private static string Escape(string value)
-    {
-        if (value.IndexOfAny(new[] { ',', '"', '\r', '\n' }) >= 0)
-            return "\"" + value.Replace("\"", "\"\"") + "\"";
-        return value;
-    }
 }

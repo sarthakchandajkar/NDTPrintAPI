@@ -54,7 +54,11 @@ public sealed class SqlTraceabilityHealth : ISqlTraceabilityHealth
         "Output_Slit_Sap_Status",
         "Output_Slit_Sap_Status_Event",
         "Ppc_Correction_Item",
-        "Mill_Sequence"
+        "Mill_Sequence",
+        "Bundle_Accumulation",
+        "Bundle_Accumulation_Context",
+        "Po_Lifecycle",
+        "Mill_Printer"
     };
 
     private readonly IOptionsMonitor<NdtBundleOptions> _optionsMonitor;

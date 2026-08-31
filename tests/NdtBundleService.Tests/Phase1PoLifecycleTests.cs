@@ -207,7 +207,6 @@ public sealed class Phase1PoLifecycleTests
         Assert.Equal(14, closed[0].Pcs);
         Assert.Equal(0, runtime.GetSizeCounts("1000060163", 1).GetValueOrDefault("Default"));
         Assert.False(NdtBundleRuntimeStateLogic.HasOpenPartialBundle(
-            runtime.GetRunningTotal("1000060163", 1),
             runtime.GetSizeCounts("1000060163", 1)));
     }
 
@@ -255,7 +254,6 @@ public sealed class Phase1PoLifecycleTests
         Assert.Equal(PoLifecyclePhase.Closed, lifecycle.GetPhase(1, "1000060163"));
         Assert.Equal(14, closed.Sum(c => c.Pcs)); // 8 + 6
         Assert.False(NdtBundleRuntimeStateLogic.HasOpenPartialBundle(
-            runtime.GetRunningTotal("1000060163", 1),
             runtime.GetSizeCounts("1000060163", 1)));
     }
 

@@ -8,7 +8,7 @@ namespace NdtBundleService.Tests;
 public sealed class NdtBundleEnginePoEndTests
 {
     [Fact]
-    public async Task HandlePoEnd_ClosesRunningTotalWhenSizeCountsEmpty()
+    public async Task HandlePoEnd_closes_size_counts_not_a_separate_running_total()
     {
         var formation = new FormationChartProviderStub(new Dictionary<string, int> { ["Default"] = 20 });
         var pipeSize = new PipeSizeProviderStub(new Dictionary<string, string>());
@@ -16,7 +16,7 @@ public sealed class NdtBundleEnginePoEndTests
         var engine = TestEngineFactory.Create(formation, pipeSize, runtime);
 
         await runtime.EnsureInitializedAsync(CancellationToken.None);
-        runtime.ApplySlitContribution("PO-100", 1, ndtPipes: 12, threshold: 20, out _);
+        runtime.IncrementSizeCount("PO-100", 1, "Default", 12);
 
         var closed = new List<(int BatchNo, int Pcs)>();
         await engine.HandlePoEndAsync(
@@ -35,7 +35,7 @@ public sealed class NdtBundleEnginePoEndTests
     }
 
     [Fact]
-    public async Task PoEndWorkflow_AdvanceOnPoEnd_DoesNotBurnSequenceAfterHandlePoEnd()
+    public async Task HandlePoEnd_with_empty_size_counts_closes_nothing()
     {
         var formation = new FormationChartProviderStub(new Dictionary<string, int> { ["Default"] = 20 });
         var pipeSize = new PipeSizeProviderStub(new Dictionary<string, string>());
@@ -43,18 +43,19 @@ public sealed class NdtBundleEnginePoEndTests
         var engine = TestEngineFactory.Create(formation, pipeSize, runtime);
 
         await runtime.EnsureInitializedAsync(CancellationToken.None);
-        runtime.ApplySlitContribution("PO-100", 1, ndtPipes: 12, threshold: 20, out _);
 
+        var closed = 0;
         await engine.HandlePoEndAsync(
             "PO-100",
             1,
-            (_, _, _) => Task.CompletedTask,
+            (_, _, _) =>
+            {
+                closed++;
+                return Task.CompletedTask;
+            },
             CancellationToken.None);
 
-        runtime.AdvanceOnPoEnd("PO-100", 1, threshold: 20);
-
-        Assert.Equal(1, runtime.GetEngineBatchNo("PO-100", 1));
-        Assert.Equal(1, runtime.GetBatchOffset("PO-100", 1));
+        Assert.Equal(0, closed);
     }
 
     [Fact]
@@ -88,7 +89,7 @@ public sealed class NdtBundleEnginePoEndTests
 
         Assert.Single(closed);
         Assert.Equal(15, closed[0]);
-        Assert.Equal(0, runtime.GetSizeCounts("PO-200", 2)["6"]);
+        Assert.Equal(0, runtime.GetSizeCounts("PO-200", 2).GetValueOrDefault("6"));
     }
 
     private sealed class FormationChartProviderStub : IFormationChartProvider
@@ -192,6 +193,18 @@ public sealed class NdtBundleEnginePoEndTests
 
         public Dictionary<string, int> GetSizeCounts(string poNumber, int millNo) =>
             new(Slot(poNumber, millNo).SizeCounts, StringComparer.OrdinalIgnoreCase);
+
+        public void IncrementSizeCount(string poNumber, int millNo, string sizeKey, int delta)
+        {
+            var counts = GetSizeCounts(poNumber, millNo);
+            counts.TryGetValue(sizeKey, out var current);
+            var next = current + delta;
+            if (next > 0)
+                counts[sizeKey] = next;
+            else
+                counts.Remove(sizeKey);
+            SetSizeCounts(poNumber, millNo, counts);
+        }
 
         public void SetSizeCounts(string poNumber, int millNo, IReadOnlyDictionary<string, int> counts) =>
             Slot(poNumber, millNo).SizeCounts = new Dictionary<string, int>(counts, StringComparer.OrdinalIgnoreCase);

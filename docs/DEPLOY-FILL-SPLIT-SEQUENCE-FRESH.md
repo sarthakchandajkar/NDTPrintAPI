@@ -132,13 +132,9 @@ All under `\\10.2.20.210\pas-sap\To SAP\TM\NDT\NDT Input Slit\` (and any copy ne
 | `PoLifecycleState-M1.json` … `M4.json` | Yes |
 | `ManualStationState\` (entire folder) | Yes if present (`EnableManualStationStateFiles` is false on mill templates; delete anyway) |
 
-**Printer JSON** (`MillPrinterSettings.json`, `MillPrinterSettings-M1.json` … `M4.json`): this is printer IP/port, not accumulation. Delete only if you will re-enter printers. Mill-1 falls back to `NdtTagPrinterAddress` `192.168.0.125` when its file is missing. Mills 2–4 have **no** fallback — if you delete their files, create empty per-mill files before first tag, e.g. `MillPrinterSettings-M2.json`:
+**Printer JSON** (`MillPrinterSettings.json`, `MillPrinterSettings-M1.json` … `M4.json`): mill-state JSON is no longer used. **Delete leftover printer JSON** along with runtime/lifecycle JSON. Printer IPs live in `dbo.Mill_Printer` (seed all four mills at `192.168.0.125:9100`). Shared Settings `PUT /api/Settings/printers` writes SQL; mill-n re-reads within ~2s. Mill-1 falls back to `NdtTagPrinterAddress` only when its SQL row is missing. Mills 2–4 have **no** fallback to another mill's printer.
 
-```json
-{ "mills": { "2": { "address": "PUT_MILL2_PRINTER_IP", "port": 9100 } } }
-```
-
-Shared dashboard saves printers to `MillPrinterSettings.json` (next to the Shared/base `NdtBundleRuntimeStateFile`), **not** the `-M{n}` files. Mill instances read `-M{n}`. Put printer IPs in the mill files, not only on Shared.
+Shared dashboard and mill instances share the same `Mill_Printer` table. Do not keep per-process JSON copies.
 
 #### 2.5 Skip leftover SAP slit files (`MinSourceFileLastWriteUtc`)
 
@@ -198,6 +194,9 @@ Run against `JazeeraMES_Prod` in SSMS, **after** the DELETE in step 2.1 so `Mill
 15. `docs/Mill_Sequence.sql` (`9e79619`) — `Mill_Sequence` + `Mill_Sequence_Audit`; insert mills 1–4 with `Current_Sequence = 0` (empty live max).
 16. `docs/NDT_Bundle_Alter_Voided.sql` (`9e79619`) — Voided columns; **drop + recreate** `CK_NDT_Bundle_Csv_Fill_State` including `'Voided'`.
 17. `docs/Ppc_Correction_Item_Alter_ReplacementBatch.sql` (`9e79619`) — `Replacement_NDT_Batch_No`.
+18. `docs/Bundle_Accumulation_AddTable.sql` — `Bundle_Accumulation` + `Bundle_Accumulation_Context` (open remainder; CHECK Pcs > 0).
+19. `docs/Po_Lifecycle_AddTable.sql` — `Po_Lifecycle` + `Po_Lifecycle_Audit`.
+20. `docs/Mill_Printer_AddTable.sql` — seed mills 1–4 at `192.168.0.125:9100`.
 
 Confirm CHECK after 16:
 
@@ -212,9 +211,7 @@ WHERE name = N'CK_NDT_Bundle_Csv_Fill_State';
 
 ### 4. `Split-MillStateFiles.ps1`
 
-**Not needed after this reset.** That script copies monolith JSON into `-M1`…`-M4`. You deleted those files on purpose. Mills create empty runtime JSON on first `EnsureInitialized`.
-
-Do **not** run the split against archived monolith JSON — that would restore old open `sizeCounts` and fail `RequireCleanFillCutover`.
+**Deleted.** Runtime, lifecycle, and printer state are SQL tables (`Bundle_Accumulation`, `Po_Lifecycle`, `Mill_Printer`). There is no JSON split and no migration. If leftover `NdtBundleRuntimeState*.json` / `PoLifecycleState*.json` / `MillPrinterSettings*.json` remain under the NDT Input Slit folder, startup throws (fresh reset required).
 
 ---
 
@@ -228,11 +225,7 @@ Do **not** run the split against archived monolith JSON — that would restore o
 
 2. Copy `deploy\instances\shared`, `mill-1`, `mill-2`, `mill-3`, `mill-4` into `C:\Apps\NdtBundleService\instances\`.
 
-3. In **each mill** `appsettings.Production.json`, replace `REPLACE_WITH_UNC` with:
-
-   `\\10.2.20.210\pas-sap\To SAP\TM\NDT\NDT Input Slit`
-
-   so files are `NdtBundleRuntimeState-M{n}.json` and `MillPrinterSettings-M{n}.json`.
+3. Confirm mill templates no longer point at `NdtBundleRuntimeState-M{n}.json` / `MillPrinterSettings-M{n}.json`. Leftover files under `\\10.2.20.210\pas-sap\To SAP\TM\NDT\NDT Input Slit` must be deleted or startup fails.
 
 4. Confirm overlays (already in templates):
 

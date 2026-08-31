@@ -71,7 +71,7 @@ public sealed class FormationChartSettingsService : IFormationChartSettingsServi
         {
             throw new InvalidOperationException(
                 $"Cannot write formation chart to '{path}'. The NdtBundleService Windows account needs Modify permission on that file or folder, " +
-                "or set NdtBundle:FormationChartCsvPath to a writable path (e.g. the same PAS share folder as NdtBundleRuntimeStateFile).",
+                "or set NdtBundle:FormationChartCsvPath to a writable path (e.g. the PAS share FormationChart.csv).",
                 ex);
         }
 

@@ -49,3 +49,13 @@ public sealed class MillOwnership : IMillOwnership
 
     public bool RunsMillWorkers { get; }
 }
+
+public static class MillOwnershipExtensions
+{
+    /// <summary>
+    /// Shared (empty owned set) may read/write every mill; mill-n only its own.
+    /// Use this — not <see cref="IMillOwnership.Owns"/> — for SQL mill-state tables.
+    /// </summary>
+    public static bool Allows(this IMillOwnership ownership, int millNo) =>
+        ownership.OwnedMills.Count == 0 || ownership.Owns(millNo);
+}

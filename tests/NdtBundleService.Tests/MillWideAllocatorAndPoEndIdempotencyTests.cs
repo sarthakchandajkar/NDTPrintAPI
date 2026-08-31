@@ -32,35 +32,28 @@ public sealed class MillWideAllocatorAndPoEndIdempotencyTests : IDisposable
     }
 
     [Fact]
-    public async Task Overlapping_POs_close_order_yields_unique_mill_wide_sequences()
+    public async Task Overlapping_POs_keep_independent_size_counts()
     {
         var store = CreateStore();
         await store.EnsureInitializedAsync(CancellationToken.None);
 
-        store.SetSizeCounts("1000060364", 1, new Dictionary<string, int> { ["Default"] = 5 });
-        var b1 = store.CloseBundle("1000060363", 1, 15, 15);
-        Assert.Equal(0, b1.FinalSequence);
-        var b2 = store.CloseBundle("1000060363", 1, 15, 15);
-        Assert.Equal(0, b2.FinalSequence);
-        var aFlush = store.CloseBundle("1000060364", 1, 5, 15);
-        Assert.Equal(0, aFlush.FinalSequence);
+        store.IncrementSizeCount("1000060363", 1, "Default", 15);
+        store.IncrementSizeCount("1000060364", 1, "Default", 5);
+        store.ClearOpenAccumulation("1000060363", 1);
+
         Assert.Equal(0, store.GetRunningTotal("1000060363", 1));
-        Assert.Equal(0, store.GetRunningTotal("1000060364", 1));
+        Assert.Equal(5, store.GetRunningTotal("1000060364", 1));
     }
 
     [Fact]
-    public async Task ApplySlitContribution_does_not_burn_sequence_without_close()
+    public async Task IncrementSizeCount_does_not_allocate_sequence()
     {
         var store = CreateStore();
         await store.EnsureInitializedAsync(CancellationToken.None);
 
-        store.ApplySlitContribution("PO-A", 1, 15, threshold: 15, out var total1);
-        Assert.Equal(15, total1);
-        store.ApplySlitContribution("PO-A", 1, 15, threshold: 15, out var total2);
-        Assert.Equal(30, total2);
-
-        var close = store.CloseBundle("PO-A", 1, 20, 15);
-        Assert.Equal(0, close.FinalSequence);
+        store.IncrementSizeCount("PO-A", 1, "Default", 15);
+        store.IncrementSizeCount("PO-A", 1, "Default", 15);
+        Assert.Equal(30, store.GetRunningTotal("PO-A", 1));
     }
 
     [Fact]
@@ -74,8 +67,6 @@ public sealed class MillWideAllocatorAndPoEndIdempotencyTests : IDisposable
     {
         var options = new NdtBundleOptions
         {
-            EnableNdtBundleRuntimeStatePersistence = true,
-            NdtBundleRuntimeStateFile = _statePath,
             UseSqlServerForBundles = false,
             InitialMillBatchNumbers = new Dictionary<string, string>
             {
@@ -84,8 +75,6 @@ public sealed class MillWideAllocatorAndPoEndIdempotencyTests : IDisposable
         };
         return new NdtBundleRuntimeStateStore(
             new TestOptionsMonitor<NdtBundleOptions>(options),
-            new EmptyBundleRepo(),
-            new EmptyActivePo(),
             TestMillOwnership.Monolith(),
             Microsoft.Extensions.Logging.Abstractions.NullLogger<NdtBundleRuntimeStateStore>.Instance);
     }

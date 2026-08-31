@@ -44,7 +44,7 @@ public sealed class CsvBundleOutputWriterPrintStatusTests
         await writer.WriteBundleAsync(SampleRecord, 42, 15, CancellationToken.None, Guid.NewGuid());
 
         Assert.Equal([BundlePrintStatus.Pending, BundlePrintStatus.PrintFailed], repo.StatusTransitions);
-        Assert.Contains("returned false", repo.LastError ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("no printer configured for mill", repo.LastError ?? string.Empty, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -208,7 +208,7 @@ public sealed class CsvBundleOutputWriterPrintStatusTests
     {
         public int Calls { get; private set; }
 
-        public Task<bool> PrintBundleTagAsync(
+        public Task<PrinterSendResult> PrintBundleTagAsync(
             InputSlitRecord record,
             int batchNumber,
             int totalNdtPcs,
@@ -216,7 +216,7 @@ public sealed class CsvBundleOutputWriterPrintStatusTests
             CancellationToken cancellationToken = default)
         {
             Calls++;
-            return Task.FromResult(true);
+            return Task.FromResult(new PrinterSendResult(true));
         }
     }
 
@@ -289,7 +289,7 @@ public sealed class CsvBundleOutputWriterPrintStatusTests
 
     private sealed class StubTagPrinter(bool returnsSuccess = true, bool throwsException = false) : INdtTagPrinter
     {
-        public Task<bool> PrintBundleTagAsync(
+        public Task<PrinterSendResult> PrintBundleTagAsync(
             InputSlitRecord record,
             int batchNumber,
             int totalNdtPcs,
@@ -299,7 +299,9 @@ public sealed class CsvBundleOutputWriterPrintStatusTests
             if (throwsException)
                 throw new InvalidOperationException("printer offline");
 
-            return Task.FromResult(returnsSuccess);
+            return Task.FromResult(returnsSuccess
+                ? new PrinterSendResult(true)
+                : new PrinterSendResult(false, "no printer configured for mill 2"));
         }
     }
 }

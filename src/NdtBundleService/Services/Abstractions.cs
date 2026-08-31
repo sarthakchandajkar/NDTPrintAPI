@@ -517,24 +517,12 @@ public interface IMillSlitLiveNdtAccumulator
 }
 
 /// <summary>
-/// Running NDT total per (PO, Mill) for file-close bookkeeping. Does not allocate batch numbers ?
-/// close + fill-to-target own numbering.
+/// Running NDT total per (PO, Mill) for file-close bookkeeping. Batch numbers are allocated at close.
 /// </summary>
 public interface INdtBatchStateService
 {
     /// <summary>
-    /// Updates running total for (poNumber, millNo) by ndtPipes. Returns batch number 0 (unused under
-    /// fill-to-target), the new total so far, and the formation-chart threshold.
-    /// </summary>
-    Task<(int BatchNumber, int TotalSoFar, int Threshold)> GetBatchForRecordAsync(
-        string poNumber,
-        int millNo,
-        int ndtPipes,
-        CancellationToken cancellationToken,
-        string? knownPipeSize = null);
-
-    /// <summary>
-    /// Call when PO End is triggered (e.g. Simulate PO End). Resets total and advances batch for the next bundle.
+    /// Historical PO-end numbering hook. No-op under fill-to-target (sequence lives in Mill_Sequence).
     /// </summary>
     Task IncrementBatchOnPoEndAsync(string poNumber, int millNo, CancellationToken cancellationToken);
 }
@@ -579,7 +567,7 @@ public interface IWipLabelProvider
 /// </summary>
 public interface INdtTagPrinter
 {
-    Task<bool> PrintBundleTagAsync(InputSlitRecord record, int batchNumber, int totalNdtPcs, bool isReprint, CancellationToken cancellationToken = default);
+    Task<PrinterSendResult> PrintBundleTagAsync(InputSlitRecord record, int batchNumber, int totalNdtPcs, bool isReprint, CancellationToken cancellationToken = default);
 }
 
 /// <summary>Reprints an NDT bundle tag with the existing "Reprint" ZPL marker and updates print status.</summary>

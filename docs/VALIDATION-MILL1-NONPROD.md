@@ -6,7 +6,7 @@
 
 1. Apply `docs/App_Setting_AddTable.sql` and `docs/Mill_Instance_Lease.sql` on the **non-prod** database.
 2. Copy `deploy/instances/mill-1/appsettings.Production.json` to a non-prod content root; point folders + SQL at non-prod.
-3. Run `Split-MillStateFiles.ps1 -MillNo 1` against a copy of runtime state (or start with empty mill-1 files + `InitialMillBatchNumbers`).
+3. Apply `docs/Bundle_Accumulation_AddTable.sql`, `docs/Po_Lifecycle_AddTable.sql`, `docs/Mill_Printer_AddTable.sql` on the **non-prod** database. Delete leftover mill-state JSON (no split script).
 4. On the **monolith** (or Shared-only stand-in) still pointing at non-prod if needed:
    - `InputSlitProcessMills` must **not** include `1` (e.g. `[]` or omit Mill-1)
    - `PlcHandshake.Mills` Mill-1: `PlcHandshakeEnabled: false`
@@ -17,7 +17,7 @@
 
 1. Place / generate a Mill-1 input slit file for a test PO; confirm Mill-1 instance stamps fill-to-target / Constant as configured and writes NDT Input Slit CSV.
 2. Trigger PLC PO-end (or Test `po-end` against **localhost:5001**, not Shared).
-3. Confirm bundle close, tag print path, runtime state `NdtBundleRuntimeState-M1.json` sequence advances.
+3. Confirm bundle close, tag print path, `Bundle_Accumulation` for mill 1 is empty after close, `Mill_Sequence` advances.
 4. Confirm Shared (if running) still serves reconcile/read APIs without mill workers.
 5. Stop Mill-1; confirm monolith-with-Mill-1-disabled does **not** process Mill-1 slits while Mill-1 is down (expected gap until Mill-1 restarts).
 

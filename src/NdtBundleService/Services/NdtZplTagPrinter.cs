@@ -35,23 +35,22 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
         _logger = logger;
     }
 
-    public async Task<bool> PrintBundleTagAsync(InputSlitRecord record, int batchNumber, int totalNdtPcs, bool isReprint, CancellationToken cancellationToken = default)
+    public async Task<PrinterSendResult> PrintBundleTagAsync(InputSlitRecord record, int batchNumber, int totalNdtPcs, bool isReprint, CancellationToken cancellationToken = default)
     {
         if (!_zplToggle.IsEnabled)
         {
             _logger.LogWarning(
                 "NDT tag not sent to printer: ZPL/print is off (NdtBundle:EnableNdtTagZplAndPrint=false or disabled via POST /api/Status/zpl-generation).");
-            return false;
+            return new PrinterSendResult(false, "ZPL/print is off.");
         }
 
         var opt = _options.CurrentValue;
         var (address, printerPort, printerConfigured) = _millPrinters.ResolveForMill(record.MillNo);
         if (!printerConfigured)
         {
-            _logger.LogWarning(
-                "NDT tag not sent: no printer configured for Mill {MillNo} (Settings → printers or NdtBundle:NdtTagPrinterAddress for Mill 1).",
-                record.MillNo);
-            return false;
+            var error = $"no printer configured for mill {record.MillNo}";
+            _logger.LogWarning("NDT tag not sent: {Error}.", error);
+            return new PrinterSendResult(false, error);
         }
 
         var ndtBatchNoFormatted = FormatNdtBatchNo(batchNumber, record.MillNo);
@@ -102,10 +101,14 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
 
         var sendResult = await _sender.SendAsync(address, printerPort, zplBytes, cancellationToken).ConfigureAwait(false);
         if (sendResult.Success)
+        {
             _logger.LogInformation("Printed NDT tag {BatchNo} ({Pcs} pcs) to {Address}.", ndtBatchNoFormatted, totalNdtPcs, address);
-        else
-            _logger.LogWarning("Failed to send NDT tag {BatchNo} to printer. {Detail}", ndtBatchNoFormatted, sendResult.ErrorDetail ?? "");
-        return sendResult.Success;
+            return sendResult;
+        }
+
+        var unreachable = $"Printer unreachable at {address}:{printerPort}: {sendResult.ErrorDetail}";
+        _logger.LogWarning("Failed to send NDT tag {BatchNo} to printer. {Detail}", ndtBatchNoFormatted, unreachable);
+        return new PrinterSendResult(false, unreachable);
     }
 
     private async Task TrySaveBundleZplAsync(

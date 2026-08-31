@@ -22,18 +22,11 @@ Templates live in repo under `deploy/instances/{shared,mill-1..4}/`. Copy them i
 1. `docs/App_Setting_AddTable.sql` — shared ZPL print toggle
 2. `docs/Mill_Instance_Lease.sql` — exclusive mill lease
 3. Fill-to-target schema already applied (`docs/NDT_Bundle_Alter_CsvFill.sql`)
+4. `docs/Bundle_Accumulation_AddTable.sql`, `docs/Po_Lifecycle_AddTable.sql`, `docs/Mill_Printer_AddTable.sql`
 
-## One-time state split
+## Mill state is SQL (no JSON split)
 
-```powershell
-.\scripts\Split-MillStateFiles.ps1 `
-  -SourceRuntimeStateFile "\\...\NDT Input Slit\NdtBundleRuntimeState.json"
-```
-
-Writes `NdtBundleRuntimeState-M{n}.json`, `MillPrinterSettings-M{n}.json`, `PoLifecycleState-M{n}.json`. Does **not** delete monolith sources.
-Fails loudly if lifecycle JSON is not an array (would otherwise write `[]` and drop Closed phases) or if per-mill entry counts do not match the source.
-
-Point each mill instance `NdtBundleRuntimeStateFile` / `MillPrinterSettingsFile` at the split files.
+`Split-MillStateFiles.ps1` is deleted. Open remainder is `Bundle_Accumulation`; PO drain/closed is `Po_Lifecycle`; printers are `Mill_Printer` (seeded `192.168.0.125:9100`). Delete leftover `NdtBundleRuntimeState*.json`, `PoLifecycleState*.json`, and `MillPrinterSettings*.json` or mill/shared startup throws.
 
 ## Install / update services
 
@@ -89,3 +82,9 @@ See [VALIDATION-MILL1-NONPROD.md](./VALIDATION-MILL1-NONPROD.md).
 ## Dashboard gaps
 
 See [DASHBOARD-MULTI-INSTANCE-GAPS.md](./DASHBOARD-MULTI-INSTANCE-GAPS.md).
+
+## Follow-up (not this release): station printers
+
+Keep `Mill_Printer` as mill 1–4 only. Station tags (Visual, Revisual, Big Hydro, Four-Head Hydro) need a **separate Shared-only table**, not extra mill numbers.
+
+Today `ManualNdtTagService.TryPrintTagAsync` sends paper to the **bundle mill** via `ResolveForMill(state.MillNo)`. Adding station printers is a **behaviour change**: a Mill-2 bundle printed at Visual would come out on the Visual printer, not Mill-2’s. Resolve the four station targets **by station**, not by mill. Seed Visual and Revisual to the **same IP** (they share a physical printer).

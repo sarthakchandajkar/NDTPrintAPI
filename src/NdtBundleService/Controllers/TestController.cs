@@ -1244,16 +1244,17 @@ ORDER BY
     }
 
     /// <summary>
-    /// Raises in-memory mill/PO batch sequence floors from printed bundles in SQL/CSV and persists runtime state.
-    /// Run after correcting phantom rows or restoring from backup.
+    /// Historical: used to raise JSON mill/PO batch floors from printed bundles.
+    /// Numbering is <c>Mill_Sequence</c>; this endpoint is a no-op kept so operators do not hit 404.
     /// </summary>
     [HttpPost("sync-mill-batch-sequences")]
-    public async Task<IActionResult> SyncMillBatchSequences(CancellationToken cancellationToken)
+    public Task<IActionResult> SyncMillBatchSequences(CancellationToken cancellationToken)
     {
-        await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
-        await _runtimeState.SyncBatchSequencesFromBundlesAsync(cancellationToken).ConfigureAwait(false);
-        await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
-        return Ok(new { Message = "PO/mill runtime slots saved. Mill sequence is allocated from Mill_Sequence, not this JSON file." });
+        _ = cancellationToken;
+        return Task.FromResult<IActionResult>(Ok(new
+        {
+            Message = "No-op: bundle sequence is allocated from Mill_Sequence. Runtime remainder is Bundle_Accumulation (SQL)."
+        }));
     }
 
     /// <summary>
@@ -1291,9 +1292,6 @@ ORDER BY
                 cmd.Parameters.AddWithValue("@BundleNo", batchNo);
                 await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
-
-            await _runtimeState.SyncBatchSequencesFromBundlesAsync(cancellationToken).ConfigureAwait(false);
-            await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
         }
 
         return Ok(new

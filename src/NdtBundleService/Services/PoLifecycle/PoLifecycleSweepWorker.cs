@@ -163,8 +163,7 @@ public sealed class PoLifecycleSweepWorker : BackgroundService
         await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
 
         var sizeCounts = _runtimeState.GetSizeCounts(entry.PoNumber, entry.MillNo);
-        var running = _runtimeState.GetRunningTotal(entry.PoNumber, entry.MillNo);
-        var hasOpen = running > 0 || sizeCounts.Values.Any(v => v > 0);
+        var hasOpen = NdtBundleRuntimeStateLogic.HasOpenPartialBundle(sizeCounts);
         if (!hasOpen)
             return;
 
@@ -189,10 +188,11 @@ public sealed class PoLifecycleSweepWorker : BackgroundService
                     return;
 
                 sizeCounts = _runtimeState.GetSizeCounts(entry.PoNumber, entry.MillNo);
-                running = _runtimeState.GetRunningTotal(entry.PoNumber, entry.MillNo);
-                hasOpen = running > 0 || sizeCounts.Values.Any(v => v > 0);
+                hasOpen = NdtBundleRuntimeStateLogic.HasOpenPartialBundle(sizeCounts);
                 if (!hasOpen)
                     return;
+
+                var running = _runtimeState.GetRunningTotal(entry.PoNumber, entry.MillNo);
 
                 _logger.LogWarning(
                     "Orphan open bundle detected for Closed PO {PO} Mill {Mill} (running={Running}); auto close-and-print. CorrelationId {CorrelationId}",

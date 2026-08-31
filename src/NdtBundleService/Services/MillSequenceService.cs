@@ -73,7 +73,8 @@ public interface IMillSequenceService
     Task EnsureScanDoesNotExceedTableAsync(int millNo, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Increment <c>Mill_Sequence</c> and insert <c>NDT_Bundle</c> in one transaction.
+    /// Increment <c>Mill_Sequence</c>, insert <c>NDT_Bundle</c>, and delete armed
+    /// <c>Bundle_Accumulation</c> in one transaction.
     /// Throws when SQL cannot allocate; does not print or invent a batch number.
     /// </summary>
     Task<(int Sequence, string Formatted)> AllocateAndInsertBundleAsync(
@@ -87,15 +88,18 @@ public sealed class MillSequenceService : IMillSequenceService
 
     private readonly IOptionsMonitor<NdtBundleOptions> _options;
     private readonly INdtBundleRepository _bundles;
+    private readonly INdtBundleRuntimeStateStore _runtimeState;
     private readonly ILogger<MillSequenceService> _logger;
 
     public MillSequenceService(
         IOptionsMonitor<NdtBundleOptions> options,
         INdtBundleRepository bundles,
+        INdtBundleRuntimeStateStore runtimeState,
         ILogger<MillSequenceService> logger)
     {
         _options = options;
         _bundles = bundles;
+        _runtimeState = runtimeState;
         _logger = logger;
     }
 
@@ -123,6 +127,9 @@ public sealed class MillSequenceService : IMillSequenceService
             pending.BundleNo = formatted;
             await _bundles
                 .RecordBundlePendingPrintInTxAsync(conn, tx, pending, cancellationToken)
+                .ConfigureAwait(false);
+            await _runtimeState
+                .DeleteArmedSizeInTxAsync(conn, tx, pending.PoNumber, pending.MillNo, cancellationToken)
                 .ConfigureAwait(false);
             await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
             return (seq, formatted);
@@ -159,12 +166,11 @@ public sealed class MillSequenceService : IMillSequenceService
 
             var scan = await GetLiveMaxSequenceAsync(conn, tx: null, mill, cancellationToken).ConfigureAwait(false);
             var config = ParseInitialSeed(mill);
-            var leftoverJson = ReadLeftoverJsonMillMaxSequence(mill);
-            var seed = Math.Max(scan, Math.Max(config, leftoverJson));
+            var seed = Math.Max(scan, config);
 
             await using var ins = new SqlCommand(@"
 INSERT INTO dbo.Mill_Sequence (Mill_No, Current_Sequence, Updated_By, Reason)
-VALUES (@Mill, @Seq, N'StartupSeed', N'Seed missing row from scan/config/JSON');", conn);
+VALUES (@Mill, @Seq, N'StartupSeed', N'Seed missing row from scan/config');", conn);
             ins.Parameters.AddWithValue("@Mill", mill);
             ins.Parameters.AddWithValue("@Seq", seed);
             await ins.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
@@ -173,8 +179,8 @@ VALUES (@Mill, @Seq, N'StartupSeed', N'Seed missing row from scan/config/JSON');
                 "Seed missing row", cancellationToken).ConfigureAwait(false);
 
             _logger.LogInformation(
-                "Mill_Sequence mill {Mill} seeded Current_Sequence={Seq} (scan={Scan}, config={Config}, json={Json}).",
-                mill, seed, scan, config, leftoverJson);
+                "Mill_Sequence mill {Mill} seeded Current_Sequence={Seq} (scan={Scan}, config={Config}).",
+                mill, seed, scan, config);
         }
     }
 
@@ -427,36 +433,6 @@ WHERE Mill_No = @Mill AND Current_Sequence = @Old;", conn, tx))
         await InsertAuditAsync(conn, tx, millNo, sourceSequence, next, "MergeRollback", updatedBy, reason, cancellationToken)
             .ConfigureAwait(false);
         return true;
-    }
-
-    private int ReadLeftoverJsonMillMaxSequence(int millNo)
-    {
-        try
-        {
-            var path = (Opt.NdtBundleRuntimeStateFile ?? string.Empty).Trim();
-            if (string.IsNullOrEmpty(path))
-            {
-                var folder = (Opt.OutputBundleFolder ?? string.Empty).Trim();
-                if (string.IsNullOrEmpty(folder))
-                    return 0;
-                path = Path.Combine(folder, "NdtBundleRuntimeState.json");
-            }
-
-            if (!File.Exists(path))
-                return 0;
-
-            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
-            if (!doc.RootElement.TryGetProperty("millMaxSequence", out var map))
-                return 0;
-            var key = millNo.ToString(CultureInfo.InvariantCulture);
-            if (!map.TryGetProperty(key, out var el))
-                return 0;
-            return el.TryGetInt32(out var seq) ? Math.Max(0, seq) : 0;
-        }
-        catch
-        {
-            return 0;
-        }
     }
 
     private int ParseInitialSeed(int millNo)

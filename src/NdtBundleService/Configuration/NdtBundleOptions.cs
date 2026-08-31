@@ -105,21 +105,6 @@ public class NdtBundleOptions
     public bool EnableManualStationStateFiles { get; set; }
 
     /// <summary>
-    /// When true, persists per-(PO, mill) bundle sequence, running NDT total, and engine size counts to
-    /// <see cref="NdtBundleRuntimeStateFile"/> (or OutputBundleFolder\NdtBundleRuntimeState.json) so tag numbering continues after restart.
-    /// </summary>
-    public bool EnableNdtBundleRuntimeStatePersistence { get; set; } = true;
-
-    /// <summary>Optional full path for runtime state JSON. When empty, uses OutputBundleFolder\NdtBundleRuntimeState.json.</summary>
-    public string? NdtBundleRuntimeStateFile { get; set; }
-
-    /// <summary>
-    /// Optional full path for per-mill printer settings JSON (e.g. MillPrinterSettings-M1.json).
-    /// When empty, derived from the directory of <see cref="NdtBundleRuntimeStateFile"/> or OutputBundleFolder.
-    /// </summary>
-    public string? MillPrinterSettingsFile { get; set; }
-
-    /// <summary>
     /// Optional last-known NDT batch number per mill (keys <c>"1"</c>–<c>"4"</c>, values e.g. <c>1226100029</c>).
     /// Used only to INSERT a <c>Mill_Sequence</c> row that does not exist yet. Ignored once the row is present.
     /// </summary>
@@ -413,8 +398,5 @@ public class NdtBundleOptions
 
     /// <summary>Password-protected dashboard settings (formation chart thresholds, per-mill printers).</summary>
     public DashboardSettingsOptions DashboardSettings { get; set; } = new();
-
-    /// <summary>Prunes idle completed PO/mill slots from persisted runtime state (see <see cref="RuntimeStatePruningOptions"/>).</summary>
-    public RuntimeStatePruningOptions RuntimeStatePruning { get; set; } = new();
 }
 

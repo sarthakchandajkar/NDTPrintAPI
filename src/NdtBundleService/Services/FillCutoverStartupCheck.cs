@@ -7,7 +7,7 @@ namespace NdtBundleService.Services;
 
 /// <summary>
 /// Quiet-drain cutover guard: refuse to start when pre-migration awaiting-recon rows remain,
-/// fill targets are missing on printed bundles, or runtime JSON still has open provisional/partial state.
+/// fill targets are missing on printed bundles, or Bundle_Accumulation still has open rows.
 /// Mill mode scopes SQL + runtime checks to the owned mill; Monolith checks all mills.
 /// </summary>
 public sealed class FillCutoverStartupCheck : IHostedService
@@ -17,7 +17,6 @@ public sealed class FillCutoverStartupCheck : IHostedService
     private readonly INdtBundleRuntimeStateStore _runtimeState;
     private readonly IMillOwnership _ownership;
     private readonly ILogger<FillCutoverStartupCheck> _logger;
-    private readonly IMillSequenceService? _millSequence;
 
     public FillCutoverStartupCheck(
         IOptionsMonitor<NdtBundleOptions> options,
@@ -32,7 +31,7 @@ public sealed class FillCutoverStartupCheck : IHostedService
         _runtimeState = runtimeState;
         _ownership = ownership;
         _logger = logger;
-        _millSequence = millSequence;
+        _ = millSequence;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -46,12 +45,6 @@ public sealed class FillCutoverStartupCheck : IHostedService
         }
 
         await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
-
-        if (_millSequence is { IsEnabled: true })
-        {
-            await _runtimeState.ReconcileCommittedInFlightAsync(_millSequence, cancellationToken)
-                .ConfigureAwait(false);
-        }
 
         var millNo = _ownership.SingleOwnedMill;
         var awaiting = await _csvFill.HasAwaitingCsvReconRowsAsync(cancellationToken, millNo).ConfigureAwait(false);
@@ -76,7 +69,7 @@ public sealed class FillCutoverStartupCheck : IHostedService
                 ? $"printed bundles missing Target_Ndt_Pcs for mill {millNo.Value}"
                 : "printed bundles missing Target_Ndt_Pcs");
         if (openRuntime)
-            reasons.Add("NdtBundleRuntimeState.json has open ProvisionalBatchNo / RunningTotal / sizeCounts");
+            reasons.Add("Bundle_Accumulation has open size-count rows");
 
         var detail = string.Join("; ", reasons);
         _logger.LogError(

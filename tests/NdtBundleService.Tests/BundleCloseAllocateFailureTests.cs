@@ -139,10 +139,9 @@ public sealed class BundleCloseAllocateFailureTests
     }
 
     [Fact]
-    public async Task SqlCommitted_crash_before_Clear_does_not_double_allocate_on_next_close()
+    public async Task Successful_close_clears_size_so_zero_pipe_slit_does_not_allocate_again()
     {
         var mill = new FakeMillSequence();
-        mill.SimulateCommitted(NdtBundleSequence.Format(1, 1));
         var printer = new CountingTagPrinter();
         var repo = new TrackingRepo();
         var writer = new CsvBundleOutputWriter(
@@ -156,7 +155,6 @@ public sealed class BundleCloseAllocateFailureTests
         var runtime = new ProductionLikeRuntime();
         await runtime.EnsureInitializedAsync(CancellationToken.None);
         runtime.SetSizeCounts(Sample.PoNumber, 1, new Dictionary<string, int> { ["Default"] = 11 });
-        runtime.MarkCloseInFlight(Sample.PoNumber, 1, 11);
 
         var engine = TestEngineFactory.Create(
             new FormationStub(10),
@@ -172,11 +170,17 @@ public sealed class BundleCloseAllocateFailureTests
             "Default");
 
         Assert.Equal(0, runtime.GetSizeCounts(Sample.PoNumber, 1).GetValueOrDefault("Default"));
-        Assert.False(runtime.HasCloseInFlight(Sample.PoNumber, 1));
         Assert.Equal(1, mill.CurrentSequence);
         Assert.Single(mill.InsertedBundleNos);
-        Assert.Equal(0, printer.Calls);
-        Assert.Empty(repo.StatusTransitions);
+
+        await engine.ProcessSlitRecordAsync(
+            new InputSlitRecord { PoNumber = Sample.PoNumber, MillNo = 1, NdtPipes = 0 },
+            Write(writer),
+            CancellationToken.None,
+            "Default");
+
+        Assert.Equal(1, mill.CurrentSequence);
+        Assert.Single(mill.InsertedBundleNos);
     }
 
     private static Func<InputSlitRecord, int, int, Task> Write(IBundleOutputWriter writer) =>
@@ -277,12 +281,12 @@ public sealed class BundleCloseAllocateFailureTests
     private sealed class CountingTagPrinter : INdtTagPrinter
     {
         public int Calls { get; private set; }
-        public Task<bool> PrintBundleTagAsync(
+        public Task<PrinterSendResult> PrintBundleTagAsync(
             InputSlitRecord record, int batchNumber, int totalNdtPcs, bool isReprint,
             CancellationToken cancellationToken = default)
         {
             Calls++;
-            return Task.FromResult(true);
+            return Task.FromResult(new PrinterSendResult(true));
         }
     }
 

@@ -25,16 +25,14 @@ public sealed class Phase3F2ReconAndGracePinTests
             (_, _, _) => Task.CompletedTask,
             CancellationToken.None);
 
-        Assert.Equal(1, runtime.GetEngineBatchNo("1000060163", 1));
         Assert.Equal(0, runtime.GetSizeCounts("1000060163", 1).GetValueOrDefault("Default"));
         Assert.Equal(0, runtime.GetRunningTotal("1000060163", 1));
 
-        // CSV fill stamps against the closed target without ApplySlitContribution — runtime stays frozen.
+        // CSV fill stamps against the closed target without IncrementSizeCount — runtime stays frozen.
         var stamp = CsvFillLogic.ComputeAfterStamp("1226100001", targetNdtPcs: 11, csvFilledBefore: 0, fileNdtPipes: 11, 20);
         Assert.Equal(CsvFillState.CsvComplete, stamp.FillState);
         Assert.Equal(0, runtime.GetSizeCounts("1000060163", 1).GetValueOrDefault("Default"));
         Assert.Equal(0, runtime.GetRunningTotal("1000060163", 1));
-        Assert.Equal(1, runtime.GetEngineBatchNo("1000060163", 1));
     }
 
     [Fact]
@@ -94,7 +92,6 @@ public sealed class Phase3F2ReconAndGracePinTests
         Assert.Single(closed);
         Assert.Equal(11, closed[0].Pcs);
         Assert.Equal(0, closed[0].Batch);
-        Assert.Equal(2, runtime.GetEngineBatchNo("1000060163", 1));
         Assert.Equal(0, runtime.GetSizeCounts("1000060163", 1).GetValueOrDefault("Default"));
     }
 

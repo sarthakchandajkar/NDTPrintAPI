@@ -66,6 +66,7 @@ public static class NdtBundleServiceCollectionExtensions
         services.AddSingleton<IOutputSlitSapStatusRepository, OutputSlitSapStatusRepository>();
         services.AddSingleton<IPpcCorrectionRepository, PpcCorrectionRepository>();
         services.AddSingleton<IMillSequenceService, MillSequenceService>();
+        services.AddSingleton<INdtBundleRuntimeStateStore, NdtBundleRuntimeStateStore>();
         services.AddSingleton<IResubmitDriftService, ResubmitDriftService>();
         services.AddSingleton<IReconcileSyncService, ReconcileSyncService>();
         services.AddSingleton<ISqlTraceabilityWriteTracker, SqlTraceabilityWriteTracker>();
@@ -95,13 +96,13 @@ public static class NdtBundleServiceCollectionExtensions
         }
 
         services.AddHostedService<SqlTraceabilityStartupCheck>();
+        services.AddHostedService<LegacyJsonStateStartupCheck>();
         services.AddHostedService<SourceFileEligibilityStartupLog>();
         services.AddHostedService<PoPlanCacheWarmupService>();
     }
 
     private static void AddMillSingletonServices(IServiceCollection services)
     {
-        services.AddSingleton<INdtBundleRuntimeStateStore, NdtBundleRuntimeStateStore>();
         services.AddSingleton<IBundleEngine, NdtBundleEngine>();
         services.AddSingleton<IBundleOutputWriter, CsvBundleOutputWriter>();
         services.AddSingleton<INdtBatchStateService, NdtBatchStateService>();
@@ -179,7 +180,7 @@ public static class NdtBundleServiceCollectionExtensions
 
         if (role.IsMonolith || role.IsMill)
         {
-            // Seed/guard Mill_Sequence before FillCutover EnsureInitialized (which may rewrite runtime JSON).
+            // Seed/guard Mill_Sequence before FillCutover (open Bundle_Accumulation EXISTS).
             services.AddHostedService<MillSequenceStartupGuard>();
             services.AddHostedService<FillCutoverStartupCheck>();
             // Lease claim must complete before mill workers StartAsync (registration order = start order).
