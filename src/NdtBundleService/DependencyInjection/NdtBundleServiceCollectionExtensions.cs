@@ -90,6 +90,7 @@ public static class NdtBundleServiceCollectionExtensions
 
         if (role.IsMonolith || role.EnableDashboardApi)
         {
+            services.AddSingleton<IStationPrinterSettingsService, StationPrinterSettingsService>();
             services.AddSingleton<IManualNdtTagService, ManualNdtTagService>();
             services.AddSingleton<IReconcileBundleTagService, ReconcileBundleTagService>();
             services.AddSingleton<IBundleMergeService, BundleMergeService>();

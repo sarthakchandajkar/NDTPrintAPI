@@ -20,6 +20,7 @@ public sealed class SettingsController : ControllerBase
     private readonly SettingsAuthService _auth;
     private readonly IFormationChartSettingsService _formationChart;
     private readonly IMillPrinterSettingsService _millPrinters;
+    private readonly IStationPrinterSettingsService? _stationPrinters;
     private readonly IPlcClient _plcClient;
     private readonly PlcConnectionHealth _plcHealth;
     private readonly PoEndDetectionDiagnostics _poEndDiagnostics;
@@ -48,11 +49,13 @@ public sealed class SettingsController : ControllerBase
         IZplGenerationToggle zplToggle,
         IMillSequenceService millSequence,
         IOptions<NdtBundleOptions> options,
-        ILogger<SettingsController> logger)
+        ILogger<SettingsController> logger,
+        IStationPrinterSettingsService? stationPrinters = null)
     {
         _auth = auth;
         _formationChart = formationChart;
         _millPrinters = millPrinters;
+        _stationPrinters = stationPrinters;
         _plcClient = plcClient;
         _plcHealth = plcHealth;
         _poEndDiagnostics = poEndDiagnostics;
@@ -620,7 +623,31 @@ public sealed class SettingsController : ControllerBase
             });
         }
 
-        return Ok(new { Mills = results });
+        var stationResults = new List<object>();
+        if (_stationPrinters is not null)
+        {
+            var stations = await _stationPrinters.GetAllAsync(cancellationToken).ConfigureAwait(false);
+            foreach (var s in stations)
+            {
+                var resolved = _stationPrinters.Resolve(s.StationCode);
+                var reachable = resolved.Configured &&
+                                await TcpProbeAsync(resolved.Address, resolved.Port, cancellationToken).ConfigureAwait(false);
+                stationResults.Add(new
+                {
+                    stationCode = s.StationCode,
+                    displayName = StationPrinterTarget.DisplayName(s.StationCode),
+                    address = s.Address,
+                    port = s.Port,
+                    effectiveAddress = resolved.Address,
+                    effectivePort = resolved.Port,
+                    configured = resolved.Configured,
+                    reachable,
+                    status = !resolved.Configured ? "NotConfigured" : reachable ? "Ready" : "Unreachable"
+                });
+            }
+        }
+
+        return Ok(new { Mills = results, Stations = stationResults });
     }
 
     [HttpPut("printers")]
@@ -634,6 +661,11 @@ public sealed class SettingsController : ControllerBase
         if (request?.Mills is null)
             return BadRequest(new { Message = "Mills array is required." });
 
+        if (request.Stations is { Count: > 0 } && _stationPrinters is null)
+        {
+            return BadRequest(new { Message = "Station printers can only be saved on Shared." });
+        }
+
         var endpoints = request.Mills
             .Where(m => m.MillNo is >= 1 and <= 4)
             .Select(m => new MillPrinterEndpoint(
@@ -643,7 +675,21 @@ public sealed class SettingsController : ControllerBase
             .ToList();
 
         await _millPrinters.SaveAllAsync(endpoints, cancellationToken).ConfigureAwait(false);
-        return Ok(new { Message = "Printer settings saved.", Count = endpoints.Count });
+
+        var stationCount = 0;
+        if (_stationPrinters is not null && request.Stations is { Count: > 0 })
+        {
+            var stationEndpoints = request.Stations
+                .Select(s => new StationPrinterEndpoint(
+                    (s.StationCode ?? string.Empty).Trim(),
+                    (s.Address ?? string.Empty).Trim(),
+                    s.Port > 0 ? s.Port : 9100))
+                .ToList();
+            await _stationPrinters.SaveAllAsync(stationEndpoints, cancellationToken).ConfigureAwait(false);
+            stationCount = stationEndpoints.Count;
+        }
+
+        return Ok(new { Message = "Printer settings saved.", Count = endpoints.Count, StationCount = stationCount });
     }
 
     [HttpPost("printers/test")]
@@ -654,8 +700,15 @@ public sealed class SettingsController : ControllerBase
         if (!TryAuthorize(out var denied))
             return denied!;
 
+        if (TryGetStationCode(request, out var stationCode, out var stationError))
+        {
+            if (stationError is not null)
+                return stationError;
+            return await TestStationPrinterAsync(stationCode!, cancellationToken).ConfigureAwait(false);
+        }
+
         if (request?.MillNo is < 1 or > 4)
-            return BadRequest(new { Message = "millNo must be 1–4." });
+            return BadRequest(new { Message = "millNo must be 1–4, or provide stationCode." });
 
         var resolved = _millPrinters.ResolveForMill(request.MillNo);
         if (!resolved.Configured)
@@ -684,8 +737,15 @@ public sealed class SettingsController : ControllerBase
         if (!TryAuthorize(out var denied))
             return denied!;
 
+        if (TryGetStationCode(request, out var stationCode, out var stationError))
+        {
+            if (stationError is not null)
+                return stationError;
+            return await TestPrintStationPrinterAsync(stationCode!, cancellationToken).ConfigureAwait(false);
+        }
+
         if (request?.MillNo is < 1 or > 4)
-            return BadRequest(new { Message = "millNo must be 1–4." });
+            return BadRequest(new { Message = "millNo must be 1–4, or provide stationCode." });
 
         if (!_zplToggle.IsEnabled)
         {
@@ -869,6 +929,159 @@ public sealed class SettingsController : ControllerBase
     private static string FormatLineRunningAddress(PlcHandshakeOptions options) =>
         $"DB{options.LineRunningDbNumber}.DBX{options.LineRunningByteOffset}.{options.LineRunningBit}";
 
+    private bool TryGetStationCode(
+        TestMillPrinterRequest? request,
+        out string? stationCode,
+        out IActionResult? error)
+    {
+        stationCode = null;
+        error = null;
+        if (string.IsNullOrWhiteSpace(request?.StationCode))
+            return false;
+
+        if (request.MillNo is >= 1 and <= 4)
+        {
+            error = BadRequest(new { Message = "Provide millNo or stationCode, not both." });
+            return true;
+        }
+
+        if (_stationPrinters is null)
+        {
+            error = BadRequest(new { Message = "Station printers can only be tested on Shared." });
+            return true;
+        }
+
+        if (!StationPrinterTarget.IsKnown(request.StationCode))
+        {
+            error = BadRequest(new { Message = $"Unknown stationCode '{request.StationCode}'." });
+            return true;
+        }
+
+        stationCode = StationPrinterTarget.Normalize(request.StationCode);
+        return true;
+    }
+
+    private async Task<IActionResult> TestStationPrinterAsync(string stationCode, CancellationToken cancellationToken)
+    {
+        var resolved = _stationPrinters!.Resolve(stationCode);
+        if (!resolved.Configured)
+        {
+            return Ok(new
+            {
+                stationCode,
+                displayName = StationPrinterTarget.DisplayName(stationCode),
+                status = "NotConfigured",
+                reachable = false,
+                message = StationPrinterTarget.UnconfiguredMessage(stationCode)
+            });
+        }
+
+        var reachable = await TcpProbeAsync(resolved.Address, resolved.Port, cancellationToken).ConfigureAwait(false);
+        return Ok(new
+        {
+            stationCode,
+            displayName = StationPrinterTarget.DisplayName(stationCode),
+            address = resolved.Address,
+            port = resolved.Port,
+            status = reachable ? "Ready" : "Unreachable",
+            reachable
+        });
+    }
+
+    private async Task<IActionResult> TestPrintStationPrinterAsync(string stationCode, CancellationToken cancellationToken)
+    {
+        if (!_zplToggle.IsEnabled)
+        {
+            return BadRequest(new
+            {
+                Message =
+                    "NDT tag ZPL and network print are disabled (NdtBundle:EnableNdtTagZplAndPrint / runtime toggle). " +
+                    "Enable printing, then try again."
+            });
+        }
+
+        var resolved = _stationPrinters!.Resolve(stationCode);
+        var display = StationPrinterTarget.DisplayName(stationCode);
+        if (!resolved.Configured)
+        {
+            return BadRequest(new
+            {
+                Message = StationPrinterTarget.UnconfiguredMessage(stationCode)
+                    + ". Enter an address, click Save printers, then try Print test tag.",
+                stationCode,
+                displayName = display,
+                status = "NotConfigured",
+                success = false
+            });
+        }
+
+        _logger.LogInformation(
+            "Settings test-print: sending dummy ZPL to {Station} printer {Address}:{Port}.",
+            display,
+            resolved.Address,
+            resolved.Port);
+
+        try
+        {
+            var zplBytes = ZplDummyLabelBuilder.BuildDummyLabelZpl(
+                bundleNo: $"TEST-{stationCode}",
+                specification: "SETTINGS-TEST",
+                pipeType: "TEST",
+                pipeSize: "1.5",
+                pipeLen: "6",
+                pcsPerBundle: 1,
+                slitNo: stationCode,
+                labelWidthMm: _options.NdtTagLabelWidthMm,
+                labelLengthMm: _options.NdtTagLabelLengthMm > 0 ? _options.NdtTagLabelLengthMm : 100);
+
+            var sendResult = await _networkPrinterSender
+                .SendAsync(resolved.Address, resolved.Port, zplBytes, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (sendResult.Success)
+            {
+                return Ok(new
+                {
+                    success = true,
+                    stationCode,
+                    displayName = display,
+                    address = resolved.Address,
+                    port = resolved.Port,
+                    status = "Printed",
+                    message =
+                        $"Dummy ZPL tag sent to {display} printer {resolved.Address}:{resolved.Port}. " +
+                        "The physical label should print now."
+                });
+            }
+
+            return StatusCode(500, new
+            {
+                success = false,
+                stationCode,
+                displayName = display,
+                address = resolved.Address,
+                port = resolved.Port,
+                status = "SendFailed",
+                message =
+                    $"Failed to send ZPL to {display} printer {resolved.Address}:{resolved.Port}. " +
+                    "Check printer power, network, firewall, and that the device accepts ZPL on port 9100.",
+                detail = sendResult.ErrorDetail ?? string.Empty
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Settings test-print failed for station {Station}.", display);
+            return StatusCode(500, new
+            {
+                success = false,
+                stationCode,
+                displayName = display,
+                status = "SendFailed",
+                message = ex.Message
+            });
+        }
+    }
+
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (bool Ok, DateTime ExpiresUtc)> TcpProbeCache = new();
 
     /// <summary>Only one full PLC diagnostics request at a time (TCP probes + MES hooter resolve).</summary>
@@ -920,6 +1133,7 @@ public sealed class SettingsController : ControllerBase
     public sealed class SaveMillPrintersRequest
     {
         public List<MillPrinterRowDto>? Mills { get; set; }
+        public List<StationPrinterRowDto>? Stations { get; set; }
     }
 
     public sealed class MillPrinterRowDto
@@ -929,9 +1143,17 @@ public sealed class SettingsController : ControllerBase
         public int Port { get; set; } = 9100;
     }
 
+    public sealed class StationPrinterRowDto
+    {
+        public string? StationCode { get; set; }
+        public string? Address { get; set; }
+        public int Port { get; set; } = 9100;
+    }
+
     public sealed class TestMillPrinterRequest
     {
         public int MillNo { get; set; }
+        public string? StationCode { get; set; }
     }
 
     public sealed class TestPoChangeRequest

@@ -71,6 +71,8 @@ public sealed class CompositionRootTests : IDisposable
         Assert.IsType<SqlZplGenerationToggle>(provider.GetRequiredService<IZplGenerationToggle>());
         Assert.NotNull(provider.GetRequiredService<IMillSequenceService>());
         Assert.NotNull(provider.GetRequiredService<IBundleMergeService>());
+        Assert.NotNull(provider.GetRequiredService<IStationPrinterSettingsService>());
+        Assert.NotNull(provider.GetRequiredService<IManualNdtTagService>());
     }
 
     [Theory]
@@ -97,6 +99,8 @@ public sealed class CompositionRootTests : IDisposable
         Assert.Equal(millNo, provider.GetRequiredService<IMillOwnership>().SingleOwnedMill);
         Assert.NotNull(provider.GetRequiredService<IMillSequenceService>());
         Assert.Null(provider.GetService<IBundleMergeService>());
+        Assert.Null(provider.GetService<IStationPrinterSettingsService>());
+        Assert.Null(provider.GetService<IManualNdtTagService>());
 
         var hosted = provider.GetServices<IHostedService>().Select(s => s.GetType()).ToList();
         Assert.True(
@@ -196,6 +200,8 @@ public sealed class CompositionRootTests : IDisposable
         Assert.IsType<ZplGenerationToggle>(provider.GetRequiredService<IZplGenerationToggle>());
         Assert.NotNull(provider.GetRequiredService<IMillSequenceService>());
         Assert.NotNull(provider.GetRequiredService<IBundleMergeService>());
+        Assert.NotNull(provider.GetRequiredService<IStationPrinterSettingsService>());
+        Assert.NotNull(provider.GetRequiredService<IManualNdtTagService>());
 
         var hosted = provider.GetServices<IHostedService>().Select(s => s.GetType()).ToList();
         var lease = hosted.IndexOf(typeof(MillInstanceLeaseHostedService));

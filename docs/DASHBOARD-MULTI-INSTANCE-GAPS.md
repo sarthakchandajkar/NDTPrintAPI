@@ -13,7 +13,7 @@ HTTP write proxy and `Mill_Instance_Status` SQL telemetry are **deferred**.
 | InputSlits list/read | Shared inbox UNC |
 | Upload generate-now / scheduler | Shared only |
 | Formation chart GET/PUT | Shared UNC file |
-| Printers GET/PUT | SQL `Mill_Printer` (mills 1–4). Station printers are **not** in this table — see follow-up below |
+| Printers GET/PUT | SQL `Mill_Printer` (mills 1–4) plus Shared-only `Station_Printer` (three station codes). One Settings save. |
 | ZPL generation toggle | SQL `App_Setting.ZplPhysicalPrintEnabled` — Shared + mills observe the same value |
 
 ## Empty / stale / wrong-process on Shared
@@ -31,15 +31,10 @@ HTTP write proxy and `Mill_Instance_Status` SQL telemetry are **deferred**.
 
 `Status`, `Settings`, `Test` remain registered on mill instances for validation against `http://127.0.0.1:500n`. Firewall should not expose these ports on the LAN.
 
-## Follow-up: station printers (Shared-only table)
+## Station printers (Shared-only table)
 
-Do **not** generalise `Mill_Printer`. Isolation keys stay mill-scoped.
+`Mill_Printer` isolation keys stay mill-scoped. Stations have no mill, so they live in `dbo.Station_Printer` (`VISUAL_REVISUAL`, `BIG_HYDRO`, `FOUR_HEAD_HYDRO`). Visual and Revisual are **one row** (same physical printer at point A).
 
-Today station tags print to the **bundle’s mill printer**: `ManualNdtTagService` → `ResolveForMill(state.MillNo)`. Adding station printers **changes where paper physically comes out** — a Mill-2 bundle at Visual would print on the Visual printer, not Mill-2’s.
+**Behaviour change:** station tags used to print on the bundle mill via `ResolveForMill(state.MillNo)`. They now print at the inspection point — a Mill-2 bundle at Visual comes out on the Visual/Revisual printer.
 
-Design:
-
-- Separate Shared-only table (e.g. `Station_Printer`), not mill numbers 5–8.
-- Four targets resolved **by station**: Visual, Revisual, Big Hydro, Four-Head Hydro.
-- Seed Visual and Revisual to the **same IP** (shared physical printer).
-- ManualTags stays Shared-only (`[InstanceRole(Monolith, Shared)]`).
+ManualTags stays Shared-only. Seed all three at `192.168.0.125:9100`. Empty station row fails with the station display name; no mill fallback.

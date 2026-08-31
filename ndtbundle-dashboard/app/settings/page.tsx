@@ -9,6 +9,7 @@ import {
   type SettingsPlcMill,
   type SettingsPoChangeTestResult,
   type SettingsPrinterMill,
+  type SettingsPrinterStation,
   type MillSequenceSnapshot,
 } from "@/lib/api";
 import { LineRunningLamp } from "@/components/LineRunningLamp";
@@ -330,6 +331,7 @@ export default function SettingsPage() {
   const [formationSource, setFormationSource] = useState<string | null>(null);
   const [plc, setPlc] = useState<SettingsPlcDiagnostics | null>(null);
   const [printers, setPrinters] = useState<SettingsPrinterMill[]>([]);
+  const [stationPrinters, setStationPrinters] = useState<SettingsPrinterStation[]>([]);
   const [millSequences, setMillSequences] = useState<MillSequenceSnapshot[]>([]);
   const [seqDraft, setSeqDraft] = useState<Record<number, string>>({});
   const [seqReason, setSeqReason] = useState("");
@@ -339,6 +341,7 @@ export default function SettingsPage() {
   const [poChangeTestResult, setPoChangeTestResult] = useState<SettingsPoChangeTestResult | null>(null);
   const [plcConnectionBusyMill, setPlcConnectionBusyMill] = useState<number | null>(null);
   const [printerTestPrintMill, setPrinterTestPrintMill] = useState<number | null>(null);
+  const [printerTestPrintStation, setPrinterTestPrintStation] = useState<string | null>(null);
   const plcPollInFlight = useRef(false);
 
   const refreshStatus = useCallback(async () => {
@@ -376,6 +379,16 @@ export default function SettingsPage() {
           mills.length > 0
             ? mills
             : [1, 2, 3, 4].map((m) => ({ millNo: m, address: "", port: 9100 }))
+        );
+        const stations = Array.isArray(r.stations) ? r.stations : [];
+        setStationPrinters(
+          stations.length > 0
+            ? stations
+            : [
+                { stationCode: "VISUAL_REVISUAL", displayName: "Visual/Revisual", address: "", port: 9100 },
+                { stationCode: "BIG_HYDRO", displayName: "Big Hydro", address: "", port: 9100 },
+                { stationCode: "FOUR_HEAD_HYDRO", displayName: "Four-Head Hydro", address: "", port: 9100 },
+              ]
         );
       } else if (tab === "sequence") {
         const r = await api.settingsMillSequence(t);
@@ -525,7 +538,14 @@ export default function SettingsPage() {
         address: (p.address ?? "").trim(),
         port: p.port && p.port > 0 ? p.port : 9100,
       }));
-      const res = await api.settingsSavePrinters(t, mills);
+      const stations = stationPrinters
+        .filter((s) => (s.stationCode ?? "").trim())
+        .map((s) => ({
+          stationCode: (s.stationCode ?? "").trim(),
+          address: (s.address ?? "").trim(),
+          port: s.port && s.port > 0 ? s.port : 9100,
+        }));
+      const res = await api.settingsSavePrinters(t, mills, stations);
       setMessage(res.message ?? "Printer settings saved.");
       await loadTabData();
     } catch (e) {
@@ -603,6 +623,45 @@ export default function SettingsPage() {
       setError(e instanceof Error ? e.message : "Test print failed");
     } finally {
       setPrinterTestPrintMill(null);
+    }
+  };
+
+  const testStationPrinter = async (stationCode: string) => {
+    const t = getSettingsToken();
+    if (!t) return;
+    setMessage(null);
+    setError(null);
+    try {
+      const r = await api.settingsTestStationPrinter(t, stationCode);
+      setMessage(
+        `${r.displayName ?? stationCode}: ${r.status ?? "—"} (${r.address ?? ""}:${r.port ?? 9100})`
+      );
+      await loadTabData();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Test failed");
+    }
+  };
+
+  const testPrintStationPrinter = async (stationCode: string) => {
+    const t = getSettingsToken();
+    if (!t) return;
+    setPrinterTestPrintStation(stationCode);
+    setMessage(null);
+    setError(null);
+    try {
+      const r = await api.settingsTestPrintStationPrinter(t, stationCode);
+      if (r.success === false) {
+        setError(r.message ?? `${r.displayName ?? stationCode}: test print failed.`);
+      } else {
+        setMessage(
+          r.message ??
+            `${r.displayName ?? stationCode}: dummy tag sent to ${r.address ?? "?"}:${r.port ?? 9100}.`
+        );
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Test print failed");
+    } finally {
+      setPrinterTestPrintStation(null);
     }
   };
 
@@ -1012,10 +1071,10 @@ export default function SettingsPage() {
       ) : tab === "printers" ? (
         <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
           <p className="px-5 py-3 text-sm text-gray-600 border-b border-gray-100">
-            One network printer per mill (TCP port 9100). Mill 1 falls back to legacy{" "}
-            <code className="text-xs bg-gray-100 px-1">NdtTagPrinterAddress</code> when empty.{" "}
-            <strong>Test</strong> checks TCP reachability; <strong>Print test tag</strong> sends a dummy ZPL
-            label (save the IP first).
+            Mill printers (close tags) and station printers (Visual/Revisual, Big Hydro, Four-Head Hydro) share this
+            page and one Save. Station tags print at the inspection point, not the bundle mill. Visual and Revisual
+            are one printer. Stations have no mill-1 fallback. <strong>Test</strong> checks TCP;{" "}
+            <strong>Print test tag</strong> sends dummy ZPL (save the IP first).
           </p>
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
@@ -1085,6 +1144,85 @@ export default function SettingsPage() {
                           className="px-2 py-1 text-xs font-medium rounded-md border border-primary-300 text-primary-800 bg-primary-50 hover:bg-primary-100 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
                         >
                           {printerTestPrintMill === p.millNo ? "Printing…" : "Print test tag"}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="px-5 py-3 border-t border-gray-100 bg-gray-50 text-sm font-medium text-gray-800">
+            Station printers
+          </div>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-4 py-2 text-left">Station</th>
+                  <th className="px-4 py-2 text-left">IP / host</th>
+                  <th className="px-4 py-2 text-left">Port</th>
+                  <th className="px-4 py-2 text-left">Status</th>
+                  <th className="px-4 py-2 text-left">Test</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200">
+                {stationPrinters.map((p, i) => (
+                  <tr key={p.stationCode ?? i}>
+                    <td className="px-4 py-2 font-medium">{p.displayName ?? p.stationCode}</td>
+                    <td className="px-4 py-2">
+                      <input
+                        type="text"
+                        className="w-full min-w-[10rem] border border-gray-300 rounded px-2 py-1"
+                        placeholder="192.168.0.125"
+                        value={p.address ?? ""}
+                        onChange={(e) =>
+                          setStationPrinters((prev) =>
+                            prev.map((row, j) => (j === i ? { ...row, address: e.target.value } : row))
+                          )
+                        }
+                      />
+                    </td>
+                    <td className="px-4 py-2">
+                      <input
+                        type="number"
+                        min={1}
+                        className="w-20 border border-gray-300 rounded px-2 py-1"
+                        value={p.port ?? 9100}
+                        onChange={(e) => {
+                          const v = parseInt(e.target.value, 10);
+                          setStationPrinters((prev) =>
+                            prev.map((row, j) =>
+                              j === i ? { ...row, port: Number.isFinite(v) ? v : 9100 } : row
+                            )
+                          );
+                        }}
+                      />
+                    </td>
+                    <td className="px-4 py-2">
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusBadgeClass(p.status)}`}
+                      >
+                        {p.status ?? "—"}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2">
+                      <div className="flex flex-wrap gap-2 items-center">
+                        <button
+                          type="button"
+                          disabled={printerTestPrintStation !== null || printerTestPrintMill !== null}
+                          onClick={() => p.stationCode && testStationPrinter(p.stationCode)}
+                          className="text-primary-600 hover:text-primary-800 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Test
+                        </button>
+                        <button
+                          type="button"
+                          disabled={printerTestPrintStation !== null || printerTestPrintMill !== null}
+                          onClick={() => p.stationCode && void testPrintStationPrinter(p.stationCode)}
+                          className="px-2 py-1 text-xs font-medium rounded-md border border-primary-300 text-primary-800 bg-primary-50 hover:bg-primary-100 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                        >
+                          {printerTestPrintStation === p.stationCode ? "Printing…" : "Print test tag"}
                         </button>
                       </div>
                     </td>

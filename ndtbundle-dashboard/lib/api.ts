@@ -469,6 +469,18 @@ export interface SettingsPrinterMill {
   status?: string;
 }
 
+export interface SettingsPrinterStation {
+  stationCode?: string;
+  displayName?: string;
+  address?: string;
+  port?: number;
+  effectiveAddress?: string;
+  effectivePort?: number;
+  configured?: boolean;
+  reachable?: boolean;
+  status?: string;
+}
+
 async function fetchSettingsApi<T>(
   path: string,
   token: string,
@@ -493,8 +505,19 @@ export interface ManualTagPrintResponse {
   rejectedPcs?: number;
   outgoingPcs?: number;
   printed?: boolean;
+  printError?: string;
   csvPath?: string;
   uploadFilePath?: string;
+}
+
+/** Save still succeeded; print failure must be shown separately. */
+export function stationPrintFollowUp(
+  printRequested: boolean,
+  res: ManualTagPrintResponse
+): { extraSuccess: string; printError?: string } {
+  if (!printRequested) return { extraSuccess: "" };
+  if (res.printed) return { extraSuccess: " | Tag sent to printer." };
+  return { extraSuccess: "", printError: res.printError ?? "Tag was not sent to the printer." };
 }
 
 export interface ManualStationContext {
@@ -737,14 +760,18 @@ export const api = {
       }),
     }),
   settingsPrinters: (token: string) =>
-    fetchSettingsApi<{ mills?: SettingsPrinterMill[] }>("/api/Settings/printers", token),
+    fetchSettingsApi<{ mills?: SettingsPrinterMill[]; stations?: SettingsPrinterStation[] }>(
+      "/api/Settings/printers",
+      token
+    ),
   settingsSavePrinters: (
     token: string,
-    mills: { millNo: number; address: string; port: number }[]
+    mills: { millNo: number; address: string; port: number }[],
+    stations?: { stationCode: string; address: string; port: number }[]
   ) =>
     fetchSettingsApi<{ message?: string }>("/api/Settings/printers", token, {
       method: "PUT",
-      body: JSON.stringify({ mills }),
+      body: JSON.stringify({ mills, stations }),
     }),
   settingsTestPrinter: (token: string, millNo: number) =>
     fetchSettingsApi<{ status?: string; reachable?: boolean; address?: string; port?: number }>(
@@ -752,6 +779,19 @@ export const api = {
       token,
       { method: "POST", body: JSON.stringify({ millNo }) }
     ),
+  settingsTestStationPrinter: (token: string, stationCode: string) =>
+    fetchSettingsApi<{
+      status?: string;
+      reachable?: boolean;
+      address?: string;
+      port?: number;
+      stationCode?: string;
+      displayName?: string;
+      message?: string;
+    }>("/api/Settings/printers/test", token, {
+      method: "POST",
+      body: JSON.stringify({ stationCode }),
+    }),
   settingsTestPrintPrinter: (token: string, millNo: number) =>
     fetchSettingsApi<{
       success?: boolean;
@@ -763,6 +803,19 @@ export const api = {
     }>("/api/Settings/printers/test-print", token, {
       method: "POST",
       body: JSON.stringify({ millNo }),
+    }),
+  settingsTestPrintStationPrinter: (token: string, stationCode: string) =>
+    fetchSettingsApi<{
+      success?: boolean;
+      status?: string;
+      message?: string;
+      address?: string;
+      port?: number;
+      stationCode?: string;
+      displayName?: string;
+    }>("/api/Settings/printers/test-print", token, {
+      method: "POST",
+      body: JSON.stringify({ stationCode }),
     }),
   settingsMillSequence: (token: string) =>
     fetchSettingsApi<{ mills?: MillSequenceSnapshot[] }>("/api/Settings/mill-sequence", token),

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { api, stationPrintFollowUp } from "@/lib/api";
 
 const HYDRO_STATIONS = [
   { value: "FourHeadHydrotesting" as const, label: "Four Head Hydrotesting" },
@@ -81,11 +81,13 @@ export default function HydrotestingPage() {
         rejectedPcs,
         printTag,
       });
+      const follow = stationPrintFollowUp(printTag, res);
       setSuccess(
         `${res.message ?? "Saved."} Batch: ${res.ndtBatchNo ?? "—"} | Outgoing: ${res.outgoingPcs ?? okPcs}${
           res.csvPath ? ` | CSV: ${res.csvPath}` : ""
-        }`
+        }${follow.extraSuccess}`
       );
+      if (follow.printError) setError(follow.printError);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Print failed.");
     } finally {

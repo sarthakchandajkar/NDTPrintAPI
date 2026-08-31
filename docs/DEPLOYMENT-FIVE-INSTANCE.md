@@ -22,7 +22,7 @@ Templates live in repo under `deploy/instances/{shared,mill-1..4}/`. Copy them i
 1. `docs/App_Setting_AddTable.sql` — shared ZPL print toggle
 2. `docs/Mill_Instance_Lease.sql` — exclusive mill lease
 3. Fill-to-target schema already applied (`docs/NDT_Bundle_Alter_CsvFill.sql`)
-4. `docs/Bundle_Accumulation_AddTable.sql`, `docs/Po_Lifecycle_AddTable.sql`, `docs/Mill_Printer_AddTable.sql`
+4. `docs/Bundle_Accumulation_AddTable.sql`, `docs/Po_Lifecycle_AddTable.sql`, `docs/Mill_Printer_AddTable.sql`, `docs/Station_Printer_AddTable.sql`
 
 ## Mill state is SQL (no JSON split)
 
@@ -83,8 +83,16 @@ See [VALIDATION-MILL1-NONPROD.md](./VALIDATION-MILL1-NONPROD.md).
 
 See [DASHBOARD-MULTI-INSTANCE-GAPS.md](./DASHBOARD-MULTI-INSTANCE-GAPS.md).
 
-## Follow-up (not this release): station printers
+## Follow-up (this release): station printers
 
-Keep `Mill_Printer` as mill 1–4 only. Station tags (Visual, Revisual, Big Hydro, Four-Head Hydro) need a **separate Shared-only table**, not extra mill numbers.
+`Mill_Printer` stays mills 1–4. Station tags use Shared-only `dbo.Station_Printer`, keyed by station code — three rows:
 
-Today `ManualNdtTagService.TryPrintTagAsync` sends paper to the **bundle mill** via `ResolveForMill(state.MillNo)`. Adding station printers is a **behaviour change**: a Mill-2 bundle printed at Visual would come out on the Visual printer, not Mill-2’s. Resolve the four station targets **by station**, not by mill. Seed Visual and Revisual to the **same IP** (they share a physical printer).
+| Code | Physical point | Workflows |
+|---|---|---|
+| `VISUAL_REVISUAL` | A (Visual and Revisual, same printer) | Visual, Revisual |
+| `BIG_HYDRO` | B | BigHydrotesting (legacy `Hydrotesting` also maps here with a warning) |
+| `FOUR_HEAD_HYDRO` | C | FourHeadHydrotesting |
+
+**Behaviour change:** `ManualNdtTagService` used to print via `ResolveForMill(state.MillNo)` (bundle mill). It now resolves by station. A Mill-2 bundle at Visual prints at point A, not Mill-2.
+
+Seed is `192.168.0.125:9100` on all three until real IPs are saved. Missing/empty station row fails with `Printer not configured for Visual/Revisual` (never a mill or another station). ManualTags stays Shared-only.

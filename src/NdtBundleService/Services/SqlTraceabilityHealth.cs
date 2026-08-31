@@ -20,6 +20,8 @@ public sealed class SqlTraceabilityHealthReport
     public string? DataSource { get; init; }
     public bool IsExpectedDatabase { get; init; }
     public IReadOnlyList<string> MissingTables { get; init; } = Array.Empty<string>();
+    /// <summary>Qualified names such as <c>Manual_Station_Run.Print_Status</c>.</summary>
+    public IReadOnlyList<string> MissingColumns { get; init; } = Array.Empty<string>();
     public IReadOnlyDictionary<string, long> RowCounts { get; init; } = new Dictionary<string, long>();
     public IReadOnlyList<SqlTraceabilityBundleSample> RecentBundles { get; init; } = Array.Empty<SqlTraceabilityBundleSample>();
     public IReadOnlyList<SqlTraceabilityWriteResult> RecentWrites { get; init; } = Array.Empty<SqlTraceabilityWriteResult>();
@@ -42,7 +44,7 @@ public sealed class SqlTraceabilityHealth : ISqlTraceabilityHealth
 {
     public const string ExpectedDatabaseName = "JazeeraMES_Prod";
 
-    private static readonly string[] RequiredTables =
+    internal static readonly string[] RequiredTables =
     {
         "NDT_Bundle",
         "Input_Slit_Row",
@@ -58,7 +60,18 @@ public sealed class SqlTraceabilityHealth : ISqlTraceabilityHealth
         "Bundle_Accumulation",
         "Bundle_Accumulation_Context",
         "Po_Lifecycle",
-        "Mill_Printer"
+        "Mill_Printer",
+        "Station_Printer"
+    };
+
+    /// <summary>
+    /// Additive columns that must exist even when the parent table already does.
+    /// A missed ALTER must fail the startup health check, not only a later fail-soft write.
+    /// </summary>
+    internal static readonly (string Table, string Column)[] RequiredColumns =
+    {
+        ("Manual_Station_Run", "Print_Status"),
+        ("Manual_Station_Run", "Print_Error")
     };
 
     private readonly IOptionsMonitor<NdtBundleOptions> _optionsMonitor;
@@ -124,6 +137,15 @@ public sealed class SqlTraceabilityHealth : ISqlTraceabilityHealth
                     missingTables.Add(table);
             }
 
+            var missingColumns = new List<string>();
+            foreach (var (table, column) in RequiredColumns)
+            {
+                if (missingTables.Contains(table, StringComparer.OrdinalIgnoreCase))
+                    continue;
+                if (!await ColumnExistsAsync(conn, table, column, cancellationToken).ConfigureAwait(false))
+                    missingColumns.Add($"{table}.{column}");
+            }
+
             var rowCounts = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
             foreach (var table in RequiredTables)
             {
@@ -147,6 +169,7 @@ public sealed class SqlTraceabilityHealth : ISqlTraceabilityHealth
                 DataSource = conn.DataSource,
                 IsExpectedDatabase = isExpectedDb,
                 MissingTables = missingTables,
+                MissingColumns = missingColumns,
                 RowCounts = rowCounts,
                 RecentBundles = recentBundles,
                 RecentWrites = recentWrites,
@@ -181,6 +204,26 @@ public sealed class SqlTraceabilityHealth : ISqlTraceabilityHealth
         const string sql = "SELECT 1 FROM sys.tables WHERE name = @Name AND schema_id = SCHEMA_ID('dbo');";
         await using var cmd = new SqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("@Name", tableName);
+        var scalar = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        return scalar is not null and not DBNull;
+    }
+
+    private static async Task<bool> ColumnExistsAsync(
+        SqlConnection conn,
+        string tableName,
+        string columnName,
+        CancellationToken cancellationToken)
+    {
+        const string sql = @"
+SELECT 1
+FROM sys.columns c
+INNER JOIN sys.tables t ON t.object_id = c.object_id
+WHERE t.name = @Table
+  AND c.name = @Column
+  AND t.schema_id = SCHEMA_ID('dbo');";
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@Table", tableName);
+        cmd.Parameters.AddWithValue("@Column", columnName);
         var scalar = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
         return scalar is not null and not DBNull;
     }

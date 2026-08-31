@@ -97,6 +97,17 @@ public interface ITraceabilityRepository
         string sourceFile,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Records station-tag print outcome on the latest <c>Manual_Station_Run</c> row.
+    /// Does not write <c>NDT_Bundle.Print_Status</c> (mill close tags).
+    /// </summary>
+    Task RecordManualStationPrintAsync(
+        string ndtBatchNo,
+        string workStation,
+        string printStatus,
+        string? printError,
+        CancellationToken cancellationToken);
+
     /// <summary>One row per completed NDT process CSV (after Revisual), matching the consolidated export columns.</summary>
     Task RecordNdtProcessConsolidatedAsync(
         string poNumber,
@@ -1213,6 +1224,49 @@ VALUES
         }
     }
 
+    public async Task RecordManualStationPrintAsync(
+        string ndtBatchNo,
+        string workStation,
+        string printStatus,
+        string? printError,
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled)
+            return;
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await OpenConnectionAsync(conn, "Manual_Station_Run print", cancellationToken).ConfigureAwait(false);
+
+            const string sql = @"
+UPDATE dbo.Manual_Station_Run
+SET Print_Status = @Status,
+    Print_Error = @Error
+WHERE Manual_Station_Run_ID = (
+    SELECT TOP (1) Manual_Station_Run_ID
+    FROM dbo.Manual_Station_Run
+    WHERE NDT_Batch_No = @BatchNo AND Work_Station = @WorkStation
+    ORDER BY Manual_Station_Run_ID DESC);";
+
+            await using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@BatchNo", ndtBatchNo);
+            cmd.Parameters.AddWithValue("@WorkStation", (object?)NullIfEmpty(workStation) ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@Status", printStatus);
+            cmd.Parameters.AddWithValue("@Error", (object?)NullIfEmpty(TruncateStationPrintError(printError)) ?? DBNull.Value);
+            await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _writeTracker.RecordFailure("Manual_Station_Run", ex.Message, ndtBatchNo);
+            _logger.LogWarning(
+                ex,
+                "Failed to record station print status for batch {BatchNo} station {Station}.",
+                ndtBatchNo,
+                workStation);
+        }
+    }
+
     private static void AddManualStationParameters(
         SqlCommand cmd,
         string poNumber,
@@ -1648,6 +1702,14 @@ END";
 
     private static string? NullIfEmpty(string? s) =>
         string.IsNullOrWhiteSpace(s) ? null : s.Trim();
+
+    private static string? TruncateStationPrintError(string? error)
+    {
+        var trimmed = NullIfEmpty(error);
+        if (trimmed is null)
+            return null;
+        return trimmed.Length <= 400 ? trimmed : trimmed[..400];
+    }
 
     private async Task EnsureBundleRowExistsAsync(
         SqlConnection conn,

@@ -96,6 +96,7 @@ public sealed class ManualTagsController : ControllerBase
                 result.RejectedPcs,
                 result.OutgoingPcs,
                 result.Printed,
+                result.PrintError,
                 result.CsvPath,
                 result.UploadFilePath
             });
@@ -151,6 +152,7 @@ public sealed class ManualTagsController : ControllerBase
                 result.RejectedPcs,
                 result.OutgoingPcs,
                 result.Printed,
+                result.PrintError,
                 result.CsvPath,
                 result.UploadFilePath
             });

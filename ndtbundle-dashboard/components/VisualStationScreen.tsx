@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { api } from "@/lib/api";
+import { api, stationPrintFollowUp } from "@/lib/api";
 
 type StationNum = 1 | 2;
 
@@ -70,11 +70,13 @@ export function VisualStationScreen({ stationNumber }: { stationNumber: StationN
         printTag,
         operatorStationNumber: stationNumber,
       });
+      const follow = stationPrintFollowUp(printTag, res);
       setSuccess(
         `${res.message ?? "Saved."} Batch: ${res.ndtBatchNo ?? "—"} | Outgoing: ${res.outgoingPcs ?? okPcs}${
           res.csvPath ? ` | CSV: ${res.csvPath}` : ""
-        }`
+        }${follow.extraSuccess}`
       );
+      if (follow.printError) setError(follow.printError);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Print failed.");
     } finally {

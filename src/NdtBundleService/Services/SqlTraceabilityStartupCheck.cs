@@ -65,8 +65,18 @@ public sealed class SqlTraceabilityStartupCheck : IHostedService
                 "SQL traceability tables missing in {Database}: {Tables}. Run docs/NDT_Traceability_Schema.sql against JazeeraMES_Prod.",
                 report.Database,
                 string.Join(", ", report.MissingTables));
-            return;
         }
+
+        if (report.MissingColumns.Count > 0)
+        {
+            _logger.LogError(
+                "SQL traceability columns missing in {Database}: {Columns}. Run docs/Station_Printer_AddTable.sql against JazeeraMES_Prod.",
+                report.Database,
+                string.Join(", ", report.MissingColumns));
+        }
+
+        if (report.MissingTables.Count > 0 || report.MissingColumns.Count > 0)
+            return;
 
         foreach (var kv in report.RowCounts)
             _logger.LogInformation("SQL traceability table {Table}: {Count} row(s).", kv.Key, kv.Value);

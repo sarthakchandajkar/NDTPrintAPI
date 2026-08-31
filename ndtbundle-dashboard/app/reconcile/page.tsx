@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { api, type BundleMergePreview, type PpcCorrectionItem, type ReconcileBundle, type ReconcileSlitItem } from "@/lib/api";
+import { api, stationPrintFollowUp, type BundleMergePreview, type PpcCorrectionItem, type ReconcileBundle, type ReconcileSlitItem } from "@/lib/api";
 import { DateRangeFilter } from "@/components/DateRangeFilter";
 import { MillFilter } from "@/components/MillFilter";
 import {
@@ -261,9 +261,11 @@ export default function ReconcilePage() {
         printTag: stationPrintTag,
         operatorStationNumber: opNum,
       });
+      const follow = stationPrintFollowUp(stationPrintTag, res);
       setSuccess(
-        `${res.message ?? "Reconciled."}${res.csvPath ? ` | CSV: ${res.csvPath}` : ""}${res.printed ? " | Tag sent to printer." : ""}`
+        `${res.message ?? "Reconciled."}${res.csvPath ? ` | CSV: ${res.csvPath}` : ""}${follow.extraSuccess}`
       );
+      if (follow.printError) setError(follow.printError);
       await loadStationContext();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Reconcile failed.");

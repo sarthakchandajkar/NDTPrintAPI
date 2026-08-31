@@ -154,6 +154,7 @@ public sealed class UploadNdtBundleFileServiceTests : IDisposable
             Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
         public Task RecordOutputSlitRowsAsync(string sourceFile, IReadOnlyList<(InputSlitRecord Record, string NdtBatchNo, int SourceRowNumber)> rows, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task RecordManualStationRunAsync(string poNumber, string ndtBatchNo, int ndtPcs, int okPcs, int rejectPcs, string workStation, DateTime start, DateTime end, string? hydrotestingType, string sourceFile, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task RecordManualStationPrintAsync(string ndtBatchNo, string workStation, string printStatus, string? printError, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task RecordNdtProcessConsolidatedAsync(string poNumber, string ndtBatchNo, int ndtPcs, int okPcs, int visualReject, int hydrotestReject, int revisualReject, DateTime bundleStart, DateTime bundleEnd, string outputFilePath, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task RecordBundleLabelAsync(string poNumber, int millNo, string? specification, string? type, string? pipeSize, string? length, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task DeleteOutputSlitRowsForRemovedOutputLinesAsync(string ndtBatchNo, IReadOnlyList<RemovedSlitRowTraceRef> refs, CancellationToken cancellationToken) => Task.CompletedTask;

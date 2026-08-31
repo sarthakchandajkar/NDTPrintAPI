@@ -4,6 +4,7 @@ using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
+using NdtBundleService.Models;
 
 namespace NdtBundleService.Services;
 
@@ -71,6 +72,8 @@ public sealed class ManualStationRecordResult
     public string CsvPath { get; init; } = string.Empty;
     public string UploadFilePath { get; init; } = string.Empty;
     public bool Printed { get; init; }
+    /// <summary>Set when <see cref="Printed"/> is false after a print was requested.</summary>
+    public string? PrintError { get; init; }
 }
 
 /// <summary>
@@ -84,7 +87,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
     private readonly INdtBundleRepository _bundleRepository;
     private readonly IWipLabelProvider _wipLabelProvider;
     private readonly INetworkPrinterSender _sender;
-    private readonly IMillPrinterSettingsService _millPrinters;
+    private readonly IStationPrinterSettingsService _stationPrinters;
     private readonly ITraceabilityRepository _traceability;
     private readonly IReconcileSyncService _reconcileSync;
     private readonly IUploadNdtBundleFileService _uploadNdtBundle;
@@ -99,7 +102,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         INdtBundleRepository bundleRepository,
         IWipLabelProvider wipLabelProvider,
         INetworkPrinterSender sender,
-        IMillPrinterSettingsService millPrinters,
+        IStationPrinterSettingsService stationPrinters,
         ITraceabilityRepository traceability,
         IReconcileSyncService reconcileSync,
         IUploadNdtBundleFileService uploadNdtBundle,
@@ -110,7 +113,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         _bundleRepository = bundleRepository;
         _wipLabelProvider = wipLabelProvider;
         _sender = sender;
-        _millPrinters = millPrinters;
+        _stationPrinters = stationPrinters;
         _traceability = traceability;
         _reconcileSync = reconcileSync;
         _uploadNdtBundle = uploadNdtBundle;
@@ -207,9 +210,11 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         var printed = false;
+        string? printError = null;
         if (request.PrintTag)
         {
-            printed = await TryPrintTagAsync(state.PoNumber, state.MillNo, batch, request.OkPcs, now, request.Station, opStation, isReprint: false, cancellationToken).ConfigureAwait(false);
+            (printed, printError) = await TryPrintTagAsync(state.PoNumber, state.MillNo, batch, request.OkPcs, now, request.Station, opStation, isReprint: false, cancellationToken).ConfigureAwait(false);
+            await RecordStationPrintAsync(batch, WorkStationColumnValue(request.Station, opStation), printed, printError, cancellationToken).ConfigureAwait(false);
         }
 
         return new ManualStationRecordResult
@@ -222,7 +227,8 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             OutgoingPcs = request.OkPcs,
             CsvPath = csvPath ?? string.Empty,
             UploadFilePath = uploadPath ?? string.Empty,
-            Printed = printed
+            Printed = printed,
+            PrintError = printError
         };
     }
 
@@ -317,9 +323,11 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             cancellationToken).ConfigureAwait(false);
 
         var printed = false;
+        string? printError = null;
         if (request.PrintTag)
         {
-            printed = await TryPrintTagAsync(state.PoNumber, state.MillNo, batch, request.OkPcs, now, request.Station, opStation, isReprint: true, cancellationToken).ConfigureAwait(false);
+            (printed, printError) = await TryPrintTagAsync(state.PoNumber, state.MillNo, batch, request.OkPcs, now, request.Station, opStation, isReprint: true, cancellationToken).ConfigureAwait(false);
+            await RecordStationPrintAsync(batch, WorkStationColumnValue(request.Station, opStation), printed, printError, cancellationToken).ConfigureAwait(false);
         }
 
         return new ManualStationRecordResult
@@ -332,7 +340,8 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             OutgoingPcs = request.OkPcs,
             CsvPath = csvPath ?? string.Empty,
             UploadFilePath = uploadPath ?? string.Empty,
-            Printed = printed
+            Printed = printed,
+            PrintError = printError
         };
     }
 
@@ -507,19 +516,40 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         }
     }
 
-    private async Task<bool> TryPrintTagAsync(string poNumber, int millNo, string ndtBatchNo, int pcs, DateTime date, ManualTagStation station, int operatorStationNumber, bool isReprint, CancellationToken cancellationToken)
+    private async Task<(bool Printed, string? Error)> TryPrintTagAsync(
+        string poNumber,
+        int millNo,
+        string ndtBatchNo,
+        int pcs,
+        DateTime date,
+        ManualTagStation station,
+        int operatorStationNumber,
+        bool isReprint,
+        CancellationToken cancellationToken)
     {
-        if (!_zplToggle.IsEnabled)
+        var stationCode = StationPrinterTarget.For(station, out var legacyHydroMapped);
+        if (legacyHydroMapped)
         {
-            _logger.LogDebug("NDT tag ZPL and network print are disabled (runtime toggle); CSV only.");
-            return false;
+            _logger.LogWarning(
+                "Legacy Hydrotesting station mapped to {StationCode} ({Display}) for batch {BatchNo}; prefer FourHeadHydrotesting or BigHydrotesting.",
+                stationCode,
+                StationPrinterTarget.DisplayName(stationCode),
+                ndtBatchNo);
         }
 
-        var (address, printerPort, printerConfigured) = _millPrinters.ResolveForMill(millNo);
+        if (!_zplToggle.IsEnabled)
+        {
+            var disabled = "NDT tag ZPL and network print are disabled.";
+            _logger.LogWarning("{Message} Batch {BatchNo} station {Station}.", disabled, ndtBatchNo, stationCode);
+            return (false, disabled);
+        }
+
+        var (address, printerPort, printerConfigured) = _stationPrinters.Resolve(stationCode);
         if (!printerConfigured)
         {
-            _logger.LogWarning("Printer not configured for Mill {MillNo}. Tag will not be sent.", millNo);
-            return false;
+            var missing = StationPrinterTarget.UnconfiguredMessage(stationCode);
+            _logger.LogWarning("{Message}. Tag will not be sent for batch {BatchNo}.", missing, ndtBatchNo);
+            return (false, missing);
         }
 
         var wip = await _wipLabelProvider.GetWipLabelAsync(poNumber, millNo, cancellationToken).ConfigureAwait(false);
@@ -554,7 +584,30 @@ public sealed class ManualNdtTagService : IManualNdtTagService
 
         await TrySaveZplPreviewAsync(station, operatorStationNumber, ndtBatchNo, zplBytes, cancellationToken).ConfigureAwait(false);
         var sendResult = await _sender.SendAsync(address, printerPort, zplBytes, cancellationToken).ConfigureAwait(false);
-        return sendResult.Success;
+        if (sendResult.Success)
+            return (true, null);
+
+        var sendError =
+            $"Failed to send tag to {StationPrinterTarget.DisplayName(stationCode)} printer {address}:{printerPort}"
+            + (string.IsNullOrWhiteSpace(sendResult.ErrorDetail) ? "." : $": {sendResult.ErrorDetail}");
+        _logger.LogWarning("{Message} Batch {BatchNo}.", sendError, ndtBatchNo);
+        return (false, sendError);
+    }
+
+    private async Task RecordStationPrintAsync(
+        string ndtBatchNo,
+        string workStation,
+        bool printed,
+        string? printError,
+        CancellationToken cancellationToken)
+    {
+        var status = printed ? BundlePrintStatus.Printed : BundlePrintStatus.PrintFailed;
+        await _traceability.RecordManualStationPrintAsync(
+            ndtBatchNo,
+            workStation,
+            status,
+            printed ? null : printError,
+            cancellationToken).ConfigureAwait(false);
     }
 
     private async Task TrySaveZplPreviewAsync(ManualTagStation station, int operatorStationNumber, string ndtBatchNo, byte[] zplBytes, CancellationToken cancellationToken)

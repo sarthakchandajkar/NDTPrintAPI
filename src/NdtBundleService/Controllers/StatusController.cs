@@ -63,6 +63,7 @@ public sealed class StatusController : ControllerBase
             && report.Connected
             && report.IsExpectedDatabase
             && report.MissingTables.Count == 0
+            && report.MissingColumns.Count == 0
             && string.IsNullOrWhiteSpace(report.Error);
 
         return Ok(new
@@ -77,6 +78,7 @@ public sealed class StatusController : ControllerBase
             report.DataSource,
             report.IsExpectedDatabase,
             report.MissingTables,
+            report.MissingColumns,
             report.RowCounts,
             report.RecentBundles,
             RecentWrites = recentWrites,
@@ -92,7 +94,9 @@ public sealed class StatusController : ControllerBase
                         ? $"Connected to {report.Database}, not {SqlTraceabilityHealth.ExpectedDatabaseName}."
                         : report.MissingTables.Count > 0
                             ? "Connected but traceability tables are missing. Run docs/NDT_Traceability_Schema.sql."
-                            : "Connected to JazeeraMES_Prod; traceability tables present."
+                            : report.MissingColumns.Count > 0
+                                ? "Connected but required columns are missing. Run docs/Station_Printer_AddTable.sql."
+                                : "Connected to JazeeraMES_Prod; traceability tables present."
         });
     }
 
