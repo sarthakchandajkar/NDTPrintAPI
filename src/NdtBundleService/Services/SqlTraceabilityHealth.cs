@@ -60,8 +60,8 @@ public sealed class SqlTraceabilityHealth : ISqlTraceabilityHealth
         "Bundle_Accumulation",
         "Bundle_Accumulation_Context",
         "Po_Lifecycle",
-        "Mill_Printer",
-        "Station_Printer"
+        "Printer",
+        "Mill_Instance_Status"
     };
 
     /// <summary>

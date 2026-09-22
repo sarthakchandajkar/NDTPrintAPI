@@ -6,7 +6,7 @@
 
 1. Apply `docs/App_Setting_AddTable.sql` and `docs/Mill_Instance_Lease.sql` on the **non-prod** database.
 2. Copy `deploy/instances/mill-1/appsettings.Production.json` to a non-prod content root; point folders + SQL at non-prod.
-3. Apply `docs/Bundle_Accumulation_AddTable.sql`, `docs/Po_Lifecycle_AddTable.sql`, `docs/Mill_Printer_AddTable.sql` on the **non-prod** database. Delete leftover mill-state JSON (no split script).
+3. Apply `docs/Bundle_Accumulation_AddTable.sql`, `docs/Po_Lifecycle_AddTable.sql`, `docs/Printer_AddTable.sql` on the **non-prod** database. Delete leftover mill-state JSON (no split script).
 4. On the **monolith** (or Shared-only stand-in) still pointing at non-prod if needed:
    - `InputSlitProcessMills` must **not** include `1` (e.g. `[]` or omit Mill-1)
    - `PlcHandshake.Mills` Mill-1: `PlcHandshakeEnabled: false`

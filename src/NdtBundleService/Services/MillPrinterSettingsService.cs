@@ -1,4 +1,3 @@
-using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
@@ -17,10 +16,10 @@ public interface IMillPrinterSettingsService
 }
 
 /// <summary>
-/// Per-mill ZPL printer endpoints in <c>dbo.Mill_Printer</c>. Shared writes all four rows;
-/// mill-n reads/writes only its mill. Mill 1 falls back to <see cref="NdtBundleOptions.NdtTagPrinterAddress"/>
-/// when its row is missing. Mills 2–4 never fall back to another mill's printer.
-/// Cross-process reads use a 2s TTL (same as the ZPL toggle).
+/// Per-mill ZPL printer endpoints in <c>dbo.Printer</c> (<c>Kind=Mill</c>, keys <c>MILL_1</c>…<c>MILL_4</c>).
+/// Shared writes all four mill rows; mill-n reads/writes only its mill. Mill 1 falls back to
+/// <see cref="NdtBundleOptions.NdtTagPrinterAddress"/> when its row is missing. Mills 2–4 never
+/// fall back to another mill's printer. Cross-process reads use a 2s TTL (same as the ZPL toggle).
 /// </summary>
 public sealed class MillPrinterSettingsService : IMillPrinterSettingsService
 {
@@ -80,7 +79,7 @@ public sealed class MillPrinterSettingsService : IMillPrinterSettingsService
             if (!Allows(m.MillNo))
             {
                 throw new InvalidOperationException(
-                    $"Mill {m.MillNo} is not owned by this instance; refusing Mill_Printer write.");
+                    $"Mill {m.MillNo} is not owned by this instance; refusing Printer write.");
             }
         }
 
@@ -92,7 +91,7 @@ public sealed class MillPrinterSettingsService : IMillPrinterSettingsService
             _cacheExpiresUtc = _utcNow().Add(CacheTtl);
         }
 
-        _logger.LogInformation("Saved mill printer settings to Mill_Printer ({Count} mill(s)).", owned.Count);
+        _logger.LogInformation("Saved mill printer settings to Printer ({Count} mill(s)).", owned.Count);
         return Task.CompletedTask;
     }
 
@@ -220,24 +219,10 @@ internal sealed class SqlMillPrinterBackingStore : IMillPrinterBackingStore
     public IReadOnlyDictionary<int, MillPrinterEndpoint> Load()
     {
         var map = new Dictionary<int, MillPrinterEndpoint>();
-        try
+        foreach (var (key, address, port) in SqlPrinterTable.Load(_options, _logger, SqlPrinterTable.KindMill))
         {
-            using var conn = SqlTraceabilityConnection.Create(_options.CurrentValue);
-            conn.Open();
-            using var cmd = new SqlCommand("SELECT Mill_No, Address, Port FROM dbo.Mill_Printer;", conn);
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read())
-            {
-                var mill = reader.GetInt32(0);
-                map[mill] = new MillPrinterEndpoint(
-                    mill,
-                    reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
-                    reader.GetInt32(2));
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to load Mill_Printer; mill 1 may fall back to NdtTagPrinterAddress.");
+            if (SqlPrinterTable.TryParseMillKey(key, out var mill))
+                map[mill] = new MillPrinterEndpoint(mill, address, port);
         }
 
         return map;
@@ -245,25 +230,14 @@ internal sealed class SqlMillPrinterBackingStore : IMillPrinterBackingStore
 
     public void Save(IReadOnlyList<MillPrinterEndpoint> mills)
     {
-        using var conn = SqlTraceabilityConnection.Create(_options.CurrentValue);
-        conn.Open();
-        foreach (var m in mills)
-        {
-            using var cmd = new SqlCommand(@"
-MERGE dbo.Mill_Printer WITH (HOLDLOCK) AS t
-USING (SELECT @Mill AS Mill_No) AS s
-ON t.Mill_No = s.Mill_No
-WHEN MATCHED THEN UPDATE SET
-    Address = @Address,
-    Port = @Port,
-    Updated_AtUtc = SYSUTCDATETIME(),
-    Updated_By = N'Dashboard'
-WHEN NOT MATCHED THEN INSERT (Mill_No, Address, Port, Updated_By)
-VALUES (@Mill, @Address, @Port, N'Dashboard');", conn);
-            cmd.Parameters.AddWithValue("@Mill", m.MillNo);
-            cmd.Parameters.AddWithValue("@Address", (m.Address ?? string.Empty).Trim());
-            cmd.Parameters.AddWithValue("@Port", m.Port > 0 ? m.Port : 9100);
-            cmd.ExecuteNonQuery();
-        }
+        var rows = mills
+            .Where(m => m.MillNo is >= 1 and <= 4)
+            .Select(m => (
+                Key: SqlPrinterTable.MillKey(m.MillNo),
+                Kind: SqlPrinterTable.KindMill,
+                Address: (m.Address ?? string.Empty).Trim(),
+                Port: m.Port > 0 ? m.Port : 9100))
+            .ToList();
+        SqlPrinterTable.Upsert(_options, rows);
     }
 }

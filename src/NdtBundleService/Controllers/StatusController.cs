@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Services;
+using NdtBundleService.Services.MillInstanceStatus;
 using NdtBundleService.Services.PlcHandshake;
 
 namespace NdtBundleService.Controllers;
@@ -25,6 +26,7 @@ public sealed class StatusController : ControllerBase
     private readonly ISqlTraceabilityWriteTracker _sqlWriteTracker;
     private readonly AppLogReader _appLogReader;
     private readonly PlcHandshakeStatusRegistry _handshakeStatus;
+    private readonly IPlcLiveSnapshotService _plcLive;
     private readonly ILogger<StatusController> _logger;
 
     public StatusController(
@@ -34,6 +36,7 @@ public sealed class StatusController : ControllerBase
         PoEndDetectionDiagnostics poEndDiagnostics,
         PlcConnectionHealth plcHealth,
         PlcHandshakeStatusRegistry handshakeStatus,
+        IPlcLiveSnapshotService plcLive,
         ISqlTraceabilityHealth sqlHealth,
         ISqlTraceabilityWriteTracker sqlWriteTracker,
         AppLogReader appLogReader,
@@ -45,6 +48,7 @@ public sealed class StatusController : ControllerBase
         _poEndDiagnostics = poEndDiagnostics;
         _plcHealth = plcHealth;
         _handshakeStatus = handshakeStatus;
+        _plcLive = plcLive;
         _sqlHealth = sqlHealth;
         _sqlWriteTracker = sqlWriteTracker;
         _appLogReader = appLogReader;
@@ -95,7 +99,7 @@ public sealed class StatusController : ControllerBase
                         : report.MissingTables.Count > 0
                             ? "Connected but traceability tables are missing. Run docs/NDT_Traceability_Schema.sql."
                             : report.MissingColumns.Count > 0
-                                ? "Connected but required columns are missing. Run docs/Station_Printer_AddTable.sql."
+                                ? "Connected but required columns are missing. Run docs/Printer_AddTable.sql."
                                 : "Connected to JazeeraMES_Prod; traceability tables present."
         });
     }
@@ -106,6 +110,43 @@ public sealed class StatusController : ControllerBase
     [HttpGet("plc")]
     public async Task<IActionResult> GetPlcStatus(CancellationToken cancellationToken)
     {
+        var live = _plcLive.GetSnapshot();
+        if (live.PlcHandshakeEnabled && live.Source is PlcLiveSnapshotService.SourceLocal or PlcLiveSnapshotService.SourceSql)
+        {
+            var mills = live.Mills;
+            var byMill = mills.ToDictionary(m => m.MillNo, m => m.TriggerActive);
+            var poEndActive = mills.Any(m => m.TriggerActive);
+            var connected = mills.Any(m => m.PlcConnectionEnabled) &&
+                            mills.Where(m => m.PlcConnectionEnabled).All(m => m.Connected);
+
+            return Ok(new
+            {
+                Connected = connected,
+                LastPlcError = mills.Select(m => m.LastError).FirstOrDefault(e => !string.IsNullOrWhiteSpace(e))
+                    ?? _plcHealth.LastError,
+                LastPlcCheckUtc = mills.Count > 0 ? mills.Max(m => m.LastUpdateUtc) : _plcHealth.LastUpdateUtc,
+                PoEndActive = poEndActive,
+                PlcPoEndEnabled = true,
+                PlcHandshakeEnabled = true,
+                Driver = live.Source == PlcLiveSnapshotService.SourceSql ? "S7-Handshake-Sql" : "S7-Handshake",
+                PoEndDetectionMode = "PersistentHandshake",
+                PoEndByMill = new Dictionary<string, bool>
+                {
+                    ["1"] = byMill.TryGetValue(1, out var h1) && h1,
+                    ["2"] = byMill.TryGetValue(2, out var h2) && h2,
+                    ["3"] = byMill.TryGetValue(3, out var h3) && h3,
+                    ["4"] = byMill.TryGetValue(4, out var h4) && h4
+                },
+                HandshakeMills = mills.Select(MapHandshakeMill),
+                Message = live.Source == PlcLiveSnapshotService.SourceSql
+                    ? "Live OK/NOK/NDT from mill instances via Mill_Instance_Status. S7, PO-end, threshold, and tag print stay on each mill process."
+                    : "Persistent per-mill S7 PO-change handshake plus DB251 OK/NOK/NDT counts on the same connection. " +
+                      "When RecoverLatchedTriggerAtStartup is true, a latched trigger at connect is cleared via MES ack; " +
+                      "RunPoEndWorkflowOnStartupRecovery controls whether bundle close also runs (default false). " +
+                      "Use GET /api/Status/plc-live for dashboard polling."
+            });
+        }
+
         var handshakeCfg = _options.PlcHandshake ?? new PlcHandshakeOptions();
         if (handshakeCfg.Enabled)
         {
@@ -131,37 +172,7 @@ public sealed class StatusController : ControllerBase
                     ["3"] = byMill.TryGetValue(3, out var h3) && h3,
                     ["4"] = byMill.TryGetValue(4, out var h4) && h4
                 },
-                HandshakeMills = mills.Select(m => new
-                {
-                    m.MillName,
-                    m.MillNo,
-                    m.IpAddress,
-                    m.Connected,
-                    m.TriggerActive,
-                    m.AckActive,
-                    m.HandshakeState,
-                    m.LastPoChangeUtc,
-                    m.LastError,
-                    m.LastUpdateUtc,
-                    m.OkCount,
-                    m.NokCount,
-                    m.NdtCount,
-                    m.LineRunning,
-                    m.AccumulatedValue,
-                    m.ThresholdValue,
-                    m.HooterActive,
-                    m.PoId,
-                    m.SlitId,
-                    m.CountsUpdatedUtc,
-                    LastPoEnd = m.LastPoEnd is null
-                        ? null
-                        : new
-                        {
-                            m.LastPoEnd.PoId,
-                            m.LastPoEnd.NdtCountFinal,
-                            TimestampUtc = m.LastPoEnd.TimestampUtc
-                        }
-                }),
+                HandshakeMills = mills.Select(MapHandshakeMill),
                 Message = "Persistent per-mill S7 PO-change handshake plus DB251 OK/NOK/NDT counts on the same connection. " +
                     "When RecoverLatchedTriggerAtStartup is true, a latched trigger at connect is cleared via MES ack; " +
                     "RunPoEndWorkflowOnStartupRecovery controls whether bundle close also runs (default false). " +
@@ -221,28 +232,30 @@ public sealed class StatusController : ControllerBase
     }
 
     /// <summary>
-    /// Live OK/NOK/NDT counts from DB251 when <see cref="PlcHandshakeOptions.Enabled"/> is true
-    /// (same S7 connection as PO-change handshake — no plc-server required).
+    /// Live OK/NOK/NDT for the dashboard. Mill/monolith: in-memory S7 snapshot (no extra delay).
+    /// Shared: <c>dbo.Mill_Instance_Status</c> published by mill processes. Tag print / PO-end stay on each mill.
     /// </summary>
     [HttpGet("plc-live")]
     public IActionResult GetPlcLiveCounts()
     {
-        var handshakeCfg = _options.PlcHandshake ?? new PlcHandshakeOptions();
-        if (!handshakeCfg.Enabled)
+        var live = _plcLive.GetSnapshot();
+        if (!live.PlcHandshakeEnabled)
         {
             return Ok(new
             {
                 PlcHandshakeEnabled = false,
-                Message = "PlcHandshake disabled; use plc-server Socket.IO for live counts.",
+                Source = live.Source,
+                Message = live.Message ?? "PlcHandshake disabled; use plc-server Socket.IO for live counts.",
                 Mills = Array.Empty<object>()
             });
         }
 
-        var mills = _handshakeStatus.GetSnapshot();
         return Ok(new
         {
             PlcHandshakeEnabled = true,
-            Mills = mills.Select(m => new
+            Source = live.Source,
+            Message = live.Message,
+            Mills = live.Mills.Select(m => new
             {
                 m.MillName,
                 m.MillNo,
@@ -277,6 +290,38 @@ public sealed class StatusController : ControllerBase
             })
         });
     }
+
+    private static object MapHandshakeMill(PlcHandshakeMillStatus m) => new
+    {
+        m.MillName,
+        m.MillNo,
+        m.IpAddress,
+        m.Connected,
+        m.TriggerActive,
+        m.AckActive,
+        m.HandshakeState,
+        m.LastPoChangeUtc,
+        m.LastError,
+        m.LastUpdateUtc,
+        m.OkCount,
+        m.NokCount,
+        m.NdtCount,
+        m.LineRunning,
+        m.AccumulatedValue,
+        m.ThresholdValue,
+        m.HooterActive,
+        m.PoId,
+        m.SlitId,
+        m.CountsUpdatedUtc,
+        LastPoEnd = m.LastPoEnd is null
+            ? null
+            : new
+            {
+                m.LastPoEnd.PoId,
+                m.LastPoEnd.NdtCountFinal,
+                TimestampUtc = m.LastPoEnd.TimestampUtc
+            }
+    };
 
     private static string FormatPlcTimestamp(DateTimeOffset utc)
     {

@@ -80,6 +80,26 @@ public sealed class MillPrinterSqlCacheTests
         Assert.Contains("Mill 2", ex.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("MILL_1", 1)]
+    [InlineData("mill_4", 4)]
+    public void Printer_key_parses_mill_numbers(string key, int millNo)
+    {
+        Assert.True(SqlPrinterTable.TryParseMillKey(key, out var parsed));
+        Assert.Equal(millNo, parsed);
+        Assert.Equal($"MILL_{millNo}", SqlPrinterTable.MillKey(millNo));
+    }
+
+    [Theory]
+    [InlineData("VISUAL_REVISUAL")]
+    [InlineData("MILL_5")]
+    [InlineData("MILL_")]
+    [InlineData("")]
+    public void Printer_key_rejects_non_mill_keys(string key)
+    {
+        Assert.False(SqlPrinterTable.TryParseMillKey(key, out _));
+    }
+
     private static MillPrinterSettingsService NewService(
         IMillOwnership ownership,
         IMillPrinterBackingStore store,

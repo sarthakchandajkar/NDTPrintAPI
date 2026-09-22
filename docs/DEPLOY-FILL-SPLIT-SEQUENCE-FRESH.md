@@ -82,7 +82,7 @@ IF OBJECT_ID(N'dbo.Mill_Sequence', N'U') IS NOT NULL
 IF OBJECT_ID(N'dbo.Mill_Instance_Lease', N'U') IS NOT NULL
     DELETE FROM dbo.Mill_Instance_Lease;
 
--- Mill-state SQL (re-seeded: Mill_Printer / Station_Printer in step 3; accumulation/lifecycle stay empty)
+-- Mill-state SQL (re-seeded: Printer in step 3; accumulation/lifecycle stay empty)
 IF OBJECT_ID(N'dbo.Bundle_Accumulation', N'U') IS NOT NULL
     DELETE FROM dbo.Bundle_Accumulation;
 IF OBJECT_ID(N'dbo.Bundle_Accumulation_Context', N'U') IS NOT NULL
@@ -91,6 +91,8 @@ IF OBJECT_ID(N'dbo.Po_Lifecycle_Audit', N'U') IS NOT NULL
     DELETE FROM dbo.Po_Lifecycle_Audit;
 IF OBJECT_ID(N'dbo.Po_Lifecycle', N'U') IS NOT NULL
     DELETE FROM dbo.Po_Lifecycle;
+IF OBJECT_ID(N'dbo.Printer', N'U') IS NOT NULL
+    DELETE FROM dbo.Printer;
 IF OBJECT_ID(N'dbo.Mill_Printer', N'U') IS NOT NULL
     DELETE FROM dbo.Mill_Printer;
 IF OBJECT_ID(N'dbo.Station_Printer', N'U') IS NOT NULL
@@ -161,7 +163,7 @@ All under `\\10.2.20.210\pas-sap\To SAP\TM\NDT\NDT Input Slit\` and `…\NDT Inp
 | `MillPrinterSettings-M1.json` … `M4.json` | **Mandatory** |
 | `ManualStationState\` (entire folder) | Yes if present (`EnableManualStationStateFiles` is false; delete anyway) |
 
-Printer IPs live in `dbo.Mill_Printer` (mills 1–4) and Shared-only `dbo.Station_Printer` (three station codes). Step 3 seeds both at `192.168.0.125:9100`. Shared Settings `PUT /api/Settings/printers` writes both; mill-n re-reads mill rows within ~2s. Mill-1 falls back to `NdtTagPrinterAddress` only when its SQL mill row is missing. Mills 2–4 have **no** fallback to another mill's printer. Station tags have **no** mill fallback.
+Printer IPs live in one table: `dbo.Printer` (four `MILL_n` rows + three station keys). Step 3 seeds all seven at `192.168.0.125:9100`. Shared Settings `PUT /api/Settings/printers` writes mill and station rows; mill-n re-reads mill rows within ~2s. Mill-1 falls back to `NdtTagPrinterAddress` only when its SQL mill row is missing. Mills 2–4 have **no** fallback to another mill's printer. Station tags have **no** mill fallback.
 
 Confirm zero leftovers before start:
 
@@ -220,7 +222,7 @@ After mill start, first reconcile line must show `queued for backfill 0` (leftov
 
 ### 3. Schema scripts (dependency order)
 
-Run against `JazeeraMES_Prod` in SSMS, **after** the DELETE in step 2.1 so `Mill_Sequence` seeds from an empty `NDT_Bundle` and `Mill_Printer` / `Station_Printer` re-seed after the wipe. All scripts are additive / IF-missing. Skip a file only if you have already applied it in this session.
+Run against `JazeeraMES_Prod` in SSMS, **after** the DELETE in step 2.1 so `Mill_Sequence` seeds from an empty `NDT_Bundle` and `Printer` re-seeds after the wipe. All scripts are additive / IF-missing. Skip a file only if you have already applied it in this session.
 
 **Ordering that matters**
 
@@ -229,7 +231,7 @@ Run against `JazeeraMES_Prod` in SSMS, **after** the DELETE in step 2.1 so `Mill
 - `Mill_Sequence.sql` needs `NDT_Bundle` to exist (already does). After a wipe, seed is `0` for mills 1–4.
 - `Ppc_Correction_Item_Alter_ReplacementBatch.sql` needs `Ppc_Correction_Item` (already in prod). Run after that table exists.
 - `Mill_Instance_Lease.sql` is independent; needed before Mill-1..4 start.
-- `Bundle_Accumulation_AddTable.sql`, `Po_Lifecycle_AddTable.sql`, `Mill_Printer_AddTable.sql`, and `Station_Printer_AddTable.sql` have **no** CsvFill CHECK dependency. Run them **after** `Mill_Sequence` / Voided / Ppc ReplacementBatch (this session’s mill-state block) and **before** first start. `Mill_Printer` seed inserts only missing mill rows — because step 2.1 deleted the table rows, seed recreates 1–4 at `192.168.0.125:9100`. `Station_Printer` seed recreates the three station rows at the same IP (Visual/Revisual share one row).
+- `Bundle_Accumulation_AddTable.sql`, `Po_Lifecycle_AddTable.sql`, and `Printer_AddTable.sql` have **no** CsvFill CHECK dependency. Run them **after** `Mill_Sequence` / Voided / Ppc ReplacementBatch (this session’s mill-state block) and **before** first start. `Printer` seed inserts only missing keys — because step 2.1 deleted the table rows, seed recreates `MILL_1`…`MILL_4` plus `VISUAL_REVISUAL` / `BIG_HYDRO` / `FOUR_HEAD_HYDRO` at `192.168.0.125:9100`. If leftover `Mill_Printer` / `Station_Printer` tables exist, the script copies their IPs then drops them.
 
 **A. Already on production at `69d0d75` — run only if a table/column is missing**
 
@@ -255,8 +257,7 @@ Run against `JazeeraMES_Prod` in SSMS, **after** the DELETE in step 2.1 so `Mill
 17. `docs/Ppc_Correction_Item_Alter_ReplacementBatch.sql` (`9e79619`) — `Replacement_NDT_Batch_No`.
 18. `docs/Bundle_Accumulation_AddTable.sql` (`9377bca`) — `Bundle_Accumulation` + `Bundle_Accumulation_Context` (open remainder; CHECK Pcs > 0). No JSON migration.
 19. `docs/Po_Lifecycle_AddTable.sql` (`9377bca`) — `Po_Lifecycle` + `Po_Lifecycle_Audit` (Draining/Closed; Running = no row).
-20. `docs/Mill_Printer_AddTable.sql` (`9377bca`) — `Mill_Printer`; seed mills 1–4 at `192.168.0.125:9100`, `Updated_By = Seed`.
-21. `docs/Station_Printer_AddTable.sql` — `Station_Printer`; seed `VISUAL_REVISUAL`, `BIG_HYDRO`, `FOUR_HEAD_HYDRO` at `192.168.0.125:9100`, `Updated_By = Seed`. Also adds `Print_Status` / `Print_Error` on `Manual_Station_Run`.
+20. `docs/Printer_AddTable.sql` — `Printer`; seed `MILL_1`…`MILL_4` and `VISUAL_REVISUAL` / `BIG_HYDRO` / `FOUR_HEAD_HYDRO` at `192.168.0.125:9100`, `Updated_By = Seed`. Copies then drops leftover `Mill_Printer` / `Station_Printer`. Also adds `Print_Status` / `Print_Error` on `Manual_Station_Run`.
 
 Confirm CHECK after 16:
 
@@ -267,26 +268,21 @@ WHERE name = N'CK_NDT_Bundle_Csv_Fill_State';
 -- must include N'Voided'
 ```
 
-Confirm mill-state tables after 18–21:
+Confirm mill-state tables after 18–20:
 
 ```sql
 SELECT name FROM sys.tables
 WHERE name IN (
   N'Bundle_Accumulation', N'Bundle_Accumulation_Context',
-  N'Po_Lifecycle', N'Po_Lifecycle_Audit', N'Mill_Printer', N'Station_Printer'
+  N'Po_Lifecycle', N'Po_Lifecycle_Audit', N'Printer'
 )
 ORDER BY name;
--- six names
+-- five names (Mill_Printer / Station_Printer must be absent)
 
-SELECT Mill_No, Address, Port, Updated_By
-FROM dbo.Mill_Printer
-ORDER BY Mill_No;
--- four rows: 1–4, 192.168.0.125, 9100, Seed
-
-SELECT Station_Code, Address, Port, Updated_By
-FROM dbo.Station_Printer
-ORDER BY Station_Code;
--- three rows: BIG_HYDRO, FOUR_HEAD_HYDRO, VISUAL_REVISUAL; 192.168.0.125, 9100, Seed
+SELECT Printer_Key, Kind, Address, Port, Updated_By
+FROM dbo.Printer
+ORDER BY Kind, Printer_Key;
+-- seven rows: MILL_1…4 + BIG_HYDRO, FOUR_HEAD_HYDRO, VISUAL_REVISUAL; 192.168.0.125, 9100, Seed
 ```
 
 ---
@@ -295,7 +291,7 @@ ORDER BY Station_Code;
 
 Do **not** look for or run `Split-MillStateFiles.ps1`. It is gone from the repo.
 
-Open remainder is `Bundle_Accumulation`. PO drain/closed is `Po_Lifecycle`. Mill printers are `Mill_Printer`. Station printers are `Station_Printer` (Shared-only; Visual and Revisual share `VISUAL_REVISUAL`).
+Open remainder is `Bundle_Accumulation`. PO drain/closed is `Po_Lifecycle`. Printers (mills 1–4 and stations) are `Printer`. Station writes stay Shared-only; Visual and Revisual share `VISUAL_REVISUAL`.
 
 Step 2.4 must already have printed `OK: no leftover mill-state JSON`. If a service starts and you see `Leftover mill-state JSON found`, stop it, delete the named files, start again. There is no import path from those JSON files into SQL.
 
@@ -355,8 +351,7 @@ Must see:
 - `SQL traceability table Bundle_Accumulation: 0 row(s).`
 - `SQL traceability table Bundle_Accumulation_Context: 0 row(s).`
 - `SQL traceability table Po_Lifecycle: 0 row(s).`
-- `SQL traceability table Mill_Printer: 4 row(s).`  ← mill printer seed
-- `SQL traceability table Station_Printer: 3 row(s).`  ← station printer seed (Visual/Revisual, Big Hydro, Four-Head Hydro)
+- `SQL traceability table Printer: 7 row(s).`  ← mill + station printer seed
 - `NdtBundle:MinSourceFileLastWriteUtc floor is none.`
 - `PO_Plan_WIP folder import starting (folder \\10.2.20.210\pas-sap\From SAP\TMFG_TMWIP\PO Accepted; …)`
 - `PO_Plan_WIP folder import finished: scanned …`
@@ -366,7 +361,7 @@ Must see:
 Must **not** see:
 
 - `Leftover mill-state JSON found`
-- `SQL traceability tables missing … Bundle_Accumulation` / `Po_Lifecycle` / `Mill_Printer` / `Station_Printer`
+- `SQL traceability tables missing … Bundle_Accumulation` / `Po_Lifecycle` / `Printer`
 - `SQL traceability columns missing … Manual_Station_Run.Print_Status` / `Manual_Station_Run.Print_Error`
 - `PlcHandshakeWorker starting`
 - `SlitMonitoringWorker started`
@@ -374,13 +369,11 @@ Must **not** see:
 - `Fill-to-target cutover blocked`
 - `PoLifecycleSweepWorker started`
 
-If `SQL traceability tables missing` names `Mill_Sequence`, `Bundle_Accumulation`, `Po_Lifecycle`, `Mill_Printer`, or `Station_Printer`, stop and finish step 3.
+If `SQL traceability tables missing` names `Mill_Sequence`, `Bundle_Accumulation`, `Po_Lifecycle`, or `Printer`, stop and finish step 3.
 
-If `SQL traceability columns missing` names `Manual_Station_Run.Print_Status` or `Manual_Station_Run.Print_Error`, the ALTER in script 21 did not run. Re-run `docs/Station_Printer_AddTable.sql` (the table CREATE can already have succeeded) and restart Shared.
+If `SQL traceability columns missing` names `Manual_Station_Run.Print_Status` or `Manual_Station_Run.Print_Error`, the ALTER in script 20 did not run. Re-run `docs/Printer_AddTable.sql` (the table CREATE can already have succeeded) and restart Shared.
 
-If `Mill_Printer` is `0 row(s)`, the seed INSERT did not run (table existed empty after DELETE, script skipped CREATE, but INSERT of missing mills should still run). Re-run `docs/Mill_Printer_AddTable.sql` and restart Shared.
-
-If `Station_Printer` is `0 row(s)`, re-run `docs/Station_Printer_AddTable.sql` and restart Shared. Station tags have no mill fallback — a missing row skips the tag.
+If `Printer` is `0 row(s)`, the seed INSERT did not run (table existed empty after DELETE, script skipped CREATE, but INSERT of missing keys should still run). Re-run `docs/Printer_AddTable.sql` and restart Shared. Station tags have no mill fallback — a missing station key skips the tag.
 
 #### 6.2 Mill-1 — `Start-Service NdtBundleService-M1`
 
@@ -389,8 +382,7 @@ Must see (`[Mill/1]`):
 - Same SQL connected lines (or at least no “not reachable”)
 - `SQL traceability table Bundle_Accumulation: 0 row(s).`
 - `SQL traceability table Po_Lifecycle: 0 row(s).`
-- `SQL traceability table Mill_Printer: 4 row(s).`
-- `SQL traceability table Station_Printer: 3 row(s).`
+- `SQL traceability table Printer: 7 row(s).`
 - `NdtBundle:MinSourceFileLastWriteUtc floor is 2026-08-30T12:53:57.0000000Z.` (or the re-measured floor)
 - `Mill_Sequence mill 1 seeded Current_Sequence=…` **only if** the row was missing. After step 3 seed, the row exists → you will **not** see `seeded`; that is OK.
 - `Mill_Sequence startup guard passed (mill 1)`
@@ -426,7 +418,7 @@ Same as M1 with mill **2**, plus:
 
 (`PlcHandshake.Enabled` is true on the mill template so the worker starts, then skips S7 because `PlcHandshakeEnabled=false`.)
 
-Guard + cutover + lease for mill 2. `Mill_Printer: 4 row(s).` `Station_Printer: 3 row(s).` Reconcile queued 0.
+Guard + cutover + lease for mill 2. `Printer: 7 row(s).` Reconcile queued 0.
 
 #### 6.4 Mill-3 — `Start-Service NdtBundleService-M3`
 
@@ -441,7 +433,7 @@ Same pattern, mill **4**:
 
 ---
 
-### 7. Post-reset `Mill_Sequence` and `Mill_Printer` verification (before first close)
+### 7. Post-reset `Mill_Sequence` and `Printer` verification (before first close)
 
 ```sql
 USE JazeeraMES_Prod;
@@ -475,13 +467,9 @@ SELECT COUNT(*) AS AccRows FROM dbo.Bundle_Accumulation;
 SELECT COUNT(*) AS CtxRows FROM dbo.Bundle_Accumulation_Context;
 SELECT COUNT(*) AS LifeRows FROM dbo.Po_Lifecycle;
 
-SELECT Mill_No, Address, Port, Updated_By
-FROM dbo.Mill_Printer
-ORDER BY Mill_No;
-
-SELECT Station_Code, Address, Port, Updated_By
-FROM dbo.Station_Printer
-ORDER BY Station_Code;
+SELECT Printer_Key, Kind, Address, Port, Updated_By
+FROM dbo.Printer
+ORDER BY Kind, Printer_Key;
 ```
 
 **Clean result after this reset (year 2026):**
@@ -497,17 +485,15 @@ Four `Mill_Sequence` rows, nothing else. `Updated_By` is `Migration` (SQL seed) 
 
 `AccRows` = 0, `CtxRows` = 0, `LifeRows` = 0.
 
-`Mill_Printer`: four rows, Address `192.168.0.125`, Port `9100`, `Updated_By` `Seed` (until an operator saves Settings).
-
-`Station_Printer`: three rows (`VISUAL_REVISUAL`, `BIG_HYDRO`, `FOUR_HEAD_HYDRO`), same seed address. Visual and Revisual share one row. Station tags print at the inspection point, not the bundle mill.
+`Printer`: seven rows (`MILL_1`…`MILL_4`, `VISUAL_REVISUAL`, `BIG_HYDRO`, `FOUR_HEAD_HYDRO`), Address `192.168.0.125`, Port `9100`, `Updated_By` `Seed` (until an operator saves Settings). Visual and Revisual share one row. Station tags print at the inspection point, not the bundle mill.
 
 First close on mill *n* is sequence **1**, tag `12` + `26` + mill digit + `00001` (mill 1: `1226100001`).
 
 If `Current_Sequence` is not 0, **do not close**. You seeded before the DELETE, or leftover bundles remain. Fix table, then start.
 
-If `Mill_Printer` is missing a mill, **do not close** that mill expecting a tag. Re-run script 20. Mills 2–4 with no row log `PrintFailed` / `no printer configured for mill N` (no fall-back). Mill-1 missing row uses `NdtTagPrinterAddress`.
+If `Printer` is missing a mill key, **do not close** that mill expecting a tag. Re-run script 20. Mills 2–4 with no row log `PrintFailed` / `no printer configured for mill N` (no fall-back). Mill-1 missing row uses `NdtTagPrinterAddress`.
 
-If `Station_Printer` is missing a code, station tags for that point will not print. Re-run script 21. No mill fallback.
+If `Printer` is missing a station key, station tags for that point will not print. Re-run script 20. No mill fallback.
 
 ---
 
@@ -521,7 +507,7 @@ Pick a mill that will actually run (typically mill 1). Confirm `PO_Plan_WIP` has
    - `Mill_Sequence.Current_Sequence` for that mill = **1**
    - `NDT_Bundle` one row, `Bundle_No` = `1226n00001`, `Print_Status` = `Printed` (or `Pending`/`PrintFailed` if printer down — SQL row must still exist)
    - `Target_Ndt_Pcs` set on mill 1; mills 2–4 output batch `10001` (constant)
-   - Tag at that mill’s `Mill_Printer` address (seed `192.168.0.125:9100`)
+   - Tag at that mill’s `Printer` `MILL_n` address (seed `192.168.0.125:9100`)
    - That mill/PO/size row is gone from `Bundle_Accumulation` after close
 4. More slits until PO end (PLC trigger mill 1; file/TCP mill 4). Remainder bundle closes (`Bundle_Accumulation` still has pcs at PO-end). `Current_Sequence` steps by one per close. No `bundle close failed: could not allocate sequence`. No leftover `Bundle_Accumulation` rows for that PO after PO-end with SQL up.
 5. Shared: SAP-status watcher sees the new output basename as Pending until SAP moves it (SAP is **not** picking up yet — file stays in pending; that is OK).
@@ -536,7 +522,7 @@ The stack adds tables/columns the old binary does not need, but fill-to-target C
 
 1. `Stop-Service NdtBundleService-M1, NdtBundleService-M2, NdtBundleService-M3, NdtBundleService-M4`
 2. `Stop-Service NdtBundleService-Shared`
-3. Restore `JazeeraMES_Prod` from the step-1 backup (this removes `Mill_Sequence`, `Mill_Instance_Lease`, `App_Setting`, `Bundle_Accumulation`, `Po_Lifecycle`, `Mill_Printer`, `Station_Printer`, CsvFill/Voided columns, fill hold/audit, etc., and puts data back).
+3. Restore `JazeeraMES_Prod` from the step-1 backup (this removes `Mill_Sequence`, `Mill_Instance_Lease`, `App_Setting`, `Bundle_Accumulation`, `Po_Lifecycle`, `Printer`, CsvFill/Voided columns, fill hold/audit, etc., and puts data back).
 4. Replace `C:\Apps\NdtBundleService\bin` with the `69d0d75` publish. Restore the old monolith content root / `appsettings` (that binary **does** use JSON mill-state files).
 5. Start the **old monolith** Windows Service only. Leave the five new services stopped (or `sc.exe delete` them after rollback is proven).
 6. If you did **not** restore the DB and only swapped the exe: old monolith will not use `Mill_Sequence`; it will number from JSON again. That can **collide** with any `NDT_Bundle` rows the new build inserted. Do not do a binary-only rollback after any mill has closed a bundle. Restore the DB.
@@ -554,10 +540,9 @@ Folder archive from step 2.3 stays archived unless you need those files back in 
 - Any mill: `Mill_Sequence for mill N is X; live bundles go to Y`
 - Any mill: `Mill_Instance_Lease claim failed`
 - Any mill: `queued for backfill` > 0 right after this reset
-- Shared or mill: missing `Mill_Sequence` / `Bundle_Accumulation` / `Po_Lifecycle` / `Mill_Printer` / `Station_Printer` in SQL health
-- Shared or mill: `SQL traceability columns missing` `Manual_Station_Run.Print_Status` / `Print_Error` (script 21 ALTER not applied)
-- Shared or mill: `Mill_Printer: 0 row(s).` (seed missing)
-- Shared: `Station_Printer: 0 row(s).` (seed missing; station tags will not print)
+- Shared or mill: missing `Mill_Sequence` / `Bundle_Accumulation` / `Po_Lifecycle` / `Printer` in SQL health
+- Shared or mill: `SQL traceability columns missing` `Manual_Station_Run.Print_Status` / `Print_Error` (script 20 ALTER not applied)
+- Shared or mill: `Printer: 0 row(s).` (seed missing)
 - `CK_NDT_Bundle_Csv_Fill_State` insert error mentioning `Voided` → Voided script did not run after CsvFill
 
 ---

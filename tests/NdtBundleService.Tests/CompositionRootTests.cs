@@ -7,6 +7,7 @@ using NdtBundleService.Configuration;
 using NdtBundleService.DependencyInjection;
 using NdtBundleService.Services;
 using NdtBundleService.Services.InstanceLease;
+using NdtBundleService.Services.MillInstanceStatus;
 using NdtBundleService.Services.PlcHandshake;
 using NdtBundleService.Services.PoLifecycle;
 using Xunit;
@@ -64,6 +65,7 @@ public sealed class CompositionRootTests : IDisposable
         Assert.Contains(typeof(NdtInputSlitSapStatusWorker), types);
         Assert.DoesNotContain(typeof(PlcHandshakeWorker), types);
         Assert.DoesNotContain(typeof(SlitMonitoringWorker), types);
+        Assert.DoesNotContain(typeof(MillInstanceStatusPublisher), types);
         Assert.DoesNotContain(typeof(PoReopenWipConfirmationBridge), types);
         Assert.DoesNotContain(typeof(MillInstanceLeaseHostedService), types);
         Assert.DoesNotContain(typeof(FillCutoverStartupCheck), types);
@@ -73,6 +75,7 @@ public sealed class CompositionRootTests : IDisposable
         Assert.NotNull(provider.GetRequiredService<IBundleMergeService>());
         Assert.NotNull(provider.GetRequiredService<IStationPrinterSettingsService>());
         Assert.NotNull(provider.GetRequiredService<IManualNdtTagService>());
+        Assert.NotNull(provider.GetRequiredService<IPlcLiveSnapshotService>());
     }
 
     [Theory]
@@ -87,6 +90,7 @@ public sealed class CompositionRootTests : IDisposable
         var types = GetHostedServiceTypes(provider);
         Assert.Contains(typeof(PlcHandshakeWorker), types);
         Assert.Contains(typeof(SlitMonitoringWorker), types);
+        Assert.Contains(typeof(MillInstanceStatusPublisher), types);
         Assert.Contains(typeof(PoReopenWipConfirmationBridge), types);
         Assert.Contains(typeof(MillInstanceLeaseHostedService), types);
         Assert.Contains(typeof(FillCutoverStartupCheck), types);
@@ -106,6 +110,10 @@ public sealed class CompositionRootTests : IDisposable
         Assert.True(
             hosted.IndexOf(typeof(MillInstanceLeaseHostedService))
             < hosted.IndexOf(typeof(SlitMonitoringWorker)));
+        Assert.True(
+            hosted.IndexOf(typeof(SlitMonitoringWorker))
+            < hosted.IndexOf(typeof(MillInstanceStatusPublisher)));
+        Assert.NotNull(provider.GetRequiredService<IPlcLiveSnapshotService>());
     }
 
     [Fact]
@@ -195,6 +203,7 @@ public sealed class CompositionRootTests : IDisposable
         Assert.Contains(typeof(SlitMonitoringWorker), types);
         Assert.Contains(typeof(NdtInputSlitSapStatusWorker), types);
         Assert.Contains(typeof(MillInstanceLeaseHostedService), types);
+        Assert.Contains(typeof(MillInstanceStatusPublisher), types);
         Assert.Contains(typeof(MillSequenceStartupGuard), types);
         Assert.Contains(typeof(LegacyJsonStateStartupCheck), types);
         Assert.IsType<ZplGenerationToggle>(provider.GetRequiredService<IZplGenerationToggle>());
@@ -202,6 +211,7 @@ public sealed class CompositionRootTests : IDisposable
         Assert.NotNull(provider.GetRequiredService<IBundleMergeService>());
         Assert.NotNull(provider.GetRequiredService<IStationPrinterSettingsService>());
         Assert.NotNull(provider.GetRequiredService<IManualNdtTagService>());
+        Assert.NotNull(provider.GetRequiredService<IPlcLiveSnapshotService>());
 
         var hosted = provider.GetServices<IHostedService>().Select(s => s.GetType()).ToList();
         var lease = hosted.IndexOf(typeof(MillInstanceLeaseHostedService));

@@ -49,7 +49,7 @@ BEGIN
         AtUtc                DATETIME2(3)   NOT NULL
             CONSTRAINT DF_Po_Lifecycle_Audit_AtUtc DEFAULT (SYSUTCDATETIME())
     );
-    CREATE INDEX IX_Po_Lifecycle_Audit_Mill
+    CREATE INDEX IX_Po_Lifecycle_+-+Audit_Mill
         ON dbo.Po_Lifecycle_Audit (Mill_No, Po_Number, AtUtc);
 END
 GO

@@ -6,6 +6,7 @@ using NdtBundleService.Configuration;
 using NdtBundleService.Services;
 using NdtBundleService.Services.FileBasedPoChange;
 using NdtBundleService.Services.InstanceLease;
+using NdtBundleService.Services.MillInstanceStatus;
 using NdtBundleService.Services.PlcHandshake;
 using NdtBundleService.Services.PlcHandshake.PlcPoEnd;
 using NdtBundleService.Services.PlcHandshake.S7;
@@ -81,6 +82,15 @@ public static class NdtBundleServiceCollectionExtensions
         services.AddSingleton<IUploadNdtBundleFileService, UploadNdtBundleFileService>();
         services.AddSingleton<IAppSettingRepository, AppSettingRepository>();
         services.AddSingleton<IMillInstanceLeaseService, MillInstanceLeaseService>();
+        services.AddSingleton<IMillInstanceStatusStore>(sp =>
+        {
+            var options = sp.GetRequiredService<IOptionsMonitor<NdtBundleOptions>>();
+            var logger = sp.GetRequiredService<ILoggerFactory>()
+                .CreateLogger(typeof(SqlMillInstanceStatusStore));
+            if (SqlTraceabilityConnection.IsSqlEnabled(options.CurrentValue))
+                return new SqlMillInstanceStatusStore(options, logger);
+            return new InMemoryMillInstanceStatusStore();
+        });
 
         // Settings (printers / formation / ZPL) live on Shared and Mill instances.
         if (role.IsMonolith || role.EnableDashboardApi || role.IsMill)
@@ -130,6 +140,7 @@ public static class NdtBundleServiceCollectionExtensions
         services.AddSingleton<PlcPoEndPollHandler>();
         services.AddSingleton<PlcConnectionHealth>();
         services.AddSingleton<PlcHandshakeStatusRegistry>();
+        services.AddSingleton<IPlcLiveSnapshotService, PlcLiveSnapshotService>();
         services.AddSingleton<PlcHandshakeCoordinator>();
         services.AddSingleton<IPoChangeHandler, PoChangeHandler>();
         services.AddSingleton<IMillHooterPlcValuesService, MillHooterPlcValuesService>();
@@ -198,6 +209,8 @@ public static class NdtBundleServiceCollectionExtensions
             services.AddHostedService<WipBundleFileReconciliationWorker>();
             services.AddHostedService<PoLifecycleSweepWorker>();
             services.AddHostedService<SlitMonitoringWorker>();
+            // Dashboard telemetry only — after mill workers so lease/handshake start first.
+            services.AddHostedService<MillInstanceStatusPublisher>();
         }
 
         if (role.IsMonolith || role.IsShared)

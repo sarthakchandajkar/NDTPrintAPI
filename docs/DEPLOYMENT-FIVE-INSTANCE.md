@@ -22,11 +22,12 @@ Templates live in repo under `deploy/instances/{shared,mill-1..4}/`. Copy them i
 1. `docs/App_Setting_AddTable.sql` — shared ZPL print toggle
 2. `docs/Mill_Instance_Lease.sql` — exclusive mill lease
 3. Fill-to-target schema already applied (`docs/NDT_Bundle_Alter_CsvFill.sql`)
-4. `docs/Bundle_Accumulation_AddTable.sql`, `docs/Po_Lifecycle_AddTable.sql`, `docs/Mill_Printer_AddTable.sql`, `docs/Station_Printer_AddTable.sql`
+4. `docs/Bundle_Accumulation_AddTable.sql`, `docs/Po_Lifecycle_AddTable.sql`, `docs/Printer_AddTable.sql`
+5. `docs/Mill_Instance_Status_AddTable.sql` — mill live PLC snapshot for Shared dashboard tiles (PO-end/print stay on each mill)
 
 ## Mill state is SQL (no JSON split)
 
-`Split-MillStateFiles.ps1` is deleted. Open remainder is `Bundle_Accumulation`; PO drain/closed is `Po_Lifecycle`; printers are `Mill_Printer` (seeded `192.168.0.125:9100`). Delete leftover `NdtBundleRuntimeState*.json`, `PoLifecycleState*.json`, and `MillPrinterSettings*.json` or mill/shared startup throws.
+`Split-MillStateFiles.ps1` is deleted. Open remainder is `Bundle_Accumulation`; PO drain/closed is `Po_Lifecycle`; printers are `Printer` (seeded `192.168.0.125:9100`). Delete leftover `NdtBundleRuntimeState*.json`, `PoLifecycleState*.json`, and `MillPrinterSettings*.json` or mill/shared startup throws.
 
 ## Install / update services
 
@@ -85,9 +86,9 @@ See [DASHBOARD-MULTI-INSTANCE-GAPS.md](./DASHBOARD-MULTI-INSTANCE-GAPS.md).
 
 ## Follow-up (this release): station printers
 
-`Mill_Printer` stays mills 1–4. Station tags use Shared-only `dbo.Station_Printer`, keyed by station code — three rows:
+All ZPL printers live in `dbo.Printer`. Mill tags use `MILL_1`…`MILL_4`. Station tags use Shared-only writes of three station keys — three rows:
 
-| Code | Physical point | Workflows |
+| Key | Physical point | Workflows |
 |---|---|---|
 | `VISUAL_REVISUAL` | A (Visual and Revisual, same printer) | Visual, Revisual |
 | `BIG_HYDRO` | B | BigHydrotesting (legacy `Hydrotesting` also maps here with a warning) |
@@ -95,4 +96,4 @@ See [DASHBOARD-MULTI-INSTANCE-GAPS.md](./DASHBOARD-MULTI-INSTANCE-GAPS.md).
 
 **Behaviour change:** `ManualNdtTagService` used to print via `ResolveForMill(state.MillNo)` (bundle mill). It now resolves by station. A Mill-2 bundle at Visual prints at point A, not Mill-2.
 
-Seed is `192.168.0.125:9100` on all three until real IPs are saved. Missing/empty station row fails with `Printer not configured for Visual/Revisual` (never a mill or another station). ManualTags stays Shared-only.
+Seed is `192.168.0.125:9100` on all `Printer` rows until real IPs are saved. Missing/empty station row fails with `Printer not configured for Visual/Revisual` (never a mill or another station). ManualTags stays Shared-only.

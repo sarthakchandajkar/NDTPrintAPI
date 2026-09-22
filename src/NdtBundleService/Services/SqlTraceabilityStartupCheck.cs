@@ -70,7 +70,7 @@ public sealed class SqlTraceabilityStartupCheck : IHostedService
         if (report.MissingColumns.Count > 0)
         {
             _logger.LogError(
-                "SQL traceability columns missing in {Database}: {Columns}. Run docs/Station_Printer_AddTable.sql against JazeeraMES_Prod.",
+                "SQL traceability columns missing in {Database}: {Columns}. Run docs/Printer_AddTable.sql against JazeeraMES_Prod.",
                 report.Database,
                 string.Join(", ", report.MissingColumns));
         }

@@ -6,6 +6,7 @@ using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Models;
 using NdtBundleService.Services;
+using NdtBundleService.Services.MillInstanceStatus;
 
 namespace NdtBundleService.Controllers;
 
@@ -30,6 +31,7 @@ public sealed class TestController : ControllerBase
     private readonly IActivePoPerMillService _activePoPerMill;
     private readonly IWipBundleRunningPoProvider _wipBundleRunningPo;
     private readonly IMillNdtCountReader _millNdtCountReader;
+    private readonly IMillInstanceStatusStore _millStatus;
     private readonly IPoEndWorkflowService _poEndWorkflow;
     private readonly INdtBundleRuntimeStateStore _runtimeState;
     private readonly INdtBundleRepository _bundleRepository;
@@ -49,6 +51,7 @@ public sealed class TestController : ControllerBase
         IActivePoPerMillService activePoPerMill,
         IWipBundleRunningPoProvider wipBundleRunningPo,
         IMillNdtCountReader millNdtCountReader,
+        IMillInstanceStatusStore millStatus,
         IPoEndWorkflowService poEndWorkflow,
         INdtBundleRuntimeStateStore runtimeState,
         INdtBundleRepository bundleRepository,
@@ -64,6 +67,7 @@ public sealed class TestController : ControllerBase
         _activePoPerMill = activePoPerMill;
         _wipBundleRunningPo = wipBundleRunningPo;
         _millNdtCountReader = millNdtCountReader;
+        _millStatus = millStatus;
         _poEndWorkflow = poEndWorkflow;
         _runtimeState = runtimeState;
         _bundleRepository = bundleRepository;
@@ -590,6 +594,8 @@ public sealed class TestController : ControllerBase
                 }
             }
 
+            liveNdtCount ??= TryLiveNdtFromMillStatus(liveOpts.ApplyToMillNo);
+
             var slitLocations = string.Join(" | ", _activePoPerMill.GetInputSlitReadFolderPaths().Where(static p => !string.IsNullOrWhiteSpace(p)));
             var bundleLoc = string.Join(
                 " | ",
@@ -631,6 +637,17 @@ public sealed class TestController : ControllerBase
         if (m is < 1 or > 4)
             return BadRequest(new { Message = "millNo must be 1..4 (or 0 to use MillSlitLive.ApplyToMillNo)." });
 
+        if (MillSlitLiveS7EndpointConfigured(live) && m == live.ApplyToMillNo)
+        {
+            var ndt = await _millNdtCountReader.TryReadNdtPipesCountAsync(cancellationToken).ConfigureAwait(false);
+            if (ndt is not null)
+                return Ok(new { millNo = m, ndtCount = ndt });
+        }
+
+        var sqlNdt = TryLiveNdtFromMillStatus(m);
+        if (sqlNdt is not null)
+            return Ok(new { millNo = m, ndtCount = sqlNdt, source = "mill-status" });
+
         if (m != live.ApplyToMillNo)
         {
             return Ok(new
@@ -653,8 +670,27 @@ public sealed class TestController : ControllerBase
             });
         }
 
-        var ndt = await _millNdtCountReader.TryReadNdtPipesCountAsync(cancellationToken).ConfigureAwait(false);
-        return Ok(new { millNo = m, ndtCount = ndt });
+        var ndtRetry = await _millNdtCountReader.TryReadNdtPipesCountAsync(cancellationToken).ConfigureAwait(false);
+        return Ok(new { millNo = m, ndtCount = ndtRetry });
+    }
+
+    private int? TryLiveNdtFromMillStatus(int millNo)
+    {
+        if (millNo is < 1 or > 4)
+            return null;
+        try
+        {
+            var row = _millStatus.LoadAll().FirstOrDefault(m => m.MillNo == millNo);
+            if (row is null)
+                return null;
+            var fresh = MillInstanceStatusFreshness.Apply(row, DateTimeOffset.UtcNow);
+            return fresh.NdtCount;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Mill_Instance_Status NDT lookup skipped for mill {Mill}.", millNo);
+            return null;
+        }
     }
 
     private static bool MillSlitLiveS7EndpointConfigured(MillSlitLiveOptions live) =>

@@ -1,4 +1,3 @@
-using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
@@ -17,7 +16,7 @@ public interface IStationPrinterSettingsService
 }
 
 /// <summary>
-/// Per-station ZPL printer endpoints in <c>dbo.Station_Printer</c>. Shared/Monolith only.
+/// Per-station ZPL printer endpoints in <c>dbo.Printer</c> (<c>Kind=Station</c>). Shared/Monolith only.
 /// No mill fallback. Missing or blank row is not configured. 2s read-through cache.
 /// </summary>
 public sealed class StationPrinterSettingsService : IStationPrinterSettingsService
@@ -95,7 +94,7 @@ public sealed class StationPrinterSettingsService : IStationPrinterSettingsServi
             _cacheExpiresUtc = _utcNow().Add(CacheTtl);
         }
 
-        _logger.LogInformation("Saved station printer settings to Station_Printer ({Count} station(s)).", owned.Count);
+        _logger.LogInformation("Saved station printer settings to Printer ({Count} station(s)).", owned.Count);
         return Task.CompletedTask;
     }
 
@@ -140,7 +139,7 @@ public sealed class StationPrinterSettingsService : IStationPrinterSettingsServi
         if (role.IsShared || role.IsMonolith)
             return;
 
-        throw new InvalidOperationException("Station_Printer writes are Shared-only.");
+        throw new InvalidOperationException("Station printer writes are Shared-only.");
     }
 
     private static Dictionary<string, StationPrinterEndpoint> ToMap(IEnumerable<StationPrinterEndpoint> stations)
@@ -214,26 +213,12 @@ internal sealed class SqlStationPrinterBackingStore : IStationPrinterBackingStor
     public IReadOnlyDictionary<string, StationPrinterEndpoint> Load()
     {
         var map = new Dictionary<string, StationPrinterEndpoint>(StringComparer.OrdinalIgnoreCase);
-        try
+        foreach (var (key, address, port) in SqlPrinterTable.Load(_options, _logger, SqlPrinterTable.KindStation))
         {
-            using var conn = SqlTraceabilityConnection.Create(_options.CurrentValue);
-            conn.Open();
-            using var cmd = new SqlCommand("SELECT Station_Code, Address, Port FROM dbo.Station_Printer;", conn);
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read())
-            {
-                var code = reader.IsDBNull(0) ? string.Empty : reader.GetString(0);
-                if (!StationPrinterTarget.IsKnown(code))
-                    continue;
-                map[StationPrinterTarget.Normalize(code)] = new StationPrinterEndpoint(
-                    StationPrinterTarget.Normalize(code),
-                    reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
-                    reader.GetInt32(2));
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to load Station_Printer.");
+            if (!StationPrinterTarget.IsKnown(key))
+                continue;
+            var code = StationPrinterTarget.Normalize(key);
+            map[code] = new StationPrinterEndpoint(code, address, port);
         }
 
         return map;
@@ -241,25 +226,14 @@ internal sealed class SqlStationPrinterBackingStore : IStationPrinterBackingStor
 
     public void Save(IReadOnlyList<StationPrinterEndpoint> stations)
     {
-        using var conn = SqlTraceabilityConnection.Create(_options.CurrentValue);
-        conn.Open();
-        foreach (var s in stations)
-        {
-            using var cmd = new SqlCommand(@"
-MERGE dbo.Station_Printer WITH (HOLDLOCK) AS t
-USING (SELECT @Code AS Station_Code) AS s
-ON t.Station_Code = s.Station_Code
-WHEN MATCHED THEN UPDATE SET
-    Address = @Address,
-    Port = @Port,
-    Updated_AtUtc = SYSUTCDATETIME(),
-    Updated_By = N'Dashboard'
-WHEN NOT MATCHED THEN INSERT (Station_Code, Address, Port, Updated_By)
-VALUES (@Code, @Address, @Port, N'Dashboard');", conn);
-            cmd.Parameters.AddWithValue("@Code", s.StationCode);
-            cmd.Parameters.AddWithValue("@Address", (s.Address ?? string.Empty).Trim());
-            cmd.Parameters.AddWithValue("@Port", s.Port > 0 ? s.Port : 9100);
-            cmd.ExecuteNonQuery();
-        }
+        var rows = stations
+            .Where(s => StationPrinterTarget.IsKnown(s.StationCode))
+            .Select(s => (
+                Key: StationPrinterTarget.Normalize(s.StationCode),
+                Kind: SqlPrinterTable.KindStation,
+                Address: (s.Address ?? string.Empty).Trim(),
+                Port: s.Port > 0 ? s.Port : 9100))
+            .ToList();
+        SqlPrinterTable.Upsert(_options, rows);
     }
 }
