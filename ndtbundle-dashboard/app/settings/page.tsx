@@ -330,8 +330,17 @@ export default function SettingsPage() {
   const [formationRows, setFormationRows] = useState<FormationChartEntryRow[]>([]);
   const [formationSource, setFormationSource] = useState<string | null>(null);
   const [plc, setPlc] = useState<SettingsPlcDiagnostics | null>(null);
-  const [printers, setPrinters] = useState<SettingsPrinterMill[]>([]);
-  const [stationPrinters, setStationPrinters] = useState<SettingsPrinterStation[]>([]);
+  const [printers, setPrinters] = useState<SettingsPrinterMill[]>([
+    { millNo: 1, address: "", port: 9100 },
+    { millNo: 2, address: "", port: 9100 },
+    { millNo: 3, address: "", port: 9100 },
+    { millNo: 4, address: "", port: 9100 },
+  ]);
+  const [stationPrinters, setStationPrinters] = useState<SettingsPrinterStation[]>([
+    { stationCode: "VISUAL_REVISUAL", displayName: "Visual / Revisual", address: "", port: 9100 },
+    { stationCode: "BIG_HYDRO", displayName: "Big Hydrotesting", address: "", port: 9100 },
+    { stationCode: "FOUR_HEAD_HYDRO", displayName: "Four Head Hydrotesting", address: "", port: 9100 },
+  ]);
   const [millSequences, setMillSequences] = useState<MillSequenceSnapshot[]>([]);
   const [seqDraft, setSeqDraft] = useState<Record<number, string>>({});
   const [seqReason, setSeqReason] = useState("");
@@ -381,14 +390,24 @@ export default function SettingsPage() {
             : [1, 2, 3, 4].map((m) => ({ millNo: m, address: "", port: 9100 }))
         );
         const stations = Array.isArray(r.stations) ? r.stations : [];
+        const stationDefaults: SettingsPrinterStation[] = [
+          { stationCode: "VISUAL_REVISUAL", displayName: "Visual / Revisual", address: "", port: 9100 },
+          { stationCode: "BIG_HYDRO", displayName: "Big Hydrotesting", address: "", port: 9100 },
+          { stationCode: "FOUR_HEAD_HYDRO", displayName: "Four Head Hydrotesting", address: "", port: 9100 },
+        ];
         setStationPrinters(
-          stations.length > 0
-            ? stations
-            : [
-                { stationCode: "VISUAL_REVISUAL", displayName: "Visual/Revisual", address: "", port: 9100 },
-                { stationCode: "BIG_HYDRO", displayName: "Big Hydro", address: "", port: 9100 },
-                { stationCode: "FOUR_HEAD_HYDRO", displayName: "Four-Head Hydro", address: "", port: 9100 },
-              ]
+          stationDefaults.map((d) => {
+            const fromApi = stations.find(
+              (s) => (s.stationCode ?? "").toUpperCase() === d.stationCode
+            );
+            return {
+              ...d,
+              address: fromApi?.address ?? d.address,
+              port: fromApi?.port ?? d.port,
+              status: fromApi?.status,
+              displayName: fromApi?.displayName || d.displayName,
+            };
+          })
         );
       } else if (tab === "sequence") {
         const r = await api.settingsMillSequence(t);
@@ -1071,11 +1090,13 @@ export default function SettingsPage() {
       ) : tab === "printers" ? (
         <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
           <p className="px-5 py-3 text-sm text-gray-600 border-b border-gray-100">
-            Mill printers (close tags) and station printers (Visual/Revisual, Big Hydro, Four-Head Hydro) share this
-            page and one Save. Station tags print at the inspection point, not the bundle mill. Visual and Revisual
-            are one printer. Stations have no mill-1 fallback. <strong>Test</strong> checks TCP;{" "}
+            Edit mill close-tag printers and station printers below. Visual and Revisual share one IP. Station tags
+            print at the inspection point (not the bundle mill). <strong>Test</strong> checks TCP;{" "}
             <strong>Print test tag</strong> sends dummy ZPL (save the IP first).
           </p>
+          <div className="px-5 py-2 bg-gray-50 border-b border-gray-100 text-sm font-semibold text-gray-800">
+            Mill printers
+          </div>
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
               <thead className="bg-gray-50">
@@ -1152,8 +1173,8 @@ export default function SettingsPage() {
               </tbody>
             </table>
           </div>
-          <div className="px-5 py-3 border-t border-gray-100 bg-gray-50 text-sm font-medium text-gray-800">
-            Station printers
+          <div className="px-5 py-3 border-t border-gray-200 bg-violet-50 text-sm font-semibold text-violet-950">
+            Station printers — Visual / Revisual, Big Hydrotesting, Four Head Hydrotesting
           </div>
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">

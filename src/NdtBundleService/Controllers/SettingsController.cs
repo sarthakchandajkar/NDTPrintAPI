@@ -6,6 +6,7 @@ using NdtBundleService.Configuration;
 using NdtBundleService.Models;
 using NdtBundleService.Services;
 using NdtBundleService.Services.MillInstanceProxy;
+using NdtBundleService.Services.MillInstanceStatus;
 using NdtBundleService.Services.PlcHandshake;
 
 namespace NdtBundleService.Controllers;
@@ -34,6 +35,8 @@ public sealed class SettingsController : ControllerBase
     private readonly IZplGenerationToggle _zplToggle;
     private readonly IMillSequenceService _millSequence;
     private readonly IMillSettingsPlcProxy _millPlcProxy;
+    private readonly IPlcLiveSnapshotService _plcLive;
+    private readonly IOptionsMonitor<InstanceRoleOptions> _role;
     private readonly NdtBundleOptions _options;
     private readonly ILogger<SettingsController> _logger;
 
@@ -57,6 +60,8 @@ public sealed class SettingsController : ControllerBase
         IZplGenerationToggle zplToggle,
         IMillSequenceService millSequence,
         IMillSettingsPlcProxy millPlcProxy,
+        IPlcLiveSnapshotService plcLive,
+        IOptionsMonitor<InstanceRoleOptions> role,
         IOptions<NdtBundleOptions> options,
         ILogger<SettingsController> logger,
         IStationPrinterSettingsService? stationPrinters = null)
@@ -76,6 +81,8 @@ public sealed class SettingsController : ControllerBase
         _zplToggle = zplToggle;
         _millSequence = millSequence;
         _millPlcProxy = millPlcProxy;
+        _plcLive = plcLive;
+        _role = role;
         _options = options.Value;
         _logger = logger;
     }
@@ -199,6 +206,10 @@ public sealed class SettingsController : ControllerBase
 
     private async Task<IActionResult> GetPlcDiagnosticsCoreAsync(CancellationToken cancellationToken, bool liveOnly)
     {
+        // Shared has no S7 loop — Settings UI is filled from Mill_Instance_Status + PlcHandshake.Mills (display/hooter config).
+        if (_role.CurrentValue.IsShared)
+            return await GetSharedPlcDiagnosticsAsync(cancellationToken, liveOnly).ConfigureAwait(false);
+
         var handshakeCfg = _options.PlcHandshake ?? new PlcHandshakeOptions();
         if (handshakeCfg.Enabled)
         {
@@ -597,6 +608,246 @@ public sealed class SettingsController : ControllerBase
             ContentType = proxied.ContentType
         };
     }
+
+    /// <summary>
+    /// Shared Settings PLC tab: live OK/NOK/NDT and connection state from mill telemetry;
+    /// mill host / hooter addresses from <c>PlcHandshake:Mills</c> (S7 stays on each mill process).
+    /// </summary>
+    private async Task<IActionResult> GetSharedPlcDiagnosticsAsync(CancellationToken cancellationToken, bool liveOnly)
+    {
+        var handshakeCfg = _options.PlcHandshake ?? new PlcHandshakeOptions();
+        var millsCfg = (handshakeCfg.Mills ?? new List<MillConfig>())
+            .Where(m => m.ResolveMillNo() is >= 1 and <= 4)
+            .GroupBy(m => m.ResolveMillNo())
+            .Select(g => g.First())
+            .OrderBy(m => m.ResolveMillNo())
+            .ToList();
+
+        if (millsCfg.Count == 0)
+            millsCfg = SharedDisplayMillDefaults();
+
+        var liveSnap = _plcLive.GetSnapshot();
+        var liveByMill = liveSnap.Mills.ToDictionary(m => m.MillNo, m => m);
+        var mills = new List<object>();
+
+        foreach (var cfg in millsCfg)
+        {
+            var millNo = cfg.ResolveMillNo();
+            liveByMill.TryGetValue(millNo, out var live);
+            var host = (cfg.IpAddress ?? string.Empty).Trim();
+            if (string.IsNullOrEmpty(host) && !string.IsNullOrWhiteSpace(live?.IpAddress))
+                host = live!.IpAddress.Trim();
+
+            var handshakeConnected = live?.Connected ?? false;
+            bool reachable;
+            if (liveOnly)
+                reachable = handshakeConnected;
+            else if (handshakeConnected)
+                reachable = true;
+            else
+            {
+                reachable = !string.IsNullOrEmpty(host) &&
+                            await TcpProbeCachedAsync(host, 102, cancellationToken).ConfigureAwait(false);
+            }
+
+            object? mesHooter = null;
+            if (!liveOnly && cfg.Hooter?.Enabled == true)
+            {
+                try
+                {
+                    var resolved = await _hooterValues.ResolveAsync(millNo, cancellationToken).ConfigureAwait(false);
+                    mesHooter = new
+                    {
+                        poNumber = resolved.PoNumber,
+                        pipeSize = resolved.PipeSize,
+                        threshold = resolved.Threshold,
+                        accumulated = resolved.Accumulated,
+                        bundleNear = resolved.Threshold > 0 &&
+                                     resolved.Accumulated > resolved.Threshold
+                    };
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "MES hooter values resolve failed for mill {Mill} during Shared PLC diagnostics.", millNo);
+                }
+            }
+
+            var poEndSource = cfg.ResolvePoEndSource(_options);
+            var plcLinkEnabled = live?.PlcConnectionEnabled ?? cfg.PlcHandshakeEnabled;
+            mills.Add(new
+            {
+                millNo,
+                name = string.IsNullOrWhiteSpace(cfg.Name) ? $"Mill-{millNo}" : cfg.Name,
+                poEndSource = MillPoEndSourceResolver.ToConfigValue(poEndSource),
+                poEndSourceDescription = MillPoEndSourceResolver.Describe(poEndSource),
+                tcpOpenCommHost = (string?)null,
+                tcpOpenPort = (int?)null,
+                tcpOpenConnectTimeoutMs = (int?)null,
+                tcpOpenReceiveTimeoutMs = (int?)null,
+                driver = "S7-Handshake",
+                host,
+                port = 102,
+                reachable,
+                poEndAddress = cfg.TriggerAddress,
+                mesAckAddress = cfg.AckAddress,
+                handshakeConnected,
+                plcConnectionEnabled = plcLinkEnabled,
+                triggerActive = live?.TriggerActive ?? false,
+                ackActive = live?.AckActive ?? false,
+                handshakeState = live?.HandshakeState
+                    ?? (plcLinkEnabled ? "Unknown" : "Disconnected (mill not publishing)"),
+                lastPoChangeUtc = live?.LastPoChangeUtc,
+                lastError = live?.LastError,
+                // Connect / test / open-accumulation are proxied to the mill process.
+                testAvailable = _millPlcProxy.ShouldProxy(millNo),
+                lineRunning = live?.LineRunning,
+                lineRunningAddress = FormatLineRunningAddress(handshakeCfg),
+                accumulatedValue = live?.AccumulatedValue,
+                thresholdValue = live?.ThresholdValue,
+                hooterActive = live?.HooterActive ?? false,
+                okCount = live?.OkCount,
+                nokCount = live?.NokCount,
+                ndtCount = live?.NdtCount,
+                poId = live?.PoId,
+                countsUpdatedUtc = live?.CountsUpdatedUtc,
+                hooterEnabled = cfg.Hooter?.Enabled ?? false,
+                hooterAccumAddress = cfg.Hooter?.Enabled == true
+                    ? $"MW{cfg.Hooter.AccumulatedWordOffset}"
+                    : null,
+                hooterThresholdAddress = cfg.Hooter?.Enabled == true
+                    ? $"MW{cfg.Hooter.ThresholdWordOffset}"
+                    : null,
+                hooterOutputAddress = cfg.Hooter?.Enabled == true
+                    ? $"Q{cfg.Hooter.OutputByte}.{cfg.Hooter.OutputBit}"
+                    : null,
+                hooterPasEnableAddress = cfg.Hooter?.Enabled == true
+                    ? $"DB{cfg.Hooter.PasEnableDbNumber}.DBX{cfg.Hooter.PasEnableByteOffset}.{cfg.Hooter.PasEnableBit}"
+                    : null,
+                hooterDurationMs = cfg.Hooter?.DurationMs,
+                mesHooter
+            });
+        }
+
+        var poEndSourceByMill = Enumerable.Range(1, 4).ToDictionary(
+            m => m.ToString(),
+            m =>
+            {
+                var src = MillPoEndSourceResolver.ForMill(m, _options);
+                return new
+                {
+                    source = MillPoEndSourceResolver.ToConfigValue(src),
+                    description = MillPoEndSourceResolver.Describe(src)
+                };
+            });
+
+        var anyLive = liveSnap.Mills.Any(m => m.Connected);
+        return Ok(new
+        {
+            plcPoEndEnabled = true,
+            plcHandshakeEnabled = true,
+            plcHandshakeTelemetryOnly = handshakeCfg.TelemetryOnly,
+            poEndSourceByMill,
+            driver = "S7-Handshake-Sql",
+            lastReadOk = anyLive,
+            lastPlcError = liveSnap.Mills.Select(m => m.LastError).FirstOrDefault(e => !string.IsNullOrWhiteSpace(e))
+                ?? (anyLive ? null : "Waiting for mill instances to publish Mill_Instance_Status."),
+            lastPlcCheckUtc = liveSnap.Mills.Count > 0
+                ? liveSnap.Mills.Max(m => m.LastUpdateUtc)
+                : _plcHealth.LastUpdateUtc,
+            readLineRunning = handshakeCfg.ReadLineRunning,
+            recoverLatchedTriggerAtStartup = handshakeCfg.RecoverLatchedTriggerAtStartup,
+            runPoEndWorkflowOnStartupRecovery = handshakeCfg.RunPoEndWorkflowOnStartupRecovery,
+            lineRunningSignal = new
+            {
+                address = FormatLineRunningAddress(handshakeCfg),
+                dbNumber = handshakeCfg.LineRunningDbNumber,
+                byteOffset = handshakeCfg.LineRunningByteOffset,
+                bit = handshakeCfg.LineRunningBit
+            },
+            poEndByMill = Enumerable.Range(1, 4).ToDictionary(
+                m => m.ToString(),
+                m => liveByMill.TryGetValue(m, out var row) && row.TriggerActive),
+            mills,
+            message = "Shared Settings PLC view uses mill telemetry + MillInstanceProxy for writes. S7 stays on each mill process."
+        });
+    }
+
+    /// <summary>Fallback mill rows when Shared <c>PlcHandshake:Mills</c> is empty (production IPs).</summary>
+    private static List<MillConfig> SharedDisplayMillDefaults() =>
+    [
+        new MillConfig
+        {
+            Name = "Mill-1",
+            MillNo = 1,
+            PoEndSource = "Plc",
+            PlcHandshakeEnabled = true,
+            IpAddress = "192.168.0.13",
+            Rack = 0,
+            Slot = 2,
+            CpuType = "S7300",
+            TriggerByte = 40,
+            TriggerBit = 6,
+            AckByte = 40,
+            AckBit = 7,
+            Hooter = new MillHooterOptions
+            {
+                Enabled = true,
+                PasEnableDbNumber = 260,
+                PasEnableByteOffset = 3,
+                PasEnableBit = 6,
+                AccumulatedWordOffset = 56,
+                ThresholdWordOffset = 58,
+                OutputByte = 6,
+                OutputBit = 7,
+                DurationMs = 10000
+            }
+        },
+        new MillConfig
+        {
+            Name = "Mill-2",
+            MillNo = 2,
+            PoEndSource = "Plc",
+            PlcHandshakeEnabled = true,
+            IpAddress = "192.168.0.60",
+            Rack = 0,
+            Slot = 2,
+            CpuType = "S7300",
+            TriggerByte = 40,
+            TriggerBit = 6,
+            AckByte = 40,
+            AckBit = 7
+        },
+        new MillConfig
+        {
+            Name = "Mill-3",
+            MillNo = 3,
+            PoEndSource = "Plc",
+            PlcHandshakeEnabled = true,
+            IpAddress = "192.168.0.17",
+            Rack = 0,
+            Slot = 2,
+            CpuType = "S7300",
+            TriggerByte = 40,
+            TriggerBit = 6,
+            AckByte = 40,
+            AckBit = 7
+        },
+        new MillConfig
+        {
+            Name = "Mill-4",
+            MillNo = 4,
+            PoEndSource = "Plc",
+            PlcHandshakeEnabled = true,
+            IpAddress = "192.168.0.19",
+            Rack = 0,
+            Slot = 2,
+            CpuType = "S7300",
+            TriggerByte = 40,
+            TriggerBit = 6,
+            AckByte = 40,
+            AckBit = 7
+        }
+    ];
 
     private async Task<IActionResult> GetLegacyPlcDiagnosticsAsync(CancellationToken cancellationToken)
     {

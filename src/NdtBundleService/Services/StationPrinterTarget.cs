@@ -30,9 +30,9 @@ public static class StationPrinterTarget
     public static string DisplayName(string stationCode) =>
         Normalize(stationCode) switch
         {
-            VisualRevisual => "Visual/Revisual",
-            BigHydro => "Big Hydro",
-            FourHeadHydro => "Four-Head Hydro",
+            VisualRevisual => "Visual / Revisual",
+            BigHydro => "Big Hydrotesting",
+            FourHeadHydro => "Four Head Hydrotesting",
             _ => stationCode
         };
 

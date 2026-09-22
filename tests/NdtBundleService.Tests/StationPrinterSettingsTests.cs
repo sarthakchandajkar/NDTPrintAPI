@@ -16,8 +16,10 @@ public sealed class StationPrinterSettingsTests
         Assert.Equal(
             StationPrinterTarget.For(ManualTagStation.Visual),
             StationPrinterTarget.For(ManualTagStation.Revisual));
-        Assert.Equal("Visual/Revisual", StationPrinterTarget.DisplayName(StationPrinterTarget.VisualRevisual));
-        Assert.Contains("Visual/Revisual", StationPrinterTarget.UnconfiguredMessage(StationPrinterTarget.VisualRevisual), StringComparison.Ordinal);
+        Assert.Equal("Visual / Revisual", StationPrinterTarget.DisplayName(StationPrinterTarget.VisualRevisual));
+        Assert.Contains("Visual / Revisual", StationPrinterTarget.UnconfiguredMessage(StationPrinterTarget.VisualRevisual), StringComparison.Ordinal);
+        Assert.Equal("Big Hydrotesting", StationPrinterTarget.DisplayName(StationPrinterTarget.BigHydro));
+        Assert.Equal("Four Head Hydrotesting", StationPrinterTarget.DisplayName(StationPrinterTarget.FourHeadHydro));
     }
 
     [Fact]

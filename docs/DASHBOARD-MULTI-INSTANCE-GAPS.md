@@ -2,7 +2,7 @@
 
 Dashboard continues to call **Shared** (`:5000`) only. Mill instances listen on localhost `5001`–`5004` for ops/validation — not for the UI.
 
-HTTP write proxy for Settings PLC connect / disconnect / test-po-change / open-accumulation is **enabled** on Shared via `NdtBundle:MillInstanceProxy` (forwards to `http://127.0.0.1:500n` with the same Settings password). Live OK/NOK/NDT on Shared uses `dbo.Mill_Instance_Status`: each mill copies its in-memory S7 snapshot on a **background** timer (~500ms, 2s SQL timeout). Dashboard poll of `GET /api/Status/plc-live` stays ~1s, same as the monolith. **PO-end, threshold/hooter, slit ingest, and mill tag print stay on each mill’s S7/workers** — they never wait on this table. If SQL publish fails, handshake continues.
+HTTP write proxy for Settings PLC connect / disconnect / test-po-change / open-accumulation is **enabled** on Shared via `NdtBundle:MillInstanceProxy` (forwards to `http://127.0.0.1:500n` with the same Settings password). Shared Settings **PLC tab** reads live state from `Mill_Instance_Status` and mill host/hooter config from `PlcHandshake:Mills` (S7 still off on Shared). Live OK/NOK/NDT on Shared uses `dbo.Mill_Instance_Status`: each mill copies its in-memory S7 snapshot on a **background** timer (~500ms, 2s SQL timeout). Dashboard poll of `GET /api/Status/plc-live` stays ~1s, same as the monolith. **PO-end, threshold/hooter, slit ingest, and mill tag print stay on each mill’s S7/workers** — they never wait on this table. If SQL publish fails, handshake continues.
 
 ## Works on Shared (unchanged)
 
