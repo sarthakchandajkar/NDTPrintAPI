@@ -6,6 +6,7 @@ using NdtBundleService.Configuration;
 using NdtBundleService.Services;
 using NdtBundleService.Services.FileBasedPoChange;
 using NdtBundleService.Services.InstanceLease;
+using NdtBundleService.Services.MillInstanceProxy;
 using NdtBundleService.Services.MillInstanceStatus;
 using NdtBundleService.Services.PlcHandshake;
 using NdtBundleService.Services.PlcHandshake.PlcPoEnd;
@@ -35,6 +36,12 @@ public static class NdtBundleServiceCollectionExtensions
         services.Configure<FileLoggingOptions>(configuration.GetSection("Logging:File"));
 
         services.AddSingleton<IMillOwnership, MillOwnership>();
+
+        services.AddHttpClient(MillSettingsPlcProxy.HttpClientName);
+        if (role.IsShared)
+            services.AddSingleton<IMillSettingsPlcProxy, MillSettingsPlcProxy>();
+        else
+            services.AddSingleton<IMillSettingsPlcProxy, NullMillSettingsPlcProxy>();
 
         AddCoreServices(services, role);
         AddZplToggle(services, role);

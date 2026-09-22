@@ -2,7 +2,7 @@
 
 Dashboard continues to call **Shared** (`:5000`) only. Mill instances listen on localhost `5001`–`5004` for ops/validation — not for the UI.
 
-HTTP write proxy for Settings PLC connect / Test `po-end` is **deferred**. Live OK/NOK/NDT on Shared uses `dbo.Mill_Instance_Status`: each mill copies its in-memory S7 snapshot on a **background** timer (~500ms, 2s SQL timeout). Dashboard poll of `GET /api/Status/plc-live` stays ~1s, same as the monolith. **PO-end, threshold/hooter, slit ingest, and mill tag print stay on each mill’s S7/workers** — they never wait on this table. If SQL publish fails, handshake continues.
+HTTP write proxy for Settings PLC connect / disconnect / test-po-change / open-accumulation is **enabled** on Shared via `NdtBundle:MillInstanceProxy` (forwards to `http://127.0.0.1:500n` with the same Settings password). Live OK/NOK/NDT on Shared uses `dbo.Mill_Instance_Status`: each mill copies its in-memory S7 snapshot on a **background** timer (~500ms, 2s SQL timeout). Dashboard poll of `GET /api/Status/plc-live` stays ~1s, same as the monolith. **PO-end, threshold/hooter, slit ingest, and mill tag print stay on each mill’s S7/workers** — they never wait on this table. If SQL publish fails, handshake continues.
 
 ## Works on Shared (unchanged)
 
@@ -21,7 +21,7 @@ HTTP write proxy for Settings PLC connect / Test `po-end` is **deferred**. Live 
 | Endpoint / UI | Behaviour after split | Follow-up |
 |---|---|---|
 | `GET /api/Status/plc-live` | Shared reads `Mill_Instance_Status` (mill-n publishes). Tiles match mill RAM within ~1s. | — |
-| Settings PLC connect / disconnect / test-po-change | No-op or empty registry on Shared | HTTP write proxy to mill |
+| Settings PLC connect / disconnect / test-po-change / open-accumulation | Shared forwards to mill `:500n` (`MillInstanceProxy`) | — |
 | `POST /api/Test/po-end` | Runs against Shared's (empty) mill workers — **do not use for production mills** | Proxy to owned mill |
 | `POST /api/Test/resume-wip/{n}` | Same — wrong process | Proxy |
 | `GET /api/Test/live-mill-ndt` | Shared uses mill-status NDT when S7 is not on this process | — |

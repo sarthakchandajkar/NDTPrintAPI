@@ -398,5 +398,10 @@ public class NdtBundleOptions
 
     /// <summary>Password-protected dashboard settings (formation chart thresholds, per-mill printers).</summary>
     public DashboardSettingsOptions DashboardSettings { get; set; } = new();
+
+    /// <summary>
+    /// Shared-only: forward Settings PLC writes to mill instance HTTP APIs (localhost :5001–:5004).
+    /// </summary>
+    public MillInstanceProxyOptions MillInstanceProxy { get; set; } = new();
 }
 

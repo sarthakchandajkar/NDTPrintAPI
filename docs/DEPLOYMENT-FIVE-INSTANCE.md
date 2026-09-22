@@ -25,6 +25,8 @@ Templates live in repo under `deploy/instances/{shared,mill-1..4}/`. Copy them i
 4. `docs/Bundle_Accumulation_AddTable.sql`, `docs/Po_Lifecycle_AddTable.sql`, `docs/Printer_AddTable.sql`
 5. `docs/Mill_Instance_Status_AddTable.sql` — mill live PLC snapshot for Shared dashboard tiles (PO-end/print stay on each mill)
 
+Shared `appsettings` must include `NdtBundle:MillInstanceProxy` (Enabled + BaseUrls to `:5001`–`:5004`) so Settings PLC connect / disconnect / test PO-change / open-accumulation forward to the mill that owns S7.
+
 ## Mill state is SQL (no JSON split)
 
 `Split-MillStateFiles.ps1` is deleted. Open remainder is `Bundle_Accumulation`; PO drain/closed is `Po_Lifecycle`; printers are `Printer` (seeded `192.168.0.125:9100`). Delete leftover `NdtBundleRuntimeState*.json`, `PoLifecycleState*.json`, and `MillPrinterSettings*.json` or mill/shared startup throws.

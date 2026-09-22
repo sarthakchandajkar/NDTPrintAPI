@@ -1,9 +1,11 @@
 using System.Net.Sockets;
+using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Models;
 using NdtBundleService.Services;
+using NdtBundleService.Services.MillInstanceProxy;
 using NdtBundleService.Services.PlcHandshake;
 
 namespace NdtBundleService.Controllers;
@@ -31,8 +33,14 @@ public sealed class SettingsController : ControllerBase
     private readonly INetworkPrinterSender _networkPrinterSender;
     private readonly IZplGenerationToggle _zplToggle;
     private readonly IMillSequenceService _millSequence;
+    private readonly IMillSettingsPlcProxy _millPlcProxy;
     private readonly NdtBundleOptions _options;
     private readonly ILogger<SettingsController> _logger;
+
+    private static readonly JsonSerializerOptions ProxyJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
 
     public SettingsController(
         SettingsAuthService auth,
@@ -48,6 +56,7 @@ public sealed class SettingsController : ControllerBase
         INetworkPrinterSender networkPrinterSender,
         IZplGenerationToggle zplToggle,
         IMillSequenceService millSequence,
+        IMillSettingsPlcProxy millPlcProxy,
         IOptions<NdtBundleOptions> options,
         ILogger<SettingsController> logger,
         IStationPrinterSettingsService? stationPrinters = null)
@@ -66,6 +75,7 @@ public sealed class SettingsController : ControllerBase
         _networkPrinterSender = networkPrinterSender;
         _zplToggle = zplToggle;
         _millSequence = millSequence;
+        _millPlcProxy = millPlcProxy;
         _options = options.Value;
         _logger = logger;
     }
@@ -349,6 +359,7 @@ public sealed class SettingsController : ControllerBase
     /// <summary>
     /// Runs a PO-change test for one mill: read trigger from PLC, execute PO end workflow, pulse ack bit.
     /// Uses the mill's persistent handshake S7 connection (no second client).
+    /// On Shared, forwards to the mill instance HTTP API.
     /// </summary>
     [HttpPost("plc/test-po-change")]
     public async Task<IActionResult> TestPoChange(
@@ -357,6 +368,23 @@ public sealed class SettingsController : ControllerBase
     {
         if (!TryAuthorize(out var denied))
             return denied!;
+
+        if (request?.MillNo is < 1 or > 4)
+            return BadRequest(new { Message = "millNo must be 1–4." });
+
+        if (_millPlcProxy.ShouldProxy(request.MillNo))
+        {
+            _logger.LogInformation(
+                "Settings PO change test for Mill {Mill} proxied to mill instance.",
+                request.MillNo);
+            return await ProxyToMillAsync(
+                    request.MillNo,
+                    HttpMethod.Post,
+                    "api/Settings/plc/test-po-change",
+                    request,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
 
         var handshakeCfg = _options.PlcHandshake ?? new PlcHandshakeOptions();
         if (!handshakeCfg.Enabled)
@@ -377,10 +405,7 @@ public sealed class SettingsController : ControllerBase
             });
         }
 
-        if (request?.MillNo is < 1 or > 4)
-            return BadRequest(new { Message = "millNo must be 1–4." });
-
-        _logger.LogInformation("Settings PO change test requested for Mill {Mill}.", request!.MillNo);
+        _logger.LogInformation("Settings PO change test requested for Mill {Mill}.", request.MillNo);
 
         var result = await _handshakeCoordinator
             .RunSettingsTestAsync(request.MillNo, cancellationToken)
@@ -405,19 +430,21 @@ public sealed class SettingsController : ControllerBase
 
     /// <summary>
     /// Disconnect one mill's S7 handshake (releases the PLC connection slot). Slit CSV processing and other mills are unaffected.
+    /// On Shared, forwards to the mill instance HTTP API.
     /// </summary>
     [HttpPost("plc/mill/{millNo:int}/disconnect")]
-    public IActionResult DisconnectMillPlc(int millNo)
+    public async Task<IActionResult> DisconnectMillPlc(int millNo, CancellationToken cancellationToken)
     {
         if (!TryAuthorize(out var denied))
             return denied!;
 
-        return SetMillPlcConnection(millNo, enabled: false);
+        return await SetMillPlcConnectionAsync(millNo, enabled: false, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
     /// Operator override for open-bundle PLC accumulation (MES <c>sizeCounts</c> / MW56 toward next close).
     /// Use after restart when slit-edge state was lost and MES count no longer matches actual production.
+    /// On Shared, forwards to the mill instance HTTP API so MW56 sync hits the live S7 connection.
     /// </summary>
     [HttpPost("plc/mill/{millNo:int}/open-accumulation")]
     public async Task<IActionResult> SetOpenAccumulation(
@@ -430,6 +457,23 @@ public sealed class SettingsController : ControllerBase
 
         if (request is null)
             return BadRequest(new { Message = "Request body is required." });
+
+        if (millNo is < 1 or > 4)
+            return BadRequest(new { Message = "millNo must be 1–4." });
+
+        if (_millPlcProxy.ShouldProxy(millNo))
+        {
+            _logger.LogInformation(
+                "Settings open-accumulation for Mill {Mill} proxied to mill instance.",
+                millNo);
+            return await ProxyToMillAsync(
+                    millNo,
+                    HttpMethod.Post,
+                    $"api/Settings/plc/mill/{millNo}/open-accumulation",
+                    request,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
 
         var result = await _openAccumulationOverride
             .SetOpenAccumulationAsync(
@@ -465,20 +509,39 @@ public sealed class SettingsController : ControllerBase
         });
     }
 
-    /// <summary>Reconnect one mill's S7 handshake after a manual disconnect.</summary>
+    /// <summary>Reconnect one mill's S7 handshake after a manual disconnect. On Shared, forwards to the mill instance.</summary>
     [HttpPost("plc/mill/{millNo:int}/connect")]
-    public IActionResult ConnectMillPlc(int millNo)
+    public async Task<IActionResult> ConnectMillPlc(int millNo, CancellationToken cancellationToken)
     {
         if (!TryAuthorize(out var denied))
             return denied!;
 
-        return SetMillPlcConnection(millNo, enabled: true);
+        return await SetMillPlcConnectionAsync(millNo, enabled: true, cancellationToken).ConfigureAwait(false);
     }
 
-    private IActionResult SetMillPlcConnection(int millNo, bool enabled)
+    private async Task<IActionResult> SetMillPlcConnectionAsync(
+        int millNo,
+        bool enabled,
+        CancellationToken cancellationToken)
     {
         if (millNo is < 1 or > 4)
             return BadRequest(new { Message = "millNo must be 1–4." });
+
+        if (_millPlcProxy.ShouldProxy(millNo))
+        {
+            var action = enabled ? "connect" : "disconnect";
+            _logger.LogInformation(
+                "Settings PLC {Action} for Mill {Mill} proxied to mill instance.",
+                action,
+                millNo);
+            return await ProxyToMillAsync(
+                    millNo,
+                    HttpMethod.Post,
+                    $"api/Settings/plc/mill/{millNo}/{action}",
+                    body: null,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
 
         var handshakeCfg = _options.PlcHandshake ?? new PlcHandshakeOptions();
         if (!handshakeCfg.Enabled)
@@ -498,8 +561,8 @@ public sealed class SettingsController : ControllerBase
             });
         }
 
-        var action = enabled ? "connect" : "disconnect";
-        _logger.LogInformation("Settings PLC {Action} requested for Mill {Mill}.", action, millNo);
+        var localAction = enabled ? "connect" : "disconnect";
+        _logger.LogInformation("Settings PLC {Action} requested for Mill {Mill}.", localAction, millNo);
 
         var result = _handshakeCoordinator.SetMillPlcConnectionEnabled(millNo, enabled);
         if (!result.Success)
@@ -514,6 +577,25 @@ public sealed class SettingsController : ControllerBase
             result.Connected,
             result.Message
         });
+    }
+
+    private async Task<IActionResult> ProxyToMillAsync(
+        int millNo,
+        HttpMethod method,
+        string relativePath,
+        object? body,
+        CancellationToken cancellationToken)
+    {
+        var json = body is null ? null : JsonSerializer.Serialize(body, ProxyJsonOptions);
+        var proxied = await _millPlcProxy
+            .ForwardAsync(millNo, method, relativePath, json, cancellationToken)
+            .ConfigureAwait(false);
+        return new ContentResult
+        {
+            StatusCode = proxied.StatusCode,
+            Content = proxied.Body,
+            ContentType = proxied.ContentType
+        };
     }
 
     private async Task<IActionResult> GetLegacyPlcDiagnosticsAsync(CancellationToken cancellationToken)

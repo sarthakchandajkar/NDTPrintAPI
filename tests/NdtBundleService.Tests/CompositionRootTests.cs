@@ -7,6 +7,7 @@ using NdtBundleService.Configuration;
 using NdtBundleService.DependencyInjection;
 using NdtBundleService.Services;
 using NdtBundleService.Services.InstanceLease;
+using NdtBundleService.Services.MillInstanceProxy;
 using NdtBundleService.Services.MillInstanceStatus;
 using NdtBundleService.Services.PlcHandshake;
 using NdtBundleService.Services.PoLifecycle;
@@ -76,6 +77,7 @@ public sealed class CompositionRootTests : IDisposable
         Assert.NotNull(provider.GetRequiredService<IStationPrinterSettingsService>());
         Assert.NotNull(provider.GetRequiredService<IManualNdtTagService>());
         Assert.NotNull(provider.GetRequiredService<IPlcLiveSnapshotService>());
+        Assert.IsType<MillSettingsPlcProxy>(provider.GetRequiredService<IMillSettingsPlcProxy>());
     }
 
     [Theory]
@@ -114,6 +116,7 @@ public sealed class CompositionRootTests : IDisposable
             hosted.IndexOf(typeof(SlitMonitoringWorker))
             < hosted.IndexOf(typeof(MillInstanceStatusPublisher)));
         Assert.NotNull(provider.GetRequiredService<IPlcLiveSnapshotService>());
+        Assert.IsType<NullMillSettingsPlcProxy>(provider.GetRequiredService<IMillSettingsPlcProxy>());
     }
 
     [Fact]
