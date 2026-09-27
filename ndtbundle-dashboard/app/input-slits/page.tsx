@@ -114,6 +114,7 @@ export default function InputSlitsPage() {
   const [manualSlitNo, setManualSlitNo] = useState("");
   const [manualNdt, setManualNdt] = useState(0);
   const [manualRejected, setManualRejected] = useState(0);
+  const [manualBatchNo, setManualBatchNo] = useState("");
   const [manualStart, setManualStart] = useState("");
   const [manualFinish, setManualFinish] = useState("");
   const [manualShort, setManualShort] = useState("");
@@ -140,8 +141,14 @@ export default function InputSlitsPage() {
 
   const createManualInputSlit = async () => {
     const po = manualPo.trim();
+    const batch = manualBatchNo.trim();
     if (!po) {
       setManualError("Please enter a PO Number.");
+      setManualSuccess(null);
+      return;
+    }
+    if (!batch) {
+      setManualError("Please enter an NDT Batch No.");
       setManualSuccess(null);
       return;
     }
@@ -155,6 +162,7 @@ export default function InputSlitsPage() {
         slitNo: manualSlitNo.trim() || undefined,
         ndtPipes: manualNdt,
         rejectedPipes: manualRejected,
+        ndtBatchNo: batch,
         slitStartTime: datetimeLocalToIso(manualStart),
         slitFinishTime: datetimeLocalToIso(manualFinish),
         ndtShortLengthPipe: manualShort.trim() || undefined,
@@ -162,12 +170,12 @@ export default function InputSlitsPage() {
         fileName: manualFileName.trim() || null,
       });
       const name = res.fileName ? ` (${res.fileName})` : "";
+      const folder = res.folder ? ` in ${res.folder}` : "";
       setManualSuccess(
-        (res.message ?? "Input Slit file created; it will be processed on the next poll.") + name
+        (res.message ?? "NDT Input Slit output CSV created and Output_Slit_Row recorded.") + name + folder
       );
-      await refresh();
     } catch (e) {
-      setManualError(e instanceof Error ? e.message : "Failed to create Input Slit CSV.");
+      setManualError(e instanceof Error ? e.message : "Failed to create NDT Input Slit output CSV.");
     } finally {
       setManualBusy(false);
     }
@@ -282,14 +290,16 @@ export default function InputSlitsPage() {
 
       <section className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
         <div className="px-5 py-3 bg-primary-50 text-gray-900 font-semibold border-b border-gray-200">
-          Manual Input Slit row
+          Manual NDT Input Slit output
         </div>
         <div className="p-5 space-y-4">
           <p className="text-sm text-gray-600">
-            Use when a SAP Input Slit file was missed or arrived before the PLC printed a tag. After the
-            bundle tag exists, create this row so the service can stamp the correct batch on the next poll.
-            Do not invent a batch number here — stamp attaches to the open fill target automatically. For
-            wrong tag counts, use{" "}
+            Creates a CSV in the NDT Input Slit output folder (
+            <code className="text-xs">…\TM\NDT\NDT Input Slit\Input Slit</code>
+            ), including <strong>NDT Batch No</strong>, and writes the matching{" "}
+            <code className="text-xs">Output_Slit_Row</code> in SQL for SAP. Does{" "}
+            <strong>not</strong> write to the SAP Input Slit inbox. Use the file list below only as a
+            reference for missed SAP rows. For wrong printed totals, use{" "}
             <Link href="/reconcile" className="text-primary-700 hover:underline font-medium">
               Reconcile Bundle
             </Link>
@@ -318,6 +328,15 @@ export default function InputSlitsPage() {
                   </option>
                 ))}
               </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">NDT Batch No</label>
+              <input
+                value={manualBatchNo}
+                onChange={(e) => setManualBatchNo(e.target.value)}
+                placeholder="Required"
+                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
+              />
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Slit No</label>
@@ -382,11 +401,13 @@ export default function InputSlitsPage() {
               />
             </div>
             <div className="sm:col-span-2">
-              <label className="block text-sm font-medium text-gray-700 mb-1">File name (optional)</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Output file name (optional)
+              </label>
               <input
                 value={manualFileName}
                 onChange={(e) => setManualFileName(e.target.value)}
-                placeholder="Manual_01_….csv"
+                placeholder="Manual_01_….csv (written under NDT Input Slit output)"
                 className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
               />
             </div>
@@ -397,7 +418,7 @@ export default function InputSlitsPage() {
             disabled={manualBusy}
             className="px-4 py-2 bg-primary-600 text-white text-sm font-medium rounded-md hover:bg-primary-700 disabled:opacity-50 disabled:pointer-events-none"
           >
-            {manualBusy ? "Creating…" : "Create Input Slit CSV"}
+            {manualBusy ? "Creating…" : "Create NDT Input Slit CSV"}
           </button>
           {manualError && (
             <div className="rounded-md bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">

@@ -311,6 +311,8 @@ export interface ManualInputSlitRequest {
   slitFinishTime?: string | null;
   ndtShortLengthPipe?: string;
   rejectedShortLengthPipe?: string;
+  /** Required — written to NDT Input Slit output CSV + Output_Slit_Row. */
+  ndtBatchNo: string;
   fileName?: string | null;
 }
 
@@ -319,6 +321,7 @@ export interface ManualInputSlitResult {
   fileName?: string;
   fullPath?: string;
   folder?: string;
+  ndtBatchNo?: string;
 }
 
 export interface PlcStatus {
