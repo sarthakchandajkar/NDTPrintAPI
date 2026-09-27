@@ -105,5 +105,11 @@ public sealed class PlcHandshakeOptions
     /// <summary>Initial backoff (ms) between ack write retries; doubles each attempt. Default 100.</summary>
     public int AckWriteRetryInitialBackoffMs { get; set; } = 100;
 
+    /// <summary>
+    /// Seconds between PLC heartbeat Information logs for mills with <see cref="MillConfig.LogPlcHeartbeat"/> = true.
+    /// Set <c>0</c> to disable heartbeat logging even when the mill flag is on. Default 30.
+    /// </summary>
+    public int HeartbeatLogIntervalSeconds { get; set; } = 30;
+
     public List<MillConfig> Mills { get; set; } = new();
 }

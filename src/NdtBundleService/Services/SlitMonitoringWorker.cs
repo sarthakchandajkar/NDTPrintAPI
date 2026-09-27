@@ -209,18 +209,17 @@ public sealed class SlitMonitoringWorker : BackgroundService
     }
 
     /// <summary>
-    /// Enumerate inbox within lookback; mark already-imported versions handled; queue absent versions for ingest (F-5).
+    /// Enumerate live SAP <see cref="NdtBundleOptions.InputSlitFolder"/> within lookback; mark already-imported
+    /// versions handled; queue absent versions for ingest (F-5).
+    /// Does <b>not</b> scan <see cref="NdtBundleOptions.InputSlitAcceptedFolder"/> — that archive is for
+    /// dashboard / running-PO reads only. Scanning Accepted drowned mill polls in MinSource skip noise.
     /// </summary>
     internal async Task ReconcileInputSlitInboxAsync(CancellationToken cancellationToken)
     {
         var o = _optionsMonitor.CurrentValue;
         var folder = (o.InputSlitFolder ?? string.Empty).Trim();
-        var accepted = (o.InputSlitAcceptedFolder ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
-        {
-            if (string.IsNullOrWhiteSpace(accepted) || !Directory.Exists(accepted))
-                return;
-        }
+            return;
 
         var lookbackHours = Math.Max(1, o.BackfillLookbackHours);
         var lookbackCutoff = DateTime.UtcNow.AddHours(-lookbackHours);
@@ -235,7 +234,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         var outsideLookback = 0;
         var seenMills = GetFileSeenMillNos(o);
 
-        foreach (var path in InputSlitInboxEnumeration.EnumerateInboxPreferOverAccepted(folder, accepted))
+        foreach (var path in InputSlitInboxEnumeration.EnumerateFiles(folder))
         {
             cancellationToken.ThrowIfCancellationRequested();
             scanned++;
@@ -347,10 +346,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
     {
         var o = _optionsMonitor.CurrentValue;
         var inputFolder = (o.InputSlitFolder ?? string.Empty).Trim();
-        var acceptedFolder = (o.InputSlitAcceptedFolder ?? string.Empty).Trim();
-        var inboxOk = !string.IsNullOrEmpty(inputFolder) && Directory.Exists(inputFolder);
-        var acceptedOk = !string.IsNullOrEmpty(acceptedFolder) && Directory.Exists(acceptedFolder);
-        if (!inboxOk && !acceptedOk)
+        if (string.IsNullOrEmpty(inputFolder) || !Directory.Exists(inputFolder))
         {
             _logger.LogWarning(
                 "Input Slit folder is not available this poll cycle: {Folder}. Skipping until it is reachable again.",
@@ -358,12 +354,12 @@ public sealed class SlitMonitoringWorker : BackgroundService
             return;
         }
 
-        IReadOnlyList<string> filesEnumerable;
+        // Ingest stamp/print path: live SAP inbox only. InputSlitAcceptedFolder is dashboard/running-PO
+        // (PreferInputSlitFilesForRunningPo) — never mill stamp, or Accepted archives flood every poll.
+        IEnumerable<string> filesEnumerable;
         try
         {
-            filesEnumerable = InputSlitInboxEnumeration.EnumerateInboxPreferOverAccepted(
-                inputFolder,
-                acceptedFolder);
+            filesEnumerable = InputSlitInboxEnumeration.EnumerateFiles(inputFolder);
         }
         catch (Exception ex)
         {
@@ -396,10 +392,12 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
             if (!SourceFileEligibility.IncludeFileUtc(lwUtc, minUtc))
             {
+                // Mark handled so MinSource leftovers are not re-logged every poll (was drowning mill logs).
+                _inputSlitLastHandledWriteUtc[fileFull] = lwUtc;
                 if (minUtc.HasValue)
                 {
-                    _logger.LogWarning(
-                        "Skipping Input Slit file {File}: LastWriteUtc {LastWrite:o} is before NdtBundle:MinSourceFileLastWriteUtc {Min:o}. Clear or update MinSourceFileLastWriteUtc if this file should be processed.",
+                    _logger.LogDebug(
+                        "Skipping Input Slit file {File}: LastWriteUtc {LastWrite:o} is before NdtBundle:MinSourceFileLastWriteUtc {Min:o}.",
                         fileFull,
                         lwUtc,
                         minUtc.Value);

@@ -37,4 +37,31 @@ public sealed class InputSlitInboxEnumerationTests
             try { Directory.Delete(root, recursive: true); } catch { /* ignore */ }
         }
     }
+
+    [Fact]
+    public void EnumerateFiles_inbox_only_does_not_include_accepted()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "slit-enum-inbox-" + Guid.NewGuid().ToString("N"));
+        var inbox = Path.Combine(root, "inbox");
+        var accepted = Path.Combine(root, "accepted");
+        Directory.CreateDirectory(inbox);
+        Directory.CreateDirectory(accepted);
+
+        try
+        {
+            File.WriteAllText(Path.Combine(accepted, "only-accepted.csv"), "a");
+            File.WriteAllText(Path.Combine(inbox, "only-inbox.csv"), "i");
+
+            var paths = InputSlitInboxEnumeration.EnumerateFiles(inbox)
+                .Select(Path.GetFileName)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            Assert.Contains("only-inbox.csv", paths);
+            Assert.DoesNotContain("only-accepted.csv", paths);
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { /* ignore */ }
+        }
+    }
 }

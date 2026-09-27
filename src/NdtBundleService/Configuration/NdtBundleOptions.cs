@@ -8,6 +8,7 @@ public class NdtBundleOptions
   /// <summary>
   /// Optional folder where Input Slit CSV files are moved after acceptance (e.g. SAP). When set, <c>ndt-summary</c> and
   /// current-PO-per-mill on the dashboard sum/read from both this folder and <see cref="InputSlitFolder"/>; files are never modified.
+  /// Mill ingest / stamp (<c>SlitMonitoringWorker</c>) does <b>not</b> scan this folder — live <see cref="InputSlitFolder"/> only.
   /// </summary>
   public string InputSlitAcceptedFolder { get; set; } = string.Empty;
 

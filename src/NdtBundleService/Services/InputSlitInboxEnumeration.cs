@@ -37,6 +37,7 @@ public static class InputSlitInboxEnumeration
     /// <summary>
     /// Inbox ∪ Accepted, de-duplicated by file name (case-insensitive). Inbox wins when both exist
     /// so live SAP drops are preferred over the Accepted archive during drain transitions.
+    /// Used for dashboard / running-PO reads (<c>PreferInputSlitFilesForRunningPo</c>), not mill stamp ingest.
     /// </summary>
     public static IReadOnlyList<string> EnumerateInboxPreferOverAccepted(
         string? inboxFolder,

@@ -200,7 +200,7 @@ Must print `OK: no leftover mill-state JSON`. If any `STILL EXISTS`, delete thos
 
 `Input Slit` and `Input Slit Accepted` stay populated (read-only SAP sources). The mill **never** moves or deletes them.
 
-Ingest reads **only** `Input Slit`. `Input Slit Accepted` is dashboard / running-PO only.
+Ingest reads **only** `Input Slit`. `Input Slit Accepted` is dashboard / running-PO only (**Shared** keeps `InputSlitAcceptedFolder`; **mill instances leave it empty** — mill stamp must not enumerate the Accepted archive or polls drown in MinSource skip noise and stop advancing logs).
 
 Production `BackfillLookbackHours` is **48**. After the SQL wipe, `Input_Slit_Row` is empty, so any inbox file whose `LastWriteTimeUtc` is within 48 hours **and** on or after `MinSourceFileLastWriteUtc` is queued as a new slit. Leave the mill floor **one second after the newest leftover** in `Input Slit`.
 
@@ -787,7 +787,7 @@ Paste each file to `C:\Apps\NdtBundleService\instances\<role>\appsettings.Produc
     "PollIntervalSeconds": 5,
     "ShopId": "01",
     "InputSlitFolder": "\\\\10.2.20.210\\pas-sap\\To SAP\\TM\\Input Slit",
-    "InputSlitAcceptedFolder": "\\\\10.2.20.210\\pas-sap\\To SAP\\TM\\Input Slit Accepted",
+    "InputSlitAcceptedFolder": "",
     "PreferInputSlitFilesForRunningPo": true,
     "OutputBundleFolder": "\\\\10.2.20.210\\pas-sap\\To SAP\\TM\\NDT\\NDT Input Slit\\Input Slit",
     "NdtInputSlitAcceptedFolder": "\\\\10.2.20.210\\pas-sap\\To SAP\\TM\\NDT\\NDT Input Slit\\NDT Input Slit Accepted",
@@ -1028,7 +1028,7 @@ Paste each file to `C:\Apps\NdtBundleService\instances\<role>\appsettings.Produc
     "PollIntervalSeconds": 5,
     "ShopId": "01",
     "InputSlitFolder": "\\\\10.2.20.210\\pas-sap\\To SAP\\TM\\Input Slit",
-    "InputSlitAcceptedFolder": "\\\\10.2.20.210\\pas-sap\\To SAP\\TM\\Input Slit Accepted",
+    "InputSlitAcceptedFolder": "",
     "PreferInputSlitFilesForRunningPo": true,
     "OutputBundleFolder": "\\\\10.2.20.210\\pas-sap\\To SAP\\TM\\NDT\\NDT Input Slit\\Input Slit",
     "NdtInputSlitAcceptedFolder": "\\\\10.2.20.210\\pas-sap\\To SAP\\TM\\NDT\\NDT Input Slit\\NDT Input Slit Accepted",
@@ -1258,7 +1258,7 @@ Paste each file to `C:\Apps\NdtBundleService\instances\<role>\appsettings.Produc
     "PollIntervalSeconds": 5,
     "ShopId": "01",
     "InputSlitFolder": "\\\\10.2.20.210\\pas-sap\\To SAP\\TM\\Input Slit",
-    "InputSlitAcceptedFolder": "\\\\10.2.20.210\\pas-sap\\To SAP\\TM\\Input Slit Accepted",
+    "InputSlitAcceptedFolder": "",
     "PreferInputSlitFilesForRunningPo": true,
     "OutputBundleFolder": "\\\\10.2.20.210\\pas-sap\\To SAP\\TM\\NDT\\NDT Input Slit\\Input Slit",
     "NdtInputSlitAcceptedFolder": "\\\\10.2.20.210\\pas-sap\\To SAP\\TM\\NDT\\NDT Input Slit\\NDT Input Slit Accepted",
@@ -1488,7 +1488,7 @@ Paste each file to `C:\Apps\NdtBundleService\instances\<role>\appsettings.Produc
     "PollIntervalSeconds": 5,
     "ShopId": "01",
     "InputSlitFolder": "\\\\10.2.20.210\\pas-sap\\To SAP\\TM\\Input Slit",
-    "InputSlitAcceptedFolder": "\\\\10.2.20.210\\pas-sap\\To SAP\\TM\\Input Slit Accepted",
+    "InputSlitAcceptedFolder": "",
     "PreferInputSlitFilesForRunningPo": true,
     "OutputBundleFolder": "\\\\10.2.20.210\\pas-sap\\To SAP\\TM\\NDT\\NDT Input Slit\\Input Slit",
     "NdtInputSlitAcceptedFolder": "\\\\10.2.20.210\\pas-sap\\To SAP\\TM\\NDT\\NDT Input Slit\\NDT Input Slit Accepted",
