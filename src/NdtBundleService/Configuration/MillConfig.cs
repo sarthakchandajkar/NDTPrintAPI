@@ -79,12 +79,6 @@ public sealed class MillConfig
     /// <summary>Optional NDT bundle hooter (Mill-1: MW56/MW58 compare → Q6.7 pulse).</summary>
     public MillHooterOptions? Hooter { get; set; }
 
-    /// <summary>
-    /// When true, emit periodic Information logs proving S7 poll health (connected, handshake state, OK/NOK/NDT/PO/Slit).
-    /// Interval is <see cref="PlcHandshakeOptions.HeartbeatLogIntervalSeconds"/>. Use on Mill-1 for shop-floor verification.
-    /// </summary>
-    public bool LogPlcHeartbeat { get; set; }
-
     public int ResolveMillNo()
     {
         if (MillNo is >= 1 and <= 4)

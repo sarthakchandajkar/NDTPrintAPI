@@ -51,7 +51,7 @@ public sealed class SlitCsvFillAssigner
         }
 
         // No open fill target. Do not invent a batch number and do not write hold/Manual_Review.
-        _logger.LogInformation(
+        _logger.LogDebug(
             "Fill-to-target: no open bundle for PO {PO} Mill {Mill} file {File} — will retry next poll (or use Manual Input Slit after tag print).",
             InputSlitCsvParsing.NormalizePo(poNumber),
             millNo,

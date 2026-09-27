@@ -51,7 +51,6 @@ public sealed class PlcHandshakeService
     private bool _hooterAboveThreshold;
     private bool _hooterLoggedPasBlocked;
     private DateTimeOffset _hooterLastPeriodicLogUtc;
-    private DateTimeOffset _lastPlcHeartbeatLogUtc;
 
     private static readonly TimeSpan HooterStatusLogInterval = TimeSpan.FromSeconds(60);
 
@@ -230,20 +229,17 @@ public sealed class PlcHandshakeService
                         s.Connected = false;
                         s.HandshakeState = "Disconnected (manual)";
                     });
-                    MaybeLogPlcHeartbeat(millNo);
                     await PollDelayAsync(stoppingToken).ConfigureAwait(false);
                     continue;
                 }
 
                 if (!await EnsureConnectedAsync(stoppingToken).ConfigureAwait(false))
                 {
-                    MaybeLogPlcHeartbeat(millNo);
                     await DelayReconnectAsync(stoppingToken).ConfigureAwait(false);
                     continue;
                 }
 
                 await ProcessConnectedPollAsync(millNo, stoppingToken).ConfigureAwait(false);
-                MaybeLogPlcHeartbeat(millNo);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -1268,7 +1264,7 @@ public sealed class PlcHandshakeService
 
         var armed = accumulated > threshold;
         var readyToPulse = armed && pasEnable && !_hooterPulseActive && !qOn;
-        _logger.LogInformation(
+        _logger.LogDebug(
             "{MillName}: hooter status — PO {PO} size {Size} MW{AccumWord}={Accumulated} MW{ThresholdWord}={Threshold} PAS={PasEnable} Q{Byte}.{Bit}={QOn} armed={Armed} ready={Ready}.",
             _mill.Name,
             resolved.PoNumber ?? "(none)",
@@ -1336,53 +1332,6 @@ public sealed class PlcHandshakeService
 
     private void UpdateStatus(int millNo, Action<PlcHandshakeMillStatus> apply) =>
         _statusRegistry.UpdateMill(millNo, apply);
-
-    /// <summary>
-    /// Periodic Information heartbeat for mills with <see cref="MillConfig.LogPlcHeartbeat"/> so operators
-    /// can confirm S7 polls are advancing without enabling Debug logging.
-    /// </summary>
-    private void MaybeLogPlcHeartbeat(int millNo)
-    {
-        if (!_mill.LogPlcHeartbeat)
-            return;
-
-        var intervalSec = _options.HeartbeatLogIntervalSeconds;
-        if (intervalSec <= 0)
-            return;
-
-        var now = DateTimeOffset.UtcNow;
-        if (_lastPlcHeartbeatLogUtc != default &&
-            now - _lastPlcHeartbeatLogUtc < TimeSpan.FromSeconds(intervalSec))
-            return;
-
-        _lastPlcHeartbeatLogUtc = now;
-
-        if (!_statusRegistry.TryGetMill(millNo, out var st) || st is null)
-        {
-            _logger.LogInformation(
-                "{MillName}: PLC heartbeat — status unavailable (mill {MillNo}).",
-                _mill.Name,
-                millNo);
-            return;
-        }
-
-        _logger.LogInformation(
-            "{MillName}: PLC heartbeat — connected={Connected} enabled={Enabled} state={State} " +
-            "OK={Ok} NOK={Nok} NDT={Ndt} PO_Id={PoId} Slit_Id={SlitId} trigger={Trigger} ack={Ack}" +
-            "{ErrorSuffix}",
-            _mill.Name,
-            st.Connected,
-            st.PlcConnectionEnabled,
-            st.HandshakeState,
-            st.OkCount,
-            st.NokCount,
-            st.NdtCount,
-            st.PoId,
-            st.SlitId,
-            st.TriggerActive,
-            st.AckActive,
-            string.IsNullOrWhiteSpace(st.LastError) ? string.Empty : $" lastError={st.LastError}");
-    }
 
     /// <summary>
     /// Settings test: read trigger, run PO end workflow, pulse ack on the mill's existing S7 connection.

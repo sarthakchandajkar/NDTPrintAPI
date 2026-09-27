@@ -406,7 +406,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 continue;
             }
 
-            _logger.LogInformation("Processing Input Slit file {File}", fileFull);
+            _logger.LogDebug("Processing Input Slit file {File}", fileFull);
             _sqlWriteTracker.ClearRecent();
 
             IReadOnlyList<(string RawLine, InputSlitRecord? Record)> rows =
@@ -975,7 +975,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 {
                     if (!anyEligibleMillRow)
                     {
-                        _logger.LogInformation(
+                        _logger.LogDebug(
                             "Skipping NDT Input Slit output for {File}; no rows for configured mills ({Mills}).",
                             Path.GetFileName(fileFull),
                             FormatInputSlitProcessMills(o));
@@ -1003,16 +1003,27 @@ public sealed class SlitMonitoringWorker : BackgroundService
                             o.FileRetryBackoffSeconds);
                         if (shouldLog)
                         {
-                            _logger.LogInformation(
-                                "Skipping NDT Input Slit output for {File}; no slit rows were bundled. File parked with retry backoff step {Step} ({DelaySeconds}s).",
-                                Path.GetFileName(fileFull),
-                                step,
-                                (int)delay.TotalSeconds);
+                            // First wait is Warning so "CSV before tag" is easy to find; later backoff stays Debug.
+                            if (step == 0)
+                            {
+                                _logger.LogWarning(
+                                    "Awaiting open fill target for {File}; no NDT Input Slit output yet. Retry backoff {DelaySeconds}s (tag print / Manual Input Slit).",
+                                    Path.GetFileName(fileFull),
+                                    (int)delay.TotalSeconds);
+                            }
+                            else
+                            {
+                                _logger.LogDebug(
+                                    "Still awaiting fill target for {File}; parked step {Step} ({DelaySeconds}s).",
+                                    Path.GetFileName(fileFull),
+                                    step,
+                                    (int)delay.TotalSeconds);
+                            }
                         }
                     }
                     else
                     {
-                        _logger.LogInformation(
+                        _logger.LogDebug(
                             "Skipping NDT Input Slit output for {File}; no slit rows were bundled. File will be retried on next poll.",
                             Path.GetFileName(fileFull));
                     }
