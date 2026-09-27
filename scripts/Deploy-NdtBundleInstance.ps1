@@ -93,16 +93,35 @@ if (-not (Test-Path -LiteralPath $releasesRoot)) {
     New-Item -ItemType Directory -Path $releasesRoot | Out-Null
 }
 
+function Assert-VersionedReleasePath {
+    param([string] $Path, [string] $ReleasesRoot)
+    $full = [System.IO.Path]::GetFullPath($Path.TrimEnd('\', '/'))
+    $root = [System.IO.Path]::GetFullPath($ReleasesRoot.TrimEnd('\', '/'))
+    if ([string]::Equals($full, $root, [StringComparison]::OrdinalIgnoreCase)) {
+        throw @"
+Refuse to use releases\ root as a publish target (locks / mixes localization folders with the exe).
+Use a versioned folder, e.g. $root\<git-sha>
+"@
+    }
+    $parent = Split-Path -Parent $full
+    if (-not [string]::Equals($parent, $root, [StringComparison]::OrdinalIgnoreCase)) {
+        Write-Host "Note: ReleasePath is not under $root (allowed, but unusual): $full"
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($ReleasePath)) {
     if ([string]::IsNullOrWhiteSpace($ReleaseId)) {
         Push-Location $RepoRoot
         try {
-            $sha = (git rev-parse --short HEAD 2>$null | Out-String).Trim()
+            $sha = (& git rev-parse --short HEAD 2>$null)
+            if ($sha -is [array]) { $sha = $sha | Select-Object -First 1 }
+            $sha = [string]$sha
+            if ($null -ne $sha) { $sha = $sha.Trim() }
         }
         finally {
             Pop-Location
         }
-        if ([string]::IsNullOrWhiteSpace($sha) -or $sha -match '[^a-fA-F0-9]') {
+        if ([string]::IsNullOrWhiteSpace($sha) -or $sha -notmatch '^[a-fA-F0-9]{4,40}$') {
             $ReleaseId = Get-Date -Format 'yyyyMMdd-HHmmss'
         }
         else {
@@ -117,6 +136,8 @@ else {
         $ReleaseId = Split-Path -Leaf $ReleasePath
     }
 }
+
+Assert-VersionedReleasePath -Path $ReleasePath -ReleasesRoot $releasesRoot
 
 $exePath = Join-Path $ReleasePath 'NdtBundleService.exe'
 

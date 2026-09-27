@@ -64,6 +64,21 @@ if (-not (Test-Path -LiteralPath $exePath)) {
     throw "Publish output not found: $exePath - run dotnet publish -o `"$ReleasePath`" first (or Deploy-NdtBundleInstance.ps1)."
 }
 
+# Never point services at BasePath\releases itself (publish must be releases\<id>\).
+$releasesRoot = [System.IO.Path]::GetFullPath((Join-Path $BasePath 'releases'))
+if ([string]::Equals(
+        $ReleasePath.TrimEnd('\', '/'),
+        $releasesRoot.TrimEnd('\', '/'),
+        [StringComparison]::OrdinalIgnoreCase)) {
+    throw @"
+ReleasePath must be a versioned subfolder, not the releases root.
+  Bad:  $releasesRoot
+  Good: $releasesRoot\<git-sha>
+Your publish was dumped into releases\ (you will see de\, es\, LatoFont\, runtimes\ there).
+Re-publish to releases\<sha> and re-run Install/Deploy.
+"@
+}
+
 $allDefinitions = @(
     @{
         Key         = 'Shared'
@@ -114,8 +129,8 @@ foreach ($def in $definitions) {
         throw "Instance content root missing: $($def.ContentRoot)"
     }
 
-    # sc.exe requires a space after binPath=
-    $binaryPath = "`"$exePath`" --contentRoot `"$($def.ContentRoot)`""
+    # Quoted exe + contentRoot (required when paths have spaces; keeps sc/CIM from stripping args).
+    $binaryPath = '"{0}" --contentRoot "{1}"' -f $exePath, $def.ContentRoot
     $existing = Get-Service -Name $def.Name -ErrorAction SilentlyContinue
 
     if ($null -eq $existing) {
@@ -134,9 +149,12 @@ foreach ($def in $definitions) {
     }
     else {
         Write-Host "Updating binary path for $($def.Name) -> $ReleasePath"
-        sc.exe config $def.Name binPath= $binaryPath | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "sc.exe config failed for $($def.Name) (exit $LASTEXITCODE)."
+        # sc.exe + PowerShell often strips quotes from binPath=; CIM Change preserves them.
+        $cim = Get-CimInstance -ClassName Win32_Service -Filter "Name='$($def.Name)'" -ErrorAction Stop
+        $result = Invoke-CimMethod -InputObject $cim -MethodName Change -Arguments @{ PathName = $binaryPath }
+        if ($null -eq $result -or [int]$result.ReturnValue -ne 0) {
+            $code = if ($null -eq $result) { 'null' } else { $result.ReturnValue }
+            throw "Win32_Service.Change failed for $($def.Name) (ReturnValue=$code)."
         }
     }
 
