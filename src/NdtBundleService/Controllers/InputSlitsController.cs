@@ -150,8 +150,8 @@ public sealed class InputSlitsController : ControllerBase
         if (string.IsNullOrWhiteSpace(slitNo))
             return BadRequest(new { Message = "Slit No is required (used in file name SlitNumber_YYMMDD_PONumber)." });
 
-        if (slitNo.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || slitNo.Contains('_', StringComparison.Ordinal))
-            return BadRequest(new { Message = "Slit No must be a single token with no underscores or invalid file characters." });
+        if (slitNo.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            return BadRequest(new { Message = "Slit No contains invalid file name characters." });
 
         var batchNo = (request.NdtBatchNo ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(batchNo))

@@ -189,6 +189,32 @@ public sealed class ManualInputSlitControllerTests : IDisposable
     }
 
     [Fact]
+    public async Task CreateManualFile_allows_underscores_in_slit_no()
+    {
+        var sut = new InputSlitsController(
+            Options.Create(new NdtBundleOptions { OutputBundleFolder = _outputFolder }),
+            new CapturingTraceability(),
+            new NoOpSapStatus(),
+            NullLogger<InputSlitsController>.Instance);
+
+        var result = await sut.CreateManualFile(
+            new ManualInputSlitRequest
+            {
+                PoNumber = "1000061839",
+                MillNo = 1,
+                SlitNo = "2606106_06",
+                NdtPipes = 1,
+                NdtBatchNo = "1226100001",
+                SlitStartTime = "27.09.2026 14:53:31",
+                SlitFinishTime = "27.09.2026 15:00:00"
+            },
+            CancellationToken.None);
+
+        Assert.IsType<OkObjectResult>(result);
+        Assert.True(File.Exists(Path.Combine(_outputFolder, "2606106_06_260927_1000061839")));
+    }
+
+    [Fact]
     public async Task CreateManualFile_accepts_pasted_time_with_extra_whitespace()
     {
         var sut = new InputSlitsController(

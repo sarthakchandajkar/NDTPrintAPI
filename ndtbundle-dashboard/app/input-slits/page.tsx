@@ -247,11 +247,6 @@ export default function InputSlitsPage() {
       setManualSuccess(null);
       return;
     }
-    if (slitNo.includes("_")) {
-      setManualError("Slit No must not contain underscores.");
-      setManualSuccess(null);
-      return;
-    }
     if (!batch) {
       setManualError("Please enter an NDT Batch No.");
       setManualSuccess(null);
