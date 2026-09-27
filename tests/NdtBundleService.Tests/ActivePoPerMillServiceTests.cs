@@ -47,7 +47,8 @@ public sealed class ActivePoPerMillServiceTests : IDisposable
             "1000000002,1,6\n" +
             "1000000003,2,7\n");
 
-        var service = CreateService(_tempDir, wipPoByMill: new Dictionary<int, string> { [1] = "1999999999" });
+        // No local WIP for these mills — slit newest-file scan should win.
+        var service = CreateService(_tempDir, wipPoByMill: new Dictionary<int, string>());
         var result = await service.GetLatestPoByMillAsync(CancellationToken.None);
 
         Assert.Equal("1000000002", result[1]);
@@ -55,7 +56,7 @@ public sealed class ActivePoPerMillServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task GetLatestPoByMillAsync_DoesNotLetWipBundleOverwriteSlitPo()
+    public async Task GetLatestPoByMillAsync_WipOverridesSlitPo()
     {
         var path = Path.Combine(_tempDir, "slit.csv");
         await File.WriteAllTextAsync(path,
@@ -65,7 +66,7 @@ public sealed class ActivePoPerMillServiceTests : IDisposable
         var service = CreateService(_tempDir, wipPoByMill: new Dictionary<int, string> { [3] = "1000000999" });
         var result = await service.GetLatestPoByMillAsync(CancellationToken.None);
 
-        Assert.Equal("1000000100", result[3]);
+        Assert.Equal("1000000999", result[3]);
     }
 
     [Fact]
@@ -75,6 +76,41 @@ public sealed class ActivePoPerMillServiceTests : IDisposable
         var result = await service.GetLatestPoByMillAsync(CancellationToken.None);
 
         Assert.Equal("1000000444", result[4]);
+    }
+
+    [Fact]
+    public async Task GetLatestPoByMillAsync_LocalWipBeatsMillPublishedSlitConflict()
+    {
+        var path = Path.Combine(_tempDir, "slit.csv");
+        await File.WriteAllTextAsync(path,
+            "PO Number,Mill No,NDT Pipes\n" +
+            "1000062248,1,10\n");
+
+        var store = new InMemoryMillInstanceStatusStore();
+        store.Upsert(
+            new PlcHandshakeMillStatus
+            {
+                MillNo = 1,
+                MillName = "Mill-1",
+                RunningPoNumber = "1000061839",
+                WaitingForNewWip = false,
+                RunningPoSource = "Wip",
+                RunningPoUpdatedAtUtc = DateTimeOffset.UtcNow,
+                LastUpdateUtc = DateTimeOffset.UtcNow
+            },
+            Guid.NewGuid(),
+            "vm",
+            "Mill-1");
+
+        // Local WIP must win for mill hooter even if slit still shows an older PO.
+        var service = CreateService(
+            _tempDir,
+            wipPoByMill: new Dictionary<int, string> { [1] = "1000061839" },
+            useSql: true,
+            millStatus: store);
+        var result = await service.GetLatestPoByMillAsync(CancellationToken.None);
+
+        Assert.Equal("1000061839", result[1]);
     }
 
     [Fact]

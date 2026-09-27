@@ -455,8 +455,8 @@ public interface IPoEndWorkflowService
 }
 
 /// <summary>
-/// Resolves the active PO number per mill: mill-published <c>Running_Po</c> (fresh) wins,
-/// then Input Slit inbox preferred over Accepted by basename, then SQL / local WIP fill.
+/// Resolves the active PO number per mill: local WIP (mill) overrides slit;
+/// mill-published <c>Running_Po</c> (fresh) for Shared; then Input Slit inbox preferred over Accepted.
 /// </summary>
 public interface IActivePoPerMillService
 {

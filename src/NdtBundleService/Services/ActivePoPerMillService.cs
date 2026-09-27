@@ -121,6 +121,11 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
         }
     }
 
+    /// <summary>
+    /// Prefer local WIP running PO over slit / SQL when this process has one
+    /// (mill instances). Shared has no owned WIP state, so this is a no-op there and
+    /// mill-published <c>Running_Po</c> overlay above remains the Shared source of truth.
+    /// </summary>
     private async Task<IReadOnlyDictionary<int, string>> MergeRunningPoFromWipAsync(
         Dictionary<int, string> result,
         CancellationToken cancellationToken)
@@ -132,9 +137,6 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
                 result.Remove(millNo);
                 continue;
             }
-
-            if (result.TryGetValue(millNo, out var slitPo) && !string.IsNullOrWhiteSpace(slitPo))
-                continue;
 
             var wipPo = await _wipRunningPo.TryGetRunningPoForMillAsync(millNo, CancellationToken.None).ConfigureAwait(false);
             if (!string.IsNullOrWhiteSpace(wipPo))
