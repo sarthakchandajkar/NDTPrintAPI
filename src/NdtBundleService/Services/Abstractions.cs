@@ -455,7 +455,8 @@ public interface IPoEndWorkflowService
 }
 
 /// <summary>
-/// Resolves the active PO number per mill from Input Slit (+ Accepted) CSVs and optional SQL traceability.
+/// Resolves the active PO number per mill: mill-published <c>Running_Po</c> (fresh) wins,
+/// then Input Slit inbox preferred over Accepted by basename, then SQL / local WIP fill.
 /// </summary>
 public interface IActivePoPerMillService
 {

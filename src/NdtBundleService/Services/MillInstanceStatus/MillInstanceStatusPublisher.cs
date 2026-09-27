@@ -10,6 +10,7 @@ namespace NdtBundleService.Services.MillInstanceStatus;
 /// <summary>
 /// Copies in-memory handshake status to <c>dbo.Mill_Instance_Status</c> on a background timer.
 /// Must not run on the S7 / PO-end / tag-print path — handshake continues if SQL publish fails.
+/// Also publishes mill WIP running PO so Shared ActivePo / wip-by-mills can prefer it over slit CSV.
 /// </summary>
 public sealed class MillInstanceStatusPublisher : BackgroundService
 {
@@ -19,6 +20,7 @@ public sealed class MillInstanceStatusPublisher : BackgroundService
     private readonly PlcHandshakeStatusRegistry _registry;
     private readonly IMillOwnership _ownership;
     private readonly IMillInstanceLeaseService _lease;
+    private readonly IWipBundleRunningPoProvider _wipRunningPo;
     private readonly IOptionsMonitor<InstanceRoleOptions> _role;
     private readonly IOptionsMonitor<NdtBundleOptions> _bundle;
     private readonly ILogger<MillInstanceStatusPublisher> _logger;
@@ -28,6 +30,7 @@ public sealed class MillInstanceStatusPublisher : BackgroundService
         PlcHandshakeStatusRegistry registry,
         IMillOwnership ownership,
         IMillInstanceLeaseService lease,
+        IWipBundleRunningPoProvider wipRunningPo,
         IOptionsMonitor<InstanceRoleOptions> role,
         IOptionsMonitor<NdtBundleOptions> bundle,
         ILogger<MillInstanceStatusPublisher> logger)
@@ -36,6 +39,7 @@ public sealed class MillInstanceStatusPublisher : BackgroundService
         _registry = registry;
         _ownership = ownership;
         _lease = lease;
+        _wipRunningPo = wipRunningPo;
         _role = role;
         _bundle = bundle;
         _logger = logger;
@@ -105,6 +109,7 @@ public sealed class MillInstanceStatusPublisher : BackgroundService
                 if (connectedOverride == false)
                     row.Connected = false;
 
+                ApplyRunningPo(row, millNo);
                 _store.Upsert(row, instanceId, machine, service);
             }
             catch (Exception ex)
@@ -115,6 +120,37 @@ public sealed class MillInstanceStatusPublisher : BackgroundService
                     millNo);
             }
         }
+    }
+
+    private void ApplyRunningPo(PlcHandshakeMillStatus row, int millNo)
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (_wipRunningPo.IsWaitingForNewWipAfterPoEnd(millNo))
+        {
+            row.WaitingForNewWip = true;
+            row.RunningPoNumber = null;
+            row.RunningPoSource = "Waiting";
+            row.RunningPoUpdatedAtUtc = now;
+            return;
+        }
+
+        // Sync read — TryGetRunningPoForMillAsync is sync for in-memory WIP on mill.
+        var wipPo = _wipRunningPo.TryGetRunningPoForMillAsync(millNo, CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        if (!string.IsNullOrWhiteSpace(wipPo))
+        {
+            row.WaitingForNewWip = false;
+            row.RunningPoNumber = InputSlitCsvParsing.NormalizePo(wipPo);
+            row.RunningPoSource = "Wip";
+            row.RunningPoUpdatedAtUtc = now;
+            return;
+        }
+
+        row.WaitingForNewWip = false;
+        row.RunningPoNumber = null;
+        row.RunningPoSource = null;
+        row.RunningPoUpdatedAtUtc = now;
     }
 
     private TimeSpan ResolveInterval()

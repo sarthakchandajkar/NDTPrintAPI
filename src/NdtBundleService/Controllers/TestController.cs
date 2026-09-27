@@ -7,6 +7,7 @@ using NdtBundleService.Configuration;
 using NdtBundleService.Models;
 using NdtBundleService.Services;
 using NdtBundleService.Services.MillInstanceStatus;
+using NdtBundleService.Services.PlcHandshake;
 
 namespace NdtBundleService.Controllers;
 
@@ -166,6 +167,8 @@ public sealed class TestController : ControllerBase
         public string TotalPieces { get; set; } = string.Empty;
         /// <summary>Required NDT pipes per bundle from the formation chart for <see cref="PipeSize"/> (same rules as <see cref="NdtBundleEngine"/>).</summary>
         public int? NdtPcsPerBundle { get; set; }
+        /// <summary>True when the mill published Waiting_For_New_Wip (fresh Mill_Instance_Status).</summary>
+        public bool WaitingForNewWip { get; set; }
     }
 
     /// <summary>
@@ -435,9 +438,9 @@ public sealed class TestController : ControllerBase
 
     /// <summary>
     /// Returns WIP plan rows grouped for mills 1–4.
-    /// <b>Current PO per mill</b> comes from the latest slit rows in <see cref="NdtBundleOptions.InputSlitFolder"/> and, when set,
-    /// <see cref="NdtBundleOptions.InputSlitAcceptedFolder"/> (e.g. <c>Z:\To SAP\TM\Input Slit</c>) when <see cref="NdtBundleOptions.PreferInputSlitFilesForRunningPo"/> is true (default).
-    /// SQL <c>Input_Slit_Row</c> fills mills missing from the inbox scan. WIP bundle filenames are used only when a mill has no slit PO yet.
+    /// <b>Current PO per mill</b> prefers each mill's published <c>Running_Po</c> on
+    /// <c>Mill_Instance_Status</c> (when fresh), then latest slit rows (inbox preferred over Accepted
+    /// by basename), then SQL <c>Input_Slit_Row</c>, then local WIP filenames on mill instances.
     /// Pipe size, planned month, and SAP pieces/bundle are enriched from merged WIP files in <see cref="NdtBundleOptions.PoPlanFolder"/> when the PO matches.
     /// When <see cref="NdtBundleOptions.PoPlanFolder"/> is set, WIP CSVs are merged (newer files override per mill) for enrichment only.
     /// </summary>
@@ -487,21 +490,42 @@ public sealed class TestController : ControllerBase
                 sourcePath += $"; {poPlanFolderWarning}";
 
             var mills = new List<WipByMillRowDto>(4);
+            IReadOnlyDictionary<int, PlcHandshakeMillStatus> statusByMill;
+            try
+            {
+                var now = DateTimeOffset.UtcNow;
+                statusByMill = _millStatus.LoadAll()
+                    .Where(r => r.MillNo is >= 1 and <= 4
+                                && r.LastUpdateUtc + MillInstanceStatusFreshness.StaleAfter >= now)
+                    .GroupBy(r => r.MillNo)
+                    .ToDictionary(g => g.Key, g => g.First());
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Mill_Instance_Status load failed; WaitingForNewWip may be unset on wip-by-mills.");
+                statusByMill = new Dictionary<int, PlcHandshakeMillStatus>();
+            }
+
             for (var m = 1; m <= 4; m++)
             {
                 wipEnrichment.ByMill.TryGetValue(m, out var wipRowForMill);
                 slitPoByMill.TryGetValue(m, out var slitPo);
+                statusByMill.TryGetValue(m, out var millStatus);
+                var waiting = millStatus?.WaitingForNewWip == true
+                              || _wipBundleRunningPo.IsWaitingForNewWipAfterPoEnd(m);
 
                 var bundleFilePo = string.IsNullOrWhiteSpace(slitPo)
                     ? await _wipBundleRunningPo.TryGetRunningPoForMillAsync(m, loadToken).ConfigureAwait(false)
                     : null;
-                var resolvedPo = !string.IsNullOrWhiteSpace(slitPo)
-                    ? slitPo
-                    : bundleFilePo;
+                var resolvedPo = waiting
+                    ? null
+                    : !string.IsNullOrWhiteSpace(slitPo)
+                        ? slitPo
+                        : bundleFilePo;
 
                 if (!string.IsNullOrWhiteSpace(resolvedPo))
                 {
-                    var row = new WipByMillRowDto { MillNo = m, PoNumber = resolvedPo };
+                    var row = new WipByMillRowDto { MillNo = m, PoNumber = resolvedPo, WaitingForNewWip = false };
                     var normalizedPo = InputSlitCsvParsing.NormalizePo(resolvedPo);
                     if (wipEnrichment.ByPo.TryGetValue(normalizedPo, out var byPo))
                         CopyWipDetails(row, byPo);
@@ -512,13 +536,15 @@ public sealed class TestController : ControllerBase
 
                     mills.Add(row);
                 }
-                else if (wipRowForMill != null && !string.IsNullOrWhiteSpace(wipRowForMill.PoNumber))
+                else if (!waiting && wipRowForMill != null && !string.IsNullOrWhiteSpace(wipRowForMill.PoNumber))
                 {
-                    mills.Add(ToWipByMillRowDto(wipRowForMill));
+                    var row = ToWipByMillRowDto(wipRowForMill);
+                    row.WaitingForNewWip = false;
+                    mills.Add(row);
                 }
                 else
                 {
-                    mills.Add(new WipByMillRowDto { MillNo = m, PoNumber = string.Empty });
+                    mills.Add(new WipByMillRowDto { MillNo = m, PoNumber = string.Empty, WaitingForNewWip = waiting });
                 }
             }
 

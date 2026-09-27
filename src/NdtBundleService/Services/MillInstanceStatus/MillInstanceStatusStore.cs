@@ -105,7 +105,11 @@ internal static class MillInstanceStatusMapper
                     PoId = m.LastPoEnd.PoId,
                     NdtCountFinal = m.LastPoEnd.NdtCountFinal,
                     TimestampUtc = m.LastPoEnd.TimestampUtc
-                }
+                },
+            RunningPoNumber = m.RunningPoNumber,
+            WaitingForNewWip = m.WaitingForNewWip,
+            RunningPoSource = m.RunningPoSource,
+            RunningPoUpdatedAtUtc = m.RunningPoUpdatedAtUtc
         };
 
     public static PlcHandshakeMillStatus Heartbeat(int millNo, string millName, string? lastError) =>
@@ -173,7 +177,8 @@ SELECT Mill_No, Mill_Name, Ip_Address, Connected, Plc_Connection_Enabled,
        Ok_Count, Nok_Count, Ndt_Count, Po_Id, Slit_Id, Counts_Updated_AtUtc,
        Line_Running, Accumulated_Value, Threshold_Value, Hooter_Active,
        Stuck_Trigger_Alarm, Ack_Write_Failed_Alarm,
-       Last_Po_End_Po_Id, Last_Po_End_Ndt, Last_Po_End_AtUtc
+       Last_Po_End_Po_Id, Last_Po_End_Ndt, Last_Po_End_AtUtc,
+       Running_Po, Waiting_For_New_Wip, Running_Po_Source, Running_Po_Updated_AtUtc
 FROM dbo.Mill_Instance_Status WITH (NOLOCK);", conn);
             cmd.CommandTimeout = CommandTimeoutSeconds;
             using var reader = cmd.ExecuteReader();
@@ -241,20 +246,26 @@ WHEN MATCHED THEN UPDATE SET
     Ack_Write_Failed_Alarm = @AckFail,
     Last_Po_End_Po_Id = @EndPo,
     Last_Po_End_Ndt = @EndNdt,
-    Last_Po_End_AtUtc = @EndUtc
+    Last_Po_End_AtUtc = @EndUtc,
+    Running_Po = @RunningPo,
+    Waiting_For_New_Wip = @WaitingWip,
+    Running_Po_Source = @RunningSrc,
+    Running_Po_Updated_AtUtc = @RunningUtc
 WHEN NOT MATCHED THEN INSERT (
     Mill_No, Instance_Id, Machine_Name, Service_Name, Mill_Name, Ip_Address,
     Connected, Plc_Connection_Enabled, Trigger_Active, Ack_Active, Handshake_State, Last_Error,
     Ok_Count, Nok_Count, Ndt_Count, Po_Id, Slit_Id, Counts_Updated_AtUtc,
     Line_Running, Accumulated_Value, Threshold_Value, Hooter_Active,
     Stuck_Trigger_Alarm, Ack_Write_Failed_Alarm,
-    Last_Po_End_Po_Id, Last_Po_End_Ndt, Last_Po_End_AtUtc)
+    Last_Po_End_Po_Id, Last_Po_End_Ndt, Last_Po_End_AtUtc,
+    Running_Po, Waiting_For_New_Wip, Running_Po_Source, Running_Po_Updated_AtUtc)
 VALUES (
     @Mill, @InstanceId, @Machine, @Service, @MillName, @Ip,
     @Connected, @PlcEn, @Trig, @Ack, @State, @Err,
     @Ok, @Nok, @Ndt, @Po, @Slit, @CountsUtc,
     @Line, @Acc, @Thr, @Hooter, @Stuck, @AckFail,
-    @EndPo, @EndNdt, @EndUtc);", conn);
+    @EndPo, @EndNdt, @EndUtc,
+    @RunningPo, @WaitingWip, @RunningSrc, @RunningUtc);", conn);
 
         cmd.Parameters.AddWithValue("@Mill", status.MillNo);
         cmd.Parameters.AddWithValue("@InstanceId", instanceId);
@@ -283,6 +294,10 @@ VALUES (
         cmd.Parameters.AddWithValue("@EndPo", (object?)status.LastPoEnd?.PoId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@EndNdt", (object?)status.LastPoEnd?.NdtCountFinal ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@EndUtc", ToUtcDb(status.LastPoEnd?.TimestampUtc));
+        cmd.Parameters.AddWithValue("@RunningPo", (object?)Trunc(status.RunningPoNumber, 32) ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@WaitingWip", status.WaitingForNewWip);
+        cmd.Parameters.AddWithValue("@RunningSrc", (object?)Trunc(status.RunningPoSource, 32) ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@RunningUtc", ToUtcDb(status.RunningPoUpdatedAtUtc));
         cmd.CommandTimeout = CommandTimeoutSeconds;
         cmd.ExecuteNonQuery();
     }
@@ -324,7 +339,11 @@ VALUES (
                     PoId = lastPoId ?? 0,
                     NdtCountFinal = lastPoNdt ?? 0,
                     TimestampUtc = lastPoUtc ?? DateTimeOffset.UnixEpoch
-                }
+                },
+            RunningPoNumber = reader.IsDBNull(25) ? null : reader.GetString(25),
+            WaitingForNewWip = !reader.IsDBNull(26) && reader.GetBoolean(26),
+            RunningPoSource = reader.IsDBNull(27) ? null : reader.GetString(27),
+            RunningPoUpdatedAtUtc = ReadUtc(reader, 28)
         };
     }
 

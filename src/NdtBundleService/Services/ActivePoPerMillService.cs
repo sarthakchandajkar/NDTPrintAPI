@@ -3,6 +3,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
+using NdtBundleService.Services.MillInstanceStatus;
 
 namespace NdtBundleService.Services;
 
@@ -11,15 +12,18 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
 {
     private readonly NdtBundleOptions _options;
     private readonly IWipBundleRunningPoProvider _wipRunningPo;
+    private readonly IMillInstanceStatusStore _millStatus;
     private readonly ILogger<ActivePoPerMillService> _logger;
 
     public ActivePoPerMillService(
         IOptions<NdtBundleOptions> options,
         IWipBundleRunningPoProvider wipRunningPo,
+        IMillInstanceStatusStore millStatus,
         ILogger<ActivePoPerMillService> logger)
     {
         _options = options.Value;
         _wipRunningPo = wipRunningPo;
+        _millStatus = millStatus;
         _logger = logger;
     }
 
@@ -39,6 +43,7 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
     public async Task<IReadOnlyDictionary<int, string>> GetLatestPoByMillAsync(CancellationToken cancellationToken)
     {
         var result = await BuildSlitPoMapAsync(cancellationToken).ConfigureAwait(false);
+        OverlayMillPublishedRunningPo(result);
         return await MergeRunningPoFromWipAsync(result, cancellationToken).ConfigureAwait(false);
     }
 
@@ -81,6 +86,41 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
         return await GetLatestPoPerMillFromAllFilesForwardScanAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Shared dashboard: prefer each mill's published <c>Running_Po</c> / waiting flag from
+    /// <c>Mill_Instance_Status</c> (fresh telemetry only) over slit CSV / SQL.
+    /// </summary>
+    private void OverlayMillPublishedRunningPo(Dictionary<int, string> result)
+    {
+        if (!UseDatabaseForSummary)
+            return;
+
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            foreach (var row in _millStatus.LoadAll())
+            {
+                if (row.MillNo is < 1 or > 4)
+                    continue;
+                if (row.LastUpdateUtc + MillInstanceStatusFreshness.StaleAfter < now)
+                    continue;
+
+                if (row.WaitingForNewWip)
+                {
+                    result.Remove(row.MillNo);
+                    continue;
+                }
+
+                if (!string.IsNullOrWhiteSpace(row.RunningPoNumber))
+                    result[row.MillNo] = InputSlitCsvParsing.NormalizePo(row.RunningPoNumber);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to overlay mill-published Running_Po from Mill_Instance_Status.");
+        }
+    }
+
     private async Task<IReadOnlyDictionary<int, string>> MergeRunningPoFromWipAsync(
         Dictionary<int, string> result,
         CancellationToken cancellationToken)
@@ -88,7 +128,10 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
         for (var millNo = 1; millNo <= 4; millNo++)
         {
             if (_wipRunningPo.IsWaitingForNewWipAfterPoEnd(millNo))
+            {
+                result.Remove(millNo);
                 continue;
+            }
 
             if (result.TryGetValue(millNo, out var slitPo) && !string.IsNullOrWhiteSpace(slitPo))
                 continue;
@@ -110,18 +153,12 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
         var minUtc = SourceFileEligibility.ParseMinUtc(_options);
         const int maxFilesToScan = 300;
 
-        var files = new List<FileInfo>();
-        foreach (var folder in GetInputSlitReadFolderPaths())
-        {
-            if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
-                continue;
-            foreach (var file in InputSlitInboxEnumeration.EnumerateFiles(folder))
-            {
-                var fi = new FileInfo(file);
-                if (SourceFileEligibility.IncludeFileUtc(fi.LastWriteTimeUtc, minUtc))
-                    files.Add(fi);
-            }
-        }
+        // Inbox ∪ Accepted by basename; inbox wins so live SAP drops beat archived Accepted copies.
+        var files = InputSlitInboxEnumeration
+            .EnumerateInboxPreferOverAccepted(_options.InputSlitFolder, _options.InputSlitAcceptedFolder)
+            .Select(p => new FileInfo(p))
+            .Where(fi => SourceFileEligibility.IncludeFileUtc(fi.LastWriteTimeUtc, minUtc))
+            .ToList();
 
         foreach (var fi in files
                      .OrderByDescending(f => f.LastWriteTimeUtc)
@@ -291,19 +328,9 @@ WHERE rn = 1;";
     private List<string> GetEligibleInputSlitCsvFilesOrdered()
     {
         var minUtc = SourceFileEligibility.ParseMinUtc(_options);
-        var acc = new List<string>();
-        foreach (var folder in GetInputSlitReadFolderPaths())
-        {
-            if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
-                continue;
-            foreach (var file in InputSlitInboxEnumeration.EnumerateFiles(folder))
-            {
-                if (SourceFileEligibility.IncludeFileUtc(File.GetLastWriteTimeUtc(file), minUtc))
-                    acc.Add(file);
-            }
-        }
-
-        return acc
+        return InputSlitInboxEnumeration
+            .EnumerateInboxPreferOverAccepted(_options.InputSlitFolder, _options.InputSlitAcceptedFolder)
+            .Where(f => SourceFileEligibility.IncludeFileUtc(File.GetLastWriteTimeUtc(f), minUtc))
             .Select(f => new FileInfo(f))
             .OrderBy(f => f.LastWriteTimeUtc)
             .ThenBy(f => f.FullName, StringComparer.OrdinalIgnoreCase)

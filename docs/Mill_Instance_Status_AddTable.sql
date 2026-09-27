@@ -50,7 +50,12 @@ BEGIN
             CONSTRAINT DF_Mill_Instance_Status_AckFail DEFAULT (0),
         Last_Po_End_Po_Id        INT              NULL,
         Last_Po_End_Ndt          INT              NULL,
-        Last_Po_End_AtUtc        DATETIME2(3)     NULL
+        Last_Po_End_AtUtc        DATETIME2(3)     NULL,
+        Running_Po               NVARCHAR(32)     NULL,
+        Waiting_For_New_Wip      BIT              NOT NULL
+            CONSTRAINT DF_Mill_Instance_Status_WaitingWip DEFAULT (0),
+        Running_Po_Source        NVARCHAR(32)     NULL,
+        Running_Po_Updated_AtUtc DATETIME2(3)     NULL
     );
 END
 GO

@@ -177,6 +177,9 @@ public sealed class MillInstanceStatusTests
         Assert.Single(rows);
         Assert.Equal(1, rows[0].MillNo);
         Assert.Equal(7, rows[0].NdtCount);
+        Assert.Equal("1000061839", rows[0].RunningPoNumber);
+        Assert.False(rows[0].WaitingForNewWip);
+        Assert.Equal("Wip", rows[0].RunningPoSource);
 
         var throwing = new ThrowingStore();
         var resilient = NewPublisher(throwing, registry, TestMillOwnership.Mill(1), MillRole());
@@ -184,16 +187,34 @@ public sealed class MillInstanceStatusTests
         Assert.True(throwing.Called);
     }
 
+    [Fact]
+    public void Publisher_writes_waiting_flag_when_wip_waiting()
+    {
+        var registry = new PlcHandshakeStatusRegistry();
+        registry.RegisterMill(1, new PlcHandshakeMillStatus { MillNo = 1, Connected = true });
+        var store = new InMemoryMillInstanceStatusStore();
+        var wip = new StubWip { Waiting = true };
+        var publisher = NewPublisher(store, registry, TestMillOwnership.Mill(1), MillRole(), wip);
+        publisher.PublishOwned(connectedOverride: null);
+
+        var row = Assert.Single(store.LoadAll());
+        Assert.True(row.WaitingForNewWip);
+        Assert.Null(row.RunningPoNumber);
+        Assert.Equal("Waiting", row.RunningPoSource);
+    }
+
     private static MillInstanceStatusPublisher NewPublisher(
         IMillInstanceStatusStore store,
         PlcHandshakeStatusRegistry registry,
         IMillOwnership ownership,
-        InstanceRoleOptions role) =>
+        InstanceRoleOptions role,
+        StubWip? wip = null) =>
         new(
             store,
             registry,
             ownership,
             new StubLease(),
+            wip ?? new StubWip(),
             new RoleMonitor(role),
             new BundleMonitor(new NdtBundleOptions()),
             NullLogger<MillInstanceStatusPublisher>.Instance);
@@ -229,6 +250,30 @@ public sealed class MillInstanceStatusTests
             Task.FromResult(MillLeaseRenewOutcome.Renewed);
 
         public Task ReleaseAsync(int millNo, CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
+    private sealed class StubWip : NdtBundleService.Services.IWipBundleRunningPoProvider
+    {
+        public string? RunningPo { get; set; } = "1000061839";
+        public bool Waiting { get; set; }
+
+        public Task<string?> TryGetRunningPoForMillAsync(int millNo, CancellationToken cancellationToken) =>
+            Task.FromResult(Waiting ? null : RunningPo);
+
+        public void NotifyPoEndForMill(int millNo, string endedPo) { }
+
+        public bool IsWaitingForNewWipAfterPoEnd(int millNo) => Waiting;
+
+        public bool TryGetPoEndWaitContext(int millNo, out bool waitingForNewWip, out string? endedPo)
+        {
+            waitingForNewWip = Waiting;
+            endedPo = null;
+            return true;
+        }
+
+        public bool ResumeRunningWipForMill(int millNo) => false;
+
+        public bool TrySetRunningPoFromWipFile(int millNo, string newPo, DateTime wipStampUtc, string wipFileName) => false;
     }
 
     private sealed class ThrowingStore : IMillInstanceStatusStore

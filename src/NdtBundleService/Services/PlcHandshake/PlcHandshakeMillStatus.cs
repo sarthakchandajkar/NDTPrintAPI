@@ -68,6 +68,20 @@ public sealed class PlcHandshakeMillStatus
     public bool AckWriteFailedAlarm { get; set; }
 
     public PlcHandshakeLastPoEnd? LastPoEnd { get; set; }
+
+    /// <summary>
+    /// SAP PO string the mill treats as running WIP (published to Shared via Mill_Instance_Status).
+    /// Distinct from <see cref="PoId"/> (PLC integer).
+    /// </summary>
+    public string? RunningPoNumber { get; set; }
+
+    /// <summary>True after PO-end until a new WIP PO is claimed for this mill.</summary>
+    public bool WaitingForNewWip { get; set; }
+
+    /// <summary>Source label for <see cref="RunningPoNumber"/> (e.g. Wip / Waiting).</summary>
+    public string? RunningPoSource { get; set; }
+
+    public DateTimeOffset? RunningPoUpdatedAtUtc { get; set; }
 }
 
 /// <summary>Thread-safe aggregate status for dashboard / <see cref="PlcHandshakeMirrorPlcClient"/>.</summary>
@@ -183,6 +197,10 @@ public sealed class PlcHandshakeStatusRegistry
                     PoId = m.LastPoEnd.PoId,
                     NdtCountFinal = m.LastPoEnd.NdtCountFinal,
                     TimestampUtc = m.LastPoEnd.TimestampUtc
-                }
+                },
+            RunningPoNumber = m.RunningPoNumber,
+            WaitingForNewWip = m.WaitingForNewWip,
+            RunningPoSource = m.RunningPoSource,
+            RunningPoUpdatedAtUtc = m.RunningPoUpdatedAtUtc
         };
 }
