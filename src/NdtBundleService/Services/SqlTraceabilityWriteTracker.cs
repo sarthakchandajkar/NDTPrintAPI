@@ -6,6 +6,8 @@ public interface ISqlTraceabilityWriteTracker
     void RecordSuccess(string operation, string? detail = null);
     void RecordFailure(string operation, string error, string? detail = null);
     IReadOnlyList<SqlTraceabilityWriteResult> GetRecentResults();
+    /// <summary>Clears the recent-results buffer (call at the start of each file process).</summary>
+    void ClearRecent();
 }
 
 public sealed class SqlTraceabilityWriteResult
@@ -59,6 +61,14 @@ public sealed class SqlTraceabilityWriteTracker : ISqlTraceabilityWriteTracker
         lock (_lock)
         {
             return _recent.ToList();
+        }
+    }
+
+    public void ClearRecent()
+    {
+        lock (_lock)
+        {
+            _recent.Clear();
         }
     }
 

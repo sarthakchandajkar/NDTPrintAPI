@@ -164,6 +164,7 @@ public sealed class NdtBundleRepositoryReconcileSlitTests : IDisposable
         public void RecordFailure(string operation, string error, string? detail = null) { }
         public void RecordSuccess(string operation, string? detail = null) { }
         public IReadOnlyList<SqlTraceabilityWriteResult> GetRecentResults() => Array.Empty<SqlTraceabilityWriteResult>();
+        public void ClearRecent() { }
     }
 
     private sealed class NullDisposable : IDisposable

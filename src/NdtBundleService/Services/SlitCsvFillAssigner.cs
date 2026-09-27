@@ -3,8 +3,9 @@ using Microsoft.Extensions.Logging;
 namespace NdtBundleService.Services;
 
 /// <summary>
-/// Worker fill-to-target assignment: stamp final batch from SQL fill pointer, or hold unpublished
-/// with no invented number when no incomplete target exists.
+/// Worker fill-to-target assignment: stamp final batch from SQL fill pointer.
+/// When no incomplete target exists, returns empty (no invented number) so the worker
+/// can retry on the next poll or the operator can use Manual Input Slit / Manual Reconcile.
 /// </summary>
 public sealed class SlitCsvFillAssigner
 {
@@ -19,8 +20,10 @@ public sealed class SlitCsvFillAssigner
 
     /// <summary>
     /// Stamp whole-file pipes onto the oldest incomplete fill target.
-    /// When no target exists and <paramref name="holdWhenNoOpenBundle"/> is true, records a hold and
-    /// returns an empty batch (file must stay unpublished).
+    /// When no target exists, returns <see cref="SlitCsvFillAssignResult.AwaitingTarget"/> = true
+    /// with no batch (file must not be marked handled so the next poll can retry).
+    /// <paramref name="holdWhenNoOpenBundle"/> is retained for call-site compatibility but no longer
+    /// writes <c>NDT_Csv_Fill_Hold</c> — recovery is retry + Manual Reconcile / Manual Input Slit.
     /// </summary>
     public async Task<SlitCsvFillAssignResult> AssignAsync(
         string sourceFilePath,
@@ -43,31 +46,29 @@ public sealed class SlitCsvFillAssigner
             return new SlitCsvFillAssignResult(
                 BatchNo: stamped.BundleNo,
                 Held: false,
-                Stamp: stamped);
+                Stamp: stamped,
+                AwaitingTarget: false);
         }
 
-        if (!holdWhenNoOpenBundle)
-            return new SlitCsvFillAssignResult(BatchNo: null, Held: false, Stamp: null);
-
-        await _csvFill
-            .UpsertHoldAsync(
-                sourceFilePath,
-                poNumber,
-                millNo,
-                pipeSize,
-                CsvFillHoldReason.NoOpenBundle,
-                cancellationToken)
-            .ConfigureAwait(false);
-
+        // No open fill target. Do not invent a batch number and do not write hold/Manual_Review.
         _logger.LogInformation(
-            "Fill-to-target hold: no open bundle for PO {PO} Mill {Mill} file {File} — unpublished, no invented number.",
+            "Fill-to-target: no open bundle for PO {PO} Mill {Mill} file {File} — will retry next poll (or use Manual Input Slit after tag print).",
             InputSlitCsvParsing.NormalizePo(poNumber),
             millNo,
             Path.GetFileName(sourceFilePath));
 
-        return new SlitCsvFillAssignResult(BatchNo: null, Held: true, Stamp: null);
+        // Held kept when holdWhenNoOpenBundle for older call sites; AwaitingTarget is the real signal.
+        return new SlitCsvFillAssignResult(
+            BatchNo: null,
+            Held: holdWhenNoOpenBundle,
+            Stamp: null,
+            AwaitingTarget: true);
     }
 }
 
 /// <summary>Outcome of one worker fill-assignment attempt.</summary>
-public sealed record SlitCsvFillAssignResult(string? BatchNo, bool Held, CsvFillStampResult? Stamp);
+public sealed record SlitCsvFillAssignResult(
+    string? BatchNo,
+    bool Held,
+    CsvFillStampResult? Stamp,
+    bool AwaitingTarget = false);

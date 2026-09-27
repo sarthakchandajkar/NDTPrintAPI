@@ -1,5 +1,7 @@
 -- Additive: Input_Slit_File_Seen — durable terminal marker for inbox files that must not be
 -- re-queued by F-5 reconcile (e.g. no rows for configured mills).
+-- Keyed by (Source_File, Source_LastWriteTimeUtc, Mill_No) so split mill instances do not
+-- poison each other's reconcile via NoConfiguredMillRows.
 -- Do NOT use sentinel rows in Input_Slit_Row (that table remains reconciliation ground truth).
 -- Run against JazeeraMES_Prod (or Dev). Safe to re-run.
 
@@ -12,11 +14,13 @@ BEGIN
         Input_Slit_File_Seen_ID BIGINT         IDENTITY(1,1) NOT NULL PRIMARY KEY,
         Source_File             NVARCHAR(512)  NOT NULL,
         Source_LastWriteTimeUtc DATETIME2(3)   NOT NULL,
+        Mill_No                 INT            NOT NULL
+            CONSTRAINT DF_Input_Slit_File_Seen_Mill_No DEFAULT (0),
         Reason                  NVARCHAR(64)   NOT NULL,
         Seen_AtUtc              DATETIME2(3)   NOT NULL CONSTRAINT DF_Input_Slit_File_Seen_Seen_AtUtc DEFAULT (SYSUTCDATETIME())
     );
 
-    CREATE UNIQUE INDEX UX_Input_Slit_File_Seen_File_Write
-        ON dbo.Input_Slit_File_Seen (Source_File, Source_LastWriteTimeUtc);
+    CREATE UNIQUE INDEX UX_Input_Slit_File_Seen_File_Write_Mill
+        ON dbo.Input_Slit_File_Seen (Source_File, Source_LastWriteTimeUtc, Mill_No);
 END
 GO

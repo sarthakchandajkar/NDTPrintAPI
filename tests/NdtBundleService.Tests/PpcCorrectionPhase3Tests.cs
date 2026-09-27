@@ -124,8 +124,42 @@ public sealed class PpcCorrectionPhase3Tests
             sapRepo,
             ppcRepo,
             new NoOpMerge(),
+            new DisabledMillSequence(),
+            NoOpCsvFillService.Instance,
             new TestOptionsMonitor(),
             NullLogger<ReconcileController>.Instance);
+
+    private sealed class DisabledMillSequence : IMillSequenceService
+    {
+        public bool IsEnabled => false;
+        public Task SeedMissingRowsAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<IReadOnlyList<MillSequenceSnapshot>> GetSnapshotsAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<MillSequenceSnapshot>>(Array.Empty<MillSequenceSnapshot>());
+        public Task<MillSequenceSnapshot?> GetSnapshotAsync(int millNo, CancellationToken cancellationToken) =>
+            Task.FromResult<MillSequenceSnapshot?>(null);
+        public Task<int> GetLiveMaxSequenceAsync(int millNo, CancellationToken cancellationToken) => Task.FromResult(0);
+        public Task<int> AllocateNextInTxAsync(
+            Microsoft.Data.SqlClient.SqlConnection conn, Microsoft.Data.SqlClient.SqlTransaction tx,
+            int millNo, string updatedBy, string reason, CancellationToken cancellationToken) =>
+            Task.FromResult(0);
+        public Task<MillSequenceSetResult> SetCurrentSequenceAsync(
+            int millNo, int currentSequence, string reason, string updatedBy, bool forceBelowLiveMax,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+        public Task<bool> TryRollbackIfHighestInTxAsync(
+            Microsoft.Data.SqlClient.SqlConnection conn, Microsoft.Data.SqlClient.SqlTransaction tx,
+            int millNo, int sourceSequence, string updatedBy, string reason, CancellationToken cancellationToken) =>
+            Task.FromResult(false);
+        public Task EnsureScanDoesNotExceedTableAsync(int millNo, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+        public Task<(int Sequence, string Formatted, bool ClaimedCsvAdvance)> AllocateAndInsertBundleAsync(
+            NdtBundleRecord pending, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+        public Task<(int Sequence, string Formatted)?> TryOpenCsvAdvanceStampTargetAsync(
+            string poNumber, int millNo, int provisionalTargetNdtPcs, string? slitNo,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<(int Sequence, string Formatted)?>(null);
+    }
 
     private sealed class NoOpMerge : IBundleMergeService
     {

@@ -10,7 +10,7 @@ namespace NdtBundleService.Tests;
 /// <summary>
 /// Integration assertions for fill-to-target failure modes (wiring, not pure arithmetic):
 /// batch-move rollback, ResubmitDrift delta revision, worker-path pointer advance,
-/// manual-reconcile case (c) PPC gating, and no-open-bundle hold.
+/// manual-reconcile case (c) PPC gating, and early-CSV retry (no invented number).
 /// </summary>
 public sealed class FillToTargetIntegrationTests
 {
@@ -122,6 +122,48 @@ public sealed class FillToTargetIntegrationTests
         Assert.Equal(CsvFillState.CsvFilling, fill.GetState(Batch0002));
     }
 
+    /// <summary>
+    /// PO-change boundary: 001 (PO-A, older PrintedAt) and 002 (PO-B) both open.
+    /// PO-B files must never stamp onto older 001 — root class of the 1226100002 cross-PO incident.
+    /// </summary>
+    [Fact]
+    public async Task Cross_PO_isolation_PO_B_files_stamp_002_not_older_001_then_PO_A_fills_001()
+    {
+        const string poA = "1000060363";
+        const string poB = "1000060999";
+        var t1 = new DateTime(2026, 9, 22, 10, 0, 0, DateTimeKind.Utc);
+        var t2 = t1.AddMinutes(5);
+
+        var fill = new InMemoryTransactionalCsvFillService();
+        fill.Seed(Batch0001, target: 22, filled: 0, CsvFillState.PlcClosed, printedAt: t1, poNumber: poA);
+        fill.Seed(Batch0002, target: 18, filled: 0, CsvFillState.PlcClosed, printedAt: t2, poNumber: poB);
+
+        var assigner = new SlitCsvFillAssigner(fill, NullLogger<SlitCsvFillAssigner>.Instance);
+
+        async Task<string?> Stamp(string po, int pipes)
+        {
+            var r = await assigner.AssignAsync(
+                @"C:\inbox\f.csv", po, Mill, pipeSize: null, pipes,
+                holdWhenNoOpenBundle: true, CancellationToken.None);
+            return r.BatchNo;
+        }
+
+        // PO-B files first (filesystem order after PO change) — must hit 002 only.
+        Assert.Equal(Batch0002, await Stamp(poB, 10));
+        Assert.Equal(Batch0002, await Stamp(poB, 8)); // completes 18
+        Assert.Equal(CsvFillState.CsvComplete, fill.GetState(Batch0002));
+        Assert.Equal(18, fill.GetFilled(Batch0002));
+        Assert.Equal(0, fill.GetFilled(Batch0001));
+        Assert.Equal(CsvFillState.PlcClosed, fill.GetState(Batch0001));
+
+        // PO-A files — fill 001 independently to 22.
+        Assert.Equal(Batch0001, await Stamp(poA, 12));
+        Assert.Equal(Batch0001, await Stamp(poA, 10));
+        Assert.Equal(CsvFillState.CsvComplete, fill.GetState(Batch0001));
+        Assert.Equal(22, fill.GetFilled(Batch0001));
+        Assert.Equal(18, fill.GetFilled(Batch0002));
+    }
+
     // ---- (d) Manual-reconcile case (c) PPC gating ----
 
     [Fact]
@@ -176,10 +218,10 @@ public sealed class FillToTargetIntegrationTests
         Assert.Empty(ppc.Items);
     }
 
-    // ---- (e) No-open-bundle hold ----
+    // ---- (e) Early CSV / no open fill target (retry, no invented number) ----
 
     [Fact]
-    public async Task No_open_bundle_hold_leaves_unpublished_with_no_invented_number()
+    public async Task Early_csv_no_open_target_awaits_retry_with_no_invented_number()
     {
         var fill = new InMemoryTransactionalCsvFillService(); // no seeded incomplete targets
         var assigner = new SlitCsvFillAssigner(fill, NullLogger<SlitCsvFillAssigner>.Instance);
@@ -188,11 +230,37 @@ public sealed class FillToTargetIntegrationTests
             @"C:\inbox\late.csv", Po, Mill, pipeSize: null, fileNdtPipes: 11,
             holdWhenNoOpenBundle: true, CancellationToken.None);
 
-        Assert.True(result.Held);
+        Assert.True(result.AwaitingTarget);
+        Assert.True(result.Held); // compatibility when holdWhenNoOpenBundle was true
         Assert.Null(result.BatchNo);
         Assert.Null(result.Stamp);
-        Assert.Contains("late.csv", fill.HeldFiles, StringComparer.OrdinalIgnoreCase);
+        Assert.Empty(fill.HeldFiles); // no NDT_Csv_Fill_Hold row
         Assert.Empty(fill.AllBundleNos);
+    }
+
+    [Fact]
+    public async Task Early_csv_then_plc_seed_stamps_on_retry()
+    {
+        var fill = new InMemoryTransactionalCsvFillService();
+        var assigner = new SlitCsvFillAssigner(fill, NullLogger<SlitCsvFillAssigner>.Instance);
+        const string file = @"C:\inbox\early.csv";
+
+        var early = await assigner.AssignAsync(
+            file, Po, Mill, pipeSize: null, fileNdtPipes: 11,
+            holdWhenNoOpenBundle: false, CancellationToken.None);
+        Assert.True(early.AwaitingTarget);
+        Assert.Null(early.BatchNo);
+        Assert.Empty(fill.HeldFiles);
+
+        // PLC print equivalent: incomplete fill target appears
+        fill.Seed(Batch0001, target: 22, filled: 0, CsvFillState.PlcClosed, printedAt: DateTime.UtcNow, poNumber: Po);
+
+        var stamped = await assigner.AssignAsync(
+            file, Po, Mill, pipeSize: null, fileNdtPipes: 11,
+            holdWhenNoOpenBundle: false, CancellationToken.None);
+        Assert.False(stamped.AwaitingTarget);
+        Assert.Equal(Batch0001, stamped.BatchNo);
+        Assert.Equal(11, fill.GetFilled(Batch0001));
     }
 
     // ---- helpers ----
@@ -212,6 +280,8 @@ public sealed class FillToTargetIntegrationTests
             new SapStatusRepo(sapStatus),
             ppc,
             new NoOpMerge(),
+            new NoOpMillSequence(),
+            NoOpCsvFillService.Instance,
             new OptMon(),
             NullLogger<ReconcileController>.Instance);
 
@@ -226,6 +296,44 @@ public sealed class FillToTargetIntegrationTests
             string updatedBy,
             CancellationToken cancellationToken) =>
             throw new NotSupportedException();
+    }
+
+    private sealed class NoOpMillSequence : IMillSequenceService
+    {
+        public bool IsEnabled => false;
+        public Task SeedMissingRowsAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<IReadOnlyList<MillSequenceSnapshot>> GetSnapshotsAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<MillSequenceSnapshot>>(Array.Empty<MillSequenceSnapshot>());
+        public Task<MillSequenceSnapshot?> GetSnapshotAsync(int millNo, CancellationToken cancellationToken) =>
+            Task.FromResult<MillSequenceSnapshot?>(null);
+        public Task<int> GetLiveMaxSequenceAsync(int millNo, CancellationToken cancellationToken) => Task.FromResult(0);
+        public Task<int> AllocateNextInTxAsync(
+            Microsoft.Data.SqlClient.SqlConnection conn,
+            Microsoft.Data.SqlClient.SqlTransaction tx,
+            int millNo,
+            string updatedBy,
+            string reason,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(0);
+        public Task<MillSequenceSetResult> SetCurrentSequenceAsync(
+            int millNo, int currentSequence, string reason, string updatedBy, bool forceBelowLiveMax,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+        public Task<bool> TryRollbackIfHighestInTxAsync(
+            Microsoft.Data.SqlClient.SqlConnection conn,
+            Microsoft.Data.SqlClient.SqlTransaction tx,
+            int millNo, int sourceSequence, string updatedBy, string reason,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(false);
+        public Task EnsureScanDoesNotExceedTableAsync(int millNo, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+        public Task<(int Sequence, string Formatted, bool ClaimedCsvAdvance)> AllocateAndInsertBundleAsync(
+            NdtBundleRecord pending, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+        public Task<(int Sequence, string Formatted)?> TryOpenCsvAdvanceStampTargetAsync(
+            string poNumber, int millNo, int provisionalTargetNdtPcs, string? slitNo,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<(int Sequence, string Formatted)?>(null);
     }
 
     private static object? GetProp(object obj, string name) =>
@@ -449,25 +557,39 @@ internal sealed class InMemoryTransactionalCsvFillService : ICsvFillService
     public IReadOnlyList<(string File, string Reason)> HoldRecords => _holdRecords;
     public IReadOnlyCollection<string> AllBundleNos => _bundles.Keys;
 
-    public void Seed(string bundleNo, int target, int filled, string state, DateTime? printedAt = null) =>
-        _bundles[bundleNo] = new BundleFill(bundleNo, target, filled, state, printedAt ?? DateTime.UtcNow);
+    /// <summary>
+    /// Mirrors production stamp SQL: incomplete rows for this PO only
+    /// (<c>PO_Number = @Po OR PO_Number = @PoNormalized</c>), oldest by PrintedAt.
+    /// Default <paramref name="poNumber"/> matches <see cref="FillToTargetIntegrationTests"/> PO.
+    /// </summary>
+    public void Seed(
+        string bundleNo,
+        int target,
+        int filled,
+        string state,
+        DateTime? printedAt = null,
+        string poNumber = "1000060363") =>
+        _bundles[bundleNo] = new BundleFill(
+            bundleNo,
+            target,
+            filled,
+            state,
+            printedAt ?? DateTime.UtcNow,
+            poNumber);
 
     public int GetFilled(string bundleNo) => _bundles[bundleNo].Filled;
     public string GetState(string bundleNo) => _bundles[bundleNo].State;
 
     public Task TryInitializeFillTargetAsync(string bundleNo, int targetNdtPcs, string? closeSource, CancellationToken cancellationToken)
     {
-        _bundles[bundleNo] = new BundleFill(bundleNo, targetNdtPcs, 0, CsvFillState.PlcClosed, DateTime.UtcNow);
+        _bundles[bundleNo] = new BundleFill(bundleNo, targetNdtPcs, 0, CsvFillState.PlcClosed, DateTime.UtcNow, "1000060363");
         return Task.CompletedTask;
     }
 
     public Task<CsvFillIncompleteBundle?> TryGetOldestIncompleteAsync(
         string poNumber, int millNo, string? pipeSize, CancellationToken cancellationToken)
     {
-        var oldest = _bundles.Values
-            .Where(b => CsvFillState.IsIncomplete(b.State))
-            .OrderBy(b => b.PrintedAtUtc)
-            .FirstOrDefault();
+        var oldest = OldestIncompleteForPo(poNumber);
         if (oldest is null)
             return Task.FromResult<CsvFillIncompleteBundle?>(null);
         return Task.FromResult<CsvFillIncompleteBundle?>(
@@ -478,23 +600,39 @@ internal sealed class InMemoryTransactionalCsvFillService : ICsvFillService
         string poNumber, int millNo, CancellationToken cancellationToken)
     {
         var any = _bundles.Values.Any(b =>
-            b.State is CsvFillState.CsvComplete or CsvFillState.CsvShort or CsvFillState.CsvOvershoot);
+            MatchesPo(b.PoNumber, poNumber)
+            && b.State is CsvFillState.CsvComplete or CsvFillState.CsvShort or CsvFillState.CsvOvershoot);
         return Task.FromResult(any);
     }
 
     public Task<CsvFillStampResult?> TryStampFileAsync(
         string poNumber, int millNo, string? pipeSize, int fileNdtPipes, CancellationToken cancellationToken)
     {
-        var oldest = _bundles.Values
-            .Where(b => CsvFillState.IsIncomplete(b.State))
-            .OrderBy(b => b.PrintedAtUtc)
-            .FirstOrDefault();
+        var oldest = OldestIncompleteForPo(poNumber);
         if (oldest is null)
             return Task.FromResult<CsvFillStampResult?>(null);
 
         var result = CsvFillLogic.ComputeAfterStamp(oldest.BundleNo, oldest.Target, oldest.Filled, fileNdtPipes, 20);
         _bundles[oldest.BundleNo] = oldest with { Filled = result.CsvFilledAfter, State = result.FillState };
         return Task.FromResult<CsvFillStampResult?>(result);
+    }
+
+    private BundleFill? OldestIncompleteForPo(string poNumber) =>
+        _bundles.Values
+            .Where(b => CsvFillState.IsIncomplete(b.State) && MatchesPo(b.PoNumber, poNumber))
+            .OrderBy(b => b.PrintedAtUtc)
+            .ThenBy(b => b.BundleNo, StringComparer.Ordinal)
+            .FirstOrDefault();
+
+    /// <summary>
+    /// Same predicate as production: stored equals trimmed file PO or NormalizePo(file PO).
+    /// </summary>
+    internal static bool MatchesPo(string storedPo, string filePo)
+    {
+        var trimmed = filePo.Trim();
+        var normalized = InputSlitCsvParsing.NormalizePo(filePo);
+        return string.Equals(storedPo, trimmed, StringComparison.OrdinalIgnoreCase)
+               || string.Equals(storedPo, normalized, StringComparison.OrdinalIgnoreCase);
     }
 
     public Task<int> AdvanceQuietShortAsync(
@@ -570,7 +708,13 @@ internal sealed class InMemoryTransactionalCsvFillService : ICsvFillService
         _bundles[batchNo] = b with { Filled = after, State = state };
     }
 
-    private sealed record BundleFill(string BundleNo, int Target, int Filled, string State, DateTime PrintedAtUtc);
+    private sealed record BundleFill(
+        string BundleNo,
+        int Target,
+        int Filled,
+        string State,
+        DateTime PrintedAtUtc,
+        string PoNumber);
 }
 
 /// <summary>Minimal INdtBundleRepository defaults for fill integration tests.</summary>

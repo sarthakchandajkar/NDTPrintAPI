@@ -228,7 +228,7 @@ public sealed class CsvBundleOutputWriterPrintStatusTests
 
         public bool IsEnabled => true;
 
-        public Task<(int Sequence, string Formatted)> AllocateAndInsertBundleAsync(
+        public Task<(int Sequence, string Formatted, bool ClaimedCsvAdvance)> AllocateAndInsertBundleAsync(
             NdtBundleRecord pending,
             CancellationToken cancellationToken)
         {
@@ -239,8 +239,16 @@ public sealed class CsvBundleOutputWriterPrintStatusTests
             var formatted = NdtBundleSequence.Format(CurrentSequence, pending.MillNo);
             pending.BundleNo = formatted;
             InsertedBundleNos.Add(formatted);
-            return Task.FromResult((CurrentSequence, formatted));
+            return Task.FromResult((CurrentSequence, formatted, ClaimedCsvAdvance: false));
         }
+
+        public Task<(int Sequence, string Formatted)?> TryOpenCsvAdvanceStampTargetAsync(
+            string poNumber,
+            int millNo,
+            int provisionalTargetNdtPcs,
+            string? slitNo,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<(int Sequence, string Formatted)?>(null);
 
         public Task SeedMissingRowsAsync(CancellationToken cancellationToken) => Task.CompletedTask;
         public Task<IReadOnlyList<MillSequenceSnapshot>> GetSnapshotsAsync(CancellationToken cancellationToken) =>

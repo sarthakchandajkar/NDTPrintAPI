@@ -75,10 +75,23 @@ public interface IMillSequenceService
     /// <summary>
     /// Increment <c>Mill_Sequence</c>, insert <c>NDT_Bundle</c>, and delete armed
     /// <c>Bundle_Accumulation</c> in one transaction.
+    /// When an incomplete <c>Close_Source=CsvAdvance</c> row exists for the same PO/mill, claims that
+    /// bundle instead of allocating a newer sequence (Option A reconcile / stamp-advance).
     /// Throws when SQL cannot allocate; does not print or invent a batch number.
     /// </summary>
-    Task<(int Sequence, string Formatted)> AllocateAndInsertBundleAsync(
+    Task<(int Sequence, string Formatted, bool ClaimedCsvAdvance)> AllocateAndInsertBundleAsync(
         NdtBundleRecord pending,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// After CSV Complete/Overshoot: allocate next sequence and insert a stamp-only fill target
+    /// (<c>Close_Source=CsvAdvance</c>, no tag print). No-op when another incomplete already exists.
+    /// </summary>
+    Task<(int Sequence, string Formatted)?> TryOpenCsvAdvanceStampTargetAsync(
+        string poNumber,
+        int millNo,
+        int provisionalTargetNdtPcs,
+        string? slitNo,
         CancellationToken cancellationToken);
 }
 
@@ -106,7 +119,7 @@ public sealed class MillSequenceService : IMillSequenceService
     private NdtBundleOptions Opt => _options.CurrentValue;
     public bool IsEnabled => SqlTraceabilityConnection.IsSqlEnabled(Opt);
 
-    public async Task<(int Sequence, string Formatted)> AllocateAndInsertBundleAsync(
+    public async Task<(int Sequence, string Formatted, bool ClaimedCsvAdvance)> AllocateAndInsertBundleAsync(
         NdtBundleRecord pending,
         CancellationToken cancellationToken)
     {
@@ -120,6 +133,23 @@ public sealed class MillSequenceService : IMillSequenceService
         await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            var claimed = await TryClaimCsvAdvanceInTxAsync(conn, tx, pending, cancellationToken)
+                .ConfigureAwait(false);
+            if (claimed is { } c)
+            {
+                await _runtimeState
+                    .DeleteArmedSizeInTxAsync(conn, tx, pending.PoNumber, pending.MillNo, cancellationToken)
+                    .ConfigureAwait(false);
+                await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
+                _logger.LogInformation(
+                    "PLC close claimed CSV-advance bundle {BundleNo} for PO {PO} Mill {Mill} (total={Total}); sequence not incremented.",
+                    c.Formatted,
+                    InputSlitCsvParsing.NormalizePo(pending.PoNumber),
+                    pending.MillNo,
+                    pending.TotalNdtPcs);
+                return (c.Sequence, c.Formatted, ClaimedCsvAdvance: true);
+            }
+
             var seq = await AllocateNextInTxAsync(
                     conn, tx, pending.MillNo, "BundleClose", "Bundle close", cancellationToken)
                 .ConfigureAwait(false);
@@ -132,13 +162,185 @@ public sealed class MillSequenceService : IMillSequenceService
                 .DeleteArmedSizeInTxAsync(conn, tx, pending.PoNumber, pending.MillNo, cancellationToken)
                 .ConfigureAwait(false);
             await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return (seq, formatted);
+            return (seq, formatted, ClaimedCsvAdvance: false);
         }
         catch
         {
             try { await tx.RollbackAsync(cancellationToken).ConfigureAwait(false); } catch { /* ignore */ }
             throw;
         }
+    }
+
+    public async Task<(int Sequence, string Formatted)?> TryOpenCsvAdvanceStampTargetAsync(
+        string poNumber,
+        int millNo,
+        int provisionalTargetNdtPcs,
+        string? slitNo,
+        CancellationToken cancellationToken)
+    {
+        if (!IsEnabled || millNo is < 1 or > 4 || provisionalTargetNdtPcs < 0)
+            return null;
+
+        await using var conn = SqlTraceabilityConnection.Create(Opt);
+        await SqlTraceabilityConnection
+            .OpenAsync(conn, _logger, "Mill_Sequence CSV-advance open", cancellationToken)
+            .ConfigureAwait(false);
+        await using var tx = (SqlTransaction)await conn.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            // Another incomplete may have appeared (PLC or race); do not skip ahead.
+            if (await HasIncompleteFillInTxAsync(conn, tx, poNumber, millNo, cancellationToken).ConfigureAwait(false))
+            {
+                await tx.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                return null;
+            }
+
+            var seq = await AllocateNextInTxAsync(
+                    conn, tx, millNo, "CsvAdvance", "CSV complete/overshoot stamp advance", cancellationToken)
+                .ConfigureAwait(false);
+            var formatted = NdtBundleSequence.Format(seq, millNo);
+            var pending = new NdtBundleRecord
+            {
+                BundleNo = formatted,
+                PoNumber = poNumber,
+                MillNo = millNo,
+                TotalNdtPcs = provisionalTargetNdtPcs,
+                TargetNdtPcs = provisionalTargetNdtPcs,
+                CsvFilled = 0,
+                CsvFillState = CsvFillState.PlcClosed,
+                CloseSource = BundleCloseSource.CsvAdvance,
+                SlitNo = slitNo ?? string.Empty
+            };
+            await _bundles
+                .RecordBundlePendingPrintInTxAsync(conn, tx, pending, cancellationToken)
+                .ConfigureAwait(false);
+            await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
+
+            _logger.LogInformation(
+                "Opened CSV-advance stamp target {BundleNo} for PO {PO} Mill {Mill} provisionalTarget={Target} (no tag print).",
+                formatted,
+                InputSlitCsvParsing.NormalizePo(poNumber),
+                millNo,
+                provisionalTargetNdtPcs);
+            return (seq, formatted);
+        }
+        catch (Exception ex)
+        {
+            try { await tx.RollbackAsync(cancellationToken).ConfigureAwait(false); } catch { /* ignore */ }
+            _logger.LogWarning(
+                ex,
+                "Failed to open CSV-advance stamp target for PO {PO} Mill {Mill}.",
+                InputSlitCsvParsing.NormalizePo(poNumber),
+                millNo);
+            return null;
+        }
+    }
+
+    private async Task<(int Sequence, string Formatted)?> TryClaimCsvAdvanceInTxAsync(
+        SqlConnection conn,
+        SqlTransaction tx,
+        NdtBundleRecord pending,
+        CancellationToken cancellationToken)
+    {
+        var normalized = InputSlitCsvParsing.NormalizePo(pending.PoNumber);
+        const string findSql = @"
+SELECT TOP 1 Bundle_No, COALESCE(Csv_Filled, 0)
+FROM dbo.NDT_Bundle WITH (UPDLOCK, ROWLOCK)
+WHERE Mill_No = @MillNo
+  AND (PO_Number = @Po OR PO_Number = @PoNormalized)
+  AND Close_Source = N'CsvAdvance'
+  AND Csv_Fill_State IN (N'PlcClosed', N'CsvFilling')
+  AND ISNULL(Voided, 0) = 0
+ORDER BY PrintedAt ASC, Bundle_No ASC;";
+
+        string? bundleNo = null;
+        var csvFilled = 0;
+        await using (var find = new SqlCommand(findSql, conn, tx))
+        {
+            find.Parameters.AddWithValue("@MillNo", pending.MillNo);
+            find.Parameters.AddWithValue("@Po", pending.PoNumber.Trim());
+            find.Parameters.AddWithValue("@PoNormalized", normalized);
+            await using var reader = await find.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                return null;
+
+            bundleNo = reader.GetString(0);
+            csvFilled = reader.GetInt32(1);
+        }
+
+        var target = pending.TotalNdtPcs;
+        var (state, discrepancy, manualReview) = CsvFillLogic.ComputeAfterTargetRevision(
+            target,
+            csvFilled,
+            Math.Max(0, Opt.PlcCsvDiscrepancyReviewThresholdPercent));
+
+        const string updSql = @"
+UPDATE dbo.NDT_Bundle
+SET Total_NDT_Pcs = @Total,
+    Target_Ndt_Pcs = @Target,
+    Close_Source = N'Plc',
+    Awaiting_Csv_Recon = 0,
+    Csv_Fill_State = @State,
+    Count_Discrepancy = CASE WHEN @Discrepancy = 1 THEN 1 ELSE Count_Discrepancy END,
+    Manual_Review = CASE WHEN @ManualReview = 1 THEN 1 ELSE Manual_Review END,
+    Context_Slit_No = COALESCE(NULLIF(@SlitNo, N''), Context_Slit_No),
+    Slit_Start_Time = COALESCE(@SlitStart, Slit_Start_Time),
+    Slit_Finish_Time = COALESCE(@SlitFinish, Slit_Finish_Time),
+    Rejected_P = @Rejected,
+    NDT_Short_Length_Pipe = @NdtShort,
+    Rejected_Short_Length_Pipe = @RejShort,
+    Print_Status = N'Pending',
+    Print_Attempted_At = SYSDATETIME(),
+    Print_Error = NULL,
+    PrintedAt = SYSDATETIME(),
+    IsReprint = 0
+WHERE Bundle_No = @BundleNo;";
+
+        await using (var upd = new SqlCommand(updSql, conn, tx))
+        {
+            upd.Parameters.AddWithValue("@Total", target);
+            upd.Parameters.AddWithValue("@Target", target);
+            upd.Parameters.AddWithValue("@State", state);
+            upd.Parameters.AddWithValue("@Discrepancy", discrepancy ? 1 : 0);
+            upd.Parameters.AddWithValue("@ManualReview", manualReview ? 1 : 0);
+            upd.Parameters.AddWithValue("@SlitNo", pending.SlitNo ?? string.Empty);
+            upd.Parameters.AddWithValue("@SlitStart", (object?)pending.SlitStartTime ?? DBNull.Value);
+            upd.Parameters.AddWithValue("@SlitFinish", (object?)pending.SlitFinishTime ?? DBNull.Value);
+            upd.Parameters.AddWithValue("@Rejected", pending.RejectedPipes);
+            upd.Parameters.AddWithValue("@NdtShort", pending.NdtShortLengthPipe ?? string.Empty);
+            upd.Parameters.AddWithValue("@RejShort", pending.RejectedShortLengthPipe ?? string.Empty);
+            upd.Parameters.AddWithValue("@BundleNo", bundleNo);
+            await upd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        var seq = 0;
+        if (!NdtBundleSequence.TryParseSequence(bundleNo, pending.MillNo, out seq) || seq <= 0)
+            throw new InvalidOperationException($"Could not parse sequence from claimed bundle {bundleNo}.");
+
+        return (seq, bundleNo!);
+    }
+
+    private static async Task<bool> HasIncompleteFillInTxAsync(
+        SqlConnection conn,
+        SqlTransaction tx,
+        string poNumber,
+        int millNo,
+        CancellationToken cancellationToken)
+    {
+        var normalized = InputSlitCsvParsing.NormalizePo(poNumber);
+        await using var cmd = new SqlCommand(@"
+SELECT TOP 1 1
+FROM dbo.NDT_Bundle WITH (UPDLOCK, ROWLOCK)
+WHERE Mill_No = @MillNo
+  AND (PO_Number = @Po OR PO_Number = @PoNormalized)
+  AND Target_Ndt_Pcs IS NOT NULL
+  AND Csv_Fill_State IN (N'PlcClosed', N'CsvFilling')
+  AND ISNULL(Voided, 0) = 0;", conn, tx);
+        cmd.Parameters.AddWithValue("@MillNo", millNo);
+        cmd.Parameters.AddWithValue("@Po", poNumber.Trim());
+        cmd.Parameters.AddWithValue("@PoNormalized", normalized);
+        var result = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        return result is not null and not DBNull;
     }
 
     public async Task SeedMissingRowsAsync(CancellationToken cancellationToken)

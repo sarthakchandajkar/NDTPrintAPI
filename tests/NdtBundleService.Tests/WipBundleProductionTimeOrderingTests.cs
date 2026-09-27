@@ -306,6 +306,29 @@ public sealed class WipBundleProductionTimeOrderingTests : IDisposable
         Assert.False(WipSortKey.IsValid("991332_997799"));
     }
 
+    /// <summary>
+    /// Mill-4 file PO-end defect: baseline must be max stamp of the *ended* PO only.
+    /// When the triggering new-PO WIP is already on disk, NotifyPoEnd must auto-accept it
+    /// (previously baseline included that file's stamp and rejected it forever).
+    /// </summary>
+    [Fact]
+    public async Task FilePoEnd_triggering_new_po_wip_accepted_when_baseline_is_ended_po_only()
+    {
+        var stampEnded = Utc(2026, 9, 22, 10, 0, 0);
+        var stampNew = Utc(2026, 9, 22, 11, 0, 0);
+        Write("WIP_04_1000060100_2601020504_260922_100000.csv", stampEnded);
+        Write("WIP_04_1000060200_2601020505_260922_110000.csv", stampNew);
+
+        var provider = CreateProvider();
+        Assert.Equal("1000060200", await provider.TryGetRunningPoForMillAsync(4, CancellationToken.None));
+
+        provider.NotifyPoEndForMill(4, "1000060100");
+
+        // Auto-accept from TryAcceptNewWipAfterPoEnd at end of Notify (newer PO already on disk).
+        Assert.False(provider.IsWaitingForNewWipAfterPoEnd(4));
+        Assert.Equal("1000060200", await provider.TryGetRunningPoForMillAsync(4, CancellationToken.None));
+    }
+
     private WipBundleRunningPoProvider CreateProvider(IWipConfirmedRunningPoNotifier? notifier = null)
     {
         var options = Options.Create(new NdtBundleOptions

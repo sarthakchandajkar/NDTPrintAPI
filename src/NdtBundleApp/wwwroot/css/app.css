@@ -32,9 +32,15 @@ h1 {
 }
 
 .container {
-    max-width: 640px;
+    max-width: 720px;
     margin: 0 auto;
     padding: 1.5rem;
+}
+
+.text-muted {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    margin: 0 0 1rem 0;
 }
 
 .card {

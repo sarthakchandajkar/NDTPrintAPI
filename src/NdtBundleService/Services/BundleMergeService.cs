@@ -133,6 +133,9 @@ WHERE Bundle_No = @Source AND ISNULL(Voided, 0) = 0;";
         if (target is null)
             return null;
 
+        if (!MillCsvBatchModeResolver.IsIncludedInReconcileBundleList(Opt, source.MillNo))
+            return null;
+
         if (!NdtBundleSequence.TryParseSequenceForCurrentYear(source.BundleNo, source.MillNo, out var sourceSeq))
             return null;
 
@@ -180,6 +183,11 @@ WHERE Bundle_No = @Source AND ISNULL(Voided, 0) = 0;";
             ?? throw new InvalidOperationException($"Bundle {sourceBundleNo} not found.");
         if (source.Voided)
             throw new InvalidOperationException($"Bundle {sourceBundleNo} is already voided.");
+        if (!MillCsvBatchModeResolver.IsIncludedInReconcileBundleList(Opt, source.MillNo))
+        {
+            throw new InvalidOperationException(
+                $"Mill {source.MillNo} uses constant CSV batch mode; merge is only available for FillToTarget mills.");
+        }
         if (source.TotalNdtPcs <= 0)
             throw new InvalidOperationException($"Bundle {sourceBundleNo} has no pipes to merge.");
 

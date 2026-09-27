@@ -108,8 +108,11 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
         var normalizedEnded = InputSlitCsvParsing.NormalizePo(endedPo);
         var poEndUtc = DateTime.UtcNow;
         var candidates = ScanAllWipCandidates();
+        // Baseline = max stamp among WIP files for the *ended* PO only.
+        // Including all mill candidates made the triggering new-PO file set the baseline to its
+        // own stamp, so it was rejected as the first WIP (Mill-4 file PO-end defect).
         var baseline = candidates
-            .Where(c => c.MillNo == millNo)
+            .Where(c => c.MillNo == millNo && InputSlitCsvParsing.PoEquals(c.PoNumber, normalizedEnded))
             .Select(c => c.StampUtc)
             .DefaultIfEmpty(DateTime.MinValue)
             .Max();
@@ -126,37 +129,50 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
         lock (_lock)
         {
             var st = _mills[millNo - 1];
-            st.WaitingForNewWip = true;
-            st.EndedPo = normalizedEnded;
-            st.PoEndUtc = poEndUtc;
-            st.BaselineWipStampUtc = baseline;
-            st.RunningPo = null;
-            st.WaitRejectLoggedFiles.Clear();
-            st.LastTrailingLoggedSortKey = string.Empty;
-
-            if (useSortKeys)
+            // Idempotent re-notify for the same ended PO: keep wait state and do not clear
+            // WaitRejectLoggedFiles (otherwise every 5-min reconcile re-logs ~38k backlog lines).
+            if (st.WaitingForNewWip
+                && !string.IsNullOrWhiteSpace(st.EndedPo)
+                && InputSlitCsvParsing.PoEquals(st.EndedPo, normalizedEnded))
             {
-                if (endedPoFloor.Length == 0)
-                    endedPoFloor = st.LastAppliedWipSortKey;
-                if (endedPoFloor.Length == 0)
-                {
-                    endedPoFloor = WipSortKey.FromUtc(poEndUtc);
-                    _logger.LogWarning(
-                        "Mill {Mill}: no WIP file found for ended PO {EndedPo} and no applied WIP sort key; production-time floor falls back to PO-end time {Floor} (write-stamp baseline remains the secondary guard).",
-                        millNo,
-                        normalizedEnded,
-                        endedPoFloor);
-                }
+                st.BaselineWipStampUtc = baseline;
+                if (useSortKeys && endedPoFloor.Length > 0)
+                    st.EndedPoLastWipSortKey = endedPoFloor;
             }
+            else
+            {
+                st.WaitingForNewWip = true;
+                st.EndedPo = normalizedEnded;
+                st.PoEndUtc = poEndUtc;
+                st.BaselineWipStampUtc = baseline;
+                st.RunningPo = null;
+                st.WaitRejectLoggedFiles.Clear();
+                st.LastTrailingLoggedSortKey = string.Empty;
 
-            st.EndedPoLastWipSortKey = endedPoFloor;
+                if (useSortKeys)
+                {
+                    if (endedPoFloor.Length == 0)
+                        endedPoFloor = st.LastAppliedWipSortKey;
+                    if (endedPoFloor.Length == 0)
+                    {
+                        endedPoFloor = WipSortKey.FromUtc(poEndUtc);
+                        _logger.LogWarning(
+                            "Mill {Mill}: no WIP file found for ended PO {EndedPo} and no applied WIP sort key; production-time floor falls back to PO-end time {Floor} (write-stamp baseline remains the secondary guard).",
+                            millNo,
+                            normalizedEnded,
+                            endedPoFloor);
+                    }
+                }
+
+                st.EndedPoLastWipSortKey = endedPoFloor;
+
+                _logger.LogInformation(
+                    "Mill {Mill}: PO end for {EndedPo}; waiting for new WIP bundle file in TM Bundle folder (baseline WIP stamp {Baseline:o}).",
+                    millNo,
+                    normalizedEnded,
+                    baseline);
+            }
         }
-
-        _logger.LogInformation(
-            "Mill {Mill}: PO end for {EndedPo}; waiting for new WIP bundle file in TM Bundle folder (baseline WIP stamp {Baseline:o}).",
-            millNo,
-            normalizedEnded,
-            baseline);
 
         TryAcceptNewWipAfterPoEnd(millNo);
     }

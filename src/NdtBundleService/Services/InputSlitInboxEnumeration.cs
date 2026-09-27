@@ -33,4 +33,36 @@ public static class InputSlitInboxEnumeration
                 yield return path;
         }
     }
+
+    /// <summary>
+    /// Inbox ∪ Accepted, de-duplicated by file name (case-insensitive). Inbox wins when both exist
+    /// so live SAP drops are preferred over the Accepted archive during drain transitions.
+    /// </summary>
+    public static IReadOnlyList<string> EnumerateInboxPreferOverAccepted(
+        string? inboxFolder,
+        string? acceptedFolder)
+    {
+        var byName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        void AddFolder(string? folder, bool overwrite)
+        {
+            var trimmed = (folder ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(trimmed) || !Directory.Exists(trimmed))
+                return;
+
+            foreach (var path in EnumerateFiles(trimmed))
+            {
+                var name = Path.GetFileName(path);
+                if (string.IsNullOrEmpty(name))
+                    continue;
+                if (overwrite || !byName.ContainsKey(name))
+                    byName[name] = Path.GetFullPath(path);
+            }
+        }
+
+        // Accepted first, then inbox overwrites — inbox preferred.
+        AddFolder(acceptedFolder, overwrite: false);
+        AddFolder(inboxFolder, overwrite: true);
+        return byName.Values.ToList();
+    }
 }

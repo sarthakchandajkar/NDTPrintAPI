@@ -550,6 +550,11 @@ export default function ReconcilePage() {
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold text-gray-900">Reconcile Bundle</h1>
+      <p className="text-sm text-gray-600 mt-1">
+        Lists real NDT bundles from FillToTarget mills only (currently Mill-1). Constant placeholder batches
+        (e.g. <code className="text-xs bg-gray-100 px-1 rounded">10001</code> on Mills 2–4) are hidden until
+        each mill is switched to FillToTarget.
+      </p>
       <p className="text-gray-600 text-sm">
         Correct a bundle&apos;s total pipe count and reprint its tag in one step — no slit rows required.
         Use slit traceability below to view or edit individual slit rows on any bundle.

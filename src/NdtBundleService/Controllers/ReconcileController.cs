@@ -29,6 +29,8 @@ public sealed class ReconcileController : ControllerBase
     private readonly IOutputSlitSapStatusRepository _sapStatus;
     private readonly IPpcCorrectionRepository _ppcCorrections;
     private readonly IBundleMergeService _bundleMerge;
+    private readonly IMillSequenceService _millSequence;
+    private readonly ICsvFillService _csvFill;
     private readonly IOptionsMonitor<NdtBundleOptions> _options;
     private readonly ILogger<ReconcileController> _logger;
 
@@ -42,6 +44,8 @@ public sealed class ReconcileController : ControllerBase
         IOutputSlitSapStatusRepository sapStatus,
         IPpcCorrectionRepository ppcCorrections,
         IBundleMergeService bundleMerge,
+        IMillSequenceService millSequence,
+        ICsvFillService csvFill,
         IOptionsMonitor<NdtBundleOptions> options,
         ILogger<ReconcileController> logger)
     {
@@ -54,6 +58,8 @@ public sealed class ReconcileController : ControllerBase
         _sapStatus = sapStatus;
         _ppcCorrections = ppcCorrections;
         _bundleMerge = bundleMerge;
+        _millSequence = millSequence;
+        _csvFill = csvFill;
         _options = options;
         _logger = logger;
     }
@@ -76,6 +82,9 @@ public sealed class ReconcileController : ControllerBase
 
             if (includeForming)
                 filtered = await MergeFormingBundlesAsync(filtered, CancellationToken.None).ConfigureAwait(false);
+
+            // Constant-mode mills (e.g. 10001 placeholder) are not real NDT bundles for Reconcile.
+            filtered = FilterToFillToTargetMills(filtered);
 
             var slitTotals = includeForming
                 ? await _bundleRepository.GetSlitTotalsByBatchAsync(CancellationToken.None).ConfigureAwait(false)
@@ -112,6 +121,10 @@ public sealed class ReconcileController : ControllerBase
                     b.ManualRecon,
                     b.ManualReconReason,
                     b.PostReconCsvSum,
+                    b.CountDiscrepancy,
+                    b.CsvFillState,
+                    b.CsvFilled,
+                    b.TargetNdtPcs,
                     IsForming = isForming,
                     SlitSum = includeForming ? slitSum : (int?)null,
                     PoMismatch = poMismatch,
@@ -209,6 +222,14 @@ public sealed class ReconcileController : ControllerBase
                 "Returning bundle list without open-partial filtering because pipe sizes or formation chart could not be loaded.");
             return SortBundlesNewestFirst(bundles);
         }
+    }
+
+    private IReadOnlyList<NdtBundleRecord> FilterToFillToTargetMills(IReadOnlyList<NdtBundleRecord> bundles)
+    {
+        var opt = _options.CurrentValue;
+        return bundles
+            .Where(b => MillCsvBatchModeResolver.IsIncludedInReconcileBundleList(opt, b.MillNo))
+            .ToList();
     }
 
     private static IReadOnlyList<NdtBundleRecord> SortBundlesNewestFirst(IReadOnlyList<NdtBundleRecord> bundles) =>
@@ -417,6 +438,8 @@ public sealed class ReconcileController : ControllerBase
         if (result is null)
             return NotFound(new { Message = $"Bundle {batchNo} not found." });
 
+        await TryOpenCsvAdvanceAfterManualReconcileAsync(result, cancellationToken).ConfigureAwait(false);
+
         await _bundleRepository
             .UpdateBundleSummaryCsvAsync(batchNo, request.CorrectedTotal, CancellationToken.None)
             .ConfigureAwait(false);
@@ -493,6 +516,51 @@ public sealed class ReconcileController : ControllerBase
             PpcCorrectionItemsUpdated = ppcItemsUpdated,
             PoMismatchWarning = poMismatchWarning
         });
+    }
+
+    /// <summary>
+    /// When Manual Reconcile leaves the bundle terminal (exact or overshoot), open the next
+    /// stamp-only sequence so subsequent CSVs do not wait for the next PLC print.
+    /// </summary>
+    private async Task TryOpenCsvAdvanceAfterManualReconcileAsync(
+        ManualBundleReconcileResult result,
+        CancellationToken cancellationToken)
+    {
+        var bundle = result.Bundle;
+        if (!CsvFillSequenceAdvance.IsTerminalForAdvance(bundle.CsvFillState))
+            return;
+
+        try
+        {
+            var incomplete = await _csvFill
+                .TryGetOldestIncompleteAsync(bundle.PoNumber, bundle.MillNo, pipeSize: null, cancellationToken)
+                .ConfigureAwait(false);
+            if (!CsvFillSequenceAdvance.ShouldOpenNextStampTarget(bundle.CsvFillState, incomplete is not null))
+                return;
+
+            var provisional = CsvFillSequenceAdvance.ResolveProvisionalTarget(
+                result.OriginalTotal > 0 ? result.OriginalTotal : bundle.ManualReconOriginalTotal,
+                bundle.TargetNdtPcs,
+                result.CorrectedTotal);
+            if (provisional <= 0)
+                provisional = Math.Max(1, result.CorrectedTotal);
+
+            await _millSequence
+                .TryOpenCsvAdvanceStampTargetAsync(
+                    bundle.PoNumber,
+                    bundle.MillNo,
+                    provisional,
+                    bundle.SlitNo,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "CSV-advance open after manual reconcile failed for {BatchNo}; next CSV may await PLC claim.",
+                bundle.BundleNo);
+        }
     }
 
     /// <summary>
@@ -735,10 +803,26 @@ public sealed class ReconcileController : ControllerBase
                 _logger.LogDebug(oldEx, "Could not read pre-reconcile slit value for {BatchNo} slit {SlitNo}.", batchNo, slitNo);
             }
 
-            // Per-slit CSV + SQL updates can exceed HTTP/proxy timeouts on large UNC shares.
-            var filesUpdated = await _bundleRepository
-                .UpdateOutputCsvFilesForSlitAsync(batchNo, slitNo, request.NewNdtPipes, CancellationToken.None)
+            var (filesBySlitPre, statusByFilePre) = await GetSlitSapStatusAsync(batchNo, cancellationToken)
                 .ConfigureAwait(false);
+            var sapAcceptedPre = ResolveSapAcceptedFilesForSlits(filesBySlitPre, statusByFilePre, new[] { slitNo });
+            // PPC: SAP-Accepted / posted files → SQL only (do not rewrite Accepted disk files).
+            // Inbox / pending files → update per-slit output CSV on disk + SQL.
+            var filesUpdated = 0;
+            if (sapAcceptedPre.Count == 0)
+            {
+                filesUpdated = await _bundleRepository
+                    .UpdateOutputCsvFilesForSlitAsync(batchNo, slitNo, request.NewNdtPipes, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Slit reconcile for {BatchNo} slit {SlitNo}: SAP-Accepted file(s) {Files} — SQL-only update (disk file not rewritten).",
+                    batchNo,
+                    slitNo,
+                    string.Join(", ", sapAcceptedPre));
+            }
 
             var sqlRowsUpdated = await _reconcileSync
                 .SyncAfterSlitReconcileAsync(batchNo, slitNo, request.NewNdtPipes, CancellationToken.None)

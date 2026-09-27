@@ -9,6 +9,18 @@ public sealed class MillCsvBatchModeEntry
     /// <summary>Literal batch column value when <see cref="Mode"/> is <c>Constant</c>.</summary>
     public string Value { get; set; } = "10001";
 
+    /// <summary>
+    /// CSV batch value for zero-NDT rows (NdtPipes &lt;= 0). Written to CSV only;
+    /// SQL <c>Output_Slit_Row.NDT_Batch_No</c> stays NULL (no <c>NDT_Bundle</c> parent).
+    /// </summary>
+    public string ZeroNdtValue { get; set; } = "10001";
+
+    /// <summary>
+    /// CSV batch value for hollow FG rows. Written to CSV only;
+    /// SQL <c>Output_Slit_Row.NDT_Batch_No</c> stays NULL (no <c>NDT_Bundle</c> parent).
+    /// </summary>
+    public string HollowFgValue { get; set; } = "10001";
+
     public bool IsConstant =>
         string.Equals(Mode, "Constant", StringComparison.OrdinalIgnoreCase);
 
@@ -33,4 +45,35 @@ public static class MillCsvBatchModeResolver
             ? new MillCsvBatchModeEntry { Mode = "Constant", Value = "10001" }
             : new MillCsvBatchModeEntry { Mode = "FillToTarget" };
     }
+
+    /// <summary>
+    /// Reconcile bundle list / merge only include mills on FillToTarget (real NDT batch numbers).
+    /// Constant mills (placeholder like <c>10001</c>) stay hidden until rolled over in config.
+    /// </summary>
+    public static bool IsIncludedInReconcileBundleList(NdtBundleOptions options, int millNo) =>
+        Resolve(options, millNo).IsFillToTarget;
+
+    /// <summary>
+    /// Resolves the CSV batch column and whether SQL should link an <c>NDT_Bundle</c> parent.
+    /// Constant / zero-NDT / hollow-FG values go to CSV only (<paramref name="LinkBundleParent"/> = false).
+    /// </summary>
+    public static (string CsvBatchNo, bool LinkBundleParent) ResolveNonFillCsvBatch(
+        MillCsvBatchModeEntry entry,
+        bool isHollowFg,
+        int ndtPipes)
+    {
+        if (isHollowFg)
+            return (NullToDefault(entry.HollowFgValue), false);
+
+        if (ndtPipes <= 0)
+            return (NullToDefault(entry.ZeroNdtValue), false);
+
+        if (entry.IsConstant)
+            return (NullToDefault(entry.Value), false);
+
+        return (string.Empty, true);
+    }
+
+    private static string NullToDefault(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? "10001" : value.Trim();
 }

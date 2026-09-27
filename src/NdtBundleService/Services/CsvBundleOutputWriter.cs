@@ -60,7 +60,7 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
             return 0;
         }
 
-        var (sequence, ndtBatchNoFormatted) = await ResolveSequenceAndInsertAsync(
+        var (sequence, ndtBatchNoFormatted, claimedCsvAdvance) = await ResolveSequenceAndInsertAsync(
             contextRecord, ndtBatchNo, totalNdtPcs, cancellationToken).ConfigureAwait(false);
         ndtBatchNo = sequence;
         var bundleFolder = NdtBundleOutputPaths.ResolveBundleSummaryWriteFolder(_options);
@@ -99,9 +99,14 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
             await _bundleRepository.RecordBundlePendingPrintAsync(record, cancellationToken).ConfigureAwait(false);
         }
 
-        await _csvFill
-            .TryInitializeFillTargetAsync(ndtBatchNoFormatted, totalNdtPcs, closeSource: null, cancellationToken)
-            .ConfigureAwait(false);
+        // Claimed CSV-advance rows already have Target/Total/fill state updated (Csv_Filled preserved).
+        // Fresh allocates still need fill-target init.
+        if (!claimedCsvAdvance)
+        {
+            await _csvFill
+                .TryInitializeFillTargetAsync(ndtBatchNoFormatted, totalNdtPcs, closeSource: BundleCloseSource.Plc, cancellationToken)
+                .ConfigureAwait(false);
+        }
         await TryRecordBundleLabelAsync(contextRecord.PoNumber, contextRecord.MillNo, cancellationToken).ConfigureAwait(false);
 
         if (_tagPrinter is null)
@@ -201,7 +206,7 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
     /// When SQL + Mill_Sequence is enabled, allocate and insert NDT_Bundle in one transaction.
     /// Tests / CSV-only mode keep the engine-passed integer (must be &gt; 0).
     /// </summary>
-    private async Task<(int Sequence, string Formatted)> ResolveSequenceAndInsertAsync(
+    private async Task<(int Sequence, string Formatted, bool ClaimedCsvAdvance)> ResolveSequenceAndInsertAsync(
         InputSlitRecord contextRecord,
         int passedSequence,
         int totalNdtPcs,
@@ -230,7 +235,7 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
             throw new InvalidOperationException(BundleCloseFailure.AllocateUnavailable);
         }
 
-        return (passedSequence, NdtBundleSequence.Format(passedSequence, contextRecord.MillNo));
+        return (passedSequence, NdtBundleSequence.Format(passedSequence, contextRecord.MillNo), ClaimedCsvAdvance: false);
     }
 
     private static NdtBundleRecord BuildPendingRecord(InputSlitRecord contextRecord, string bundleNo, int totalNdtPcs) =>

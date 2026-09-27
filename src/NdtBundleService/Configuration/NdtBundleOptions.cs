@@ -197,21 +197,23 @@ public class NdtBundleOptions
     public bool RequireMillSequenceMatchesBundles { get; set; } = true;
 
     /// <summary>
-    /// When true (default in Production), refuse to start if <c>Awaiting_Csv_Recon=1</c> or open provisional
-    /// runtime slots remain — mistimed quiet-drain cutover must not silently mix behaviours.
+    /// Quiet-drain cutover refuse-to-start guard. Retired — missed Input Slit rows are added
+    /// manually via UI/SQL; do not block service start on fill-target state.
+    /// Kept for config compatibility; ignored by the host.
     /// </summary>
-    public bool RequireCleanFillCutover { get; set; } = true;
+    public bool RequireCleanFillCutover { get; set; } = false;
 
     /// <summary>
     /// Per-mill CSV batch column mode. Key = mill number as string ("1".."4").
-    /// <c>FillToTarget</c> = real NDT numbers; <c>Constant</c> = literal <see cref="MillCsvBatchModeEntry.Value"/> (e.g. "10001").
+    /// <c>FillToTarget</c> = real NDT numbers (shown on Reconcile); <c>Constant</c> = literal
+    /// <see cref="MillCsvBatchModeEntry.Value"/> (e.g. "10001") and hidden from Reconcile until rolled over.
     /// </summary>
     public Dictionary<string, MillCsvBatchModeEntry> MillCsvBatchMode { get; set; } = new(StringComparer.OrdinalIgnoreCase)
     {
-        ["1"] = new MillCsvBatchModeEntry { Mode = "FillToTarget" },
-        ["2"] = new MillCsvBatchModeEntry { Mode = "Constant", Value = "10001" },
-        ["3"] = new MillCsvBatchModeEntry { Mode = "Constant", Value = "10001" },
-        ["4"] = new MillCsvBatchModeEntry { Mode = "Constant", Value = "10001" },
+        ["1"] = new MillCsvBatchModeEntry { Mode = "FillToTarget", ZeroNdtValue = "10001", HollowFgValue = "10001" },
+        ["2"] = new MillCsvBatchModeEntry { Mode = "Constant", Value = "10001", ZeroNdtValue = "10001", HollowFgValue = "10001" },
+        ["3"] = new MillCsvBatchModeEntry { Mode = "Constant", Value = "10001", ZeroNdtValue = "10001", HollowFgValue = "10001" },
+        ["4"] = new MillCsvBatchModeEntry { Mode = "Constant", Value = "10001", ZeroNdtValue = "10001", HollowFgValue = "10001" },
     };
 
     /// <summary>
@@ -281,11 +283,11 @@ public class NdtBundleOptions
     public int PlcCloseGraceSeconds { get; set; } = 60;
 
     /// <summary>
-    /// When true (default), startup/periodic Input Slit reconciliation ingests folder files absent from
-    /// <c>Input_Slit_Row</c> (within <see cref="BackfillLookbackHours"/>) instead of baseline-seeding them as processed.
-    /// When false, or when SQL is disabled, the historical seed baseline is used.
+    /// When true, periodic Input Slit reconciliation ingests folder files absent from
+    /// <c>Input_Slit_Row</c> (within <see cref="BackfillLookbackHours"/>). Default false —
+    /// startup only baseline-seeds existing inbox files; missed rows are added manually via UI.
     /// </summary>
-    public bool BackfillReconciliationEnabled { get; set; } = true;
+    public bool BackfillReconciliationEnabled { get; set; } = false;
 
     /// <summary>
     /// Hours of Input Slit inbox <c>LastWriteTimeUtc</c> to consider for F-5 backfill/reconcile. Default 48.

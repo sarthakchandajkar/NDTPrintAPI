@@ -93,8 +93,78 @@
     </div>
 
     <div class="card">
+        <h3>Manual Input Slit row</h3>
+        <p class="text-muted">
+            Use when a SAP Input Slit file was missed or arrived before the PLC printed a tag.
+            After the bundle tag exists, create this row so the service can stamp the correct batch on the next poll.
+            Do not invent a batch number here — stamp attaches to the open fill target automatically.
+        </p>
+        <div class="form-row">
+            <div class="form-group">
+                <label for="manualPo">PO Number</label>
+                <input id="manualPo" type="text" @bind="manualPo" placeholder="e.g. 1000055673" />
+            </div>
+            <div class="form-group">
+                <label for="manualMill">Mill No</label>
+                <select id="manualMill" @bind="manualMill">
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="3">3</option>
+                    <option value="4">4</option>
+                </select>
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label for="manualSlitNo">Slit No</label>
+                <input id="manualSlitNo" type="text" @bind="manualSlitNo" />
+            </div>
+            <div class="form-group">
+                <label for="manualNdt">NDT Pipes</label>
+                <input id="manualNdt" type="number" min="0" @bind="manualNdt" />
+            </div>
+            <div class="form-group">
+                <label for="manualRejected">Rejected P</label>
+                <input id="manualRejected" type="number" min="0" @bind="manualRejected" />
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label for="manualStart">Slit Start Time (optional)</label>
+                <input id="manualStart" type="datetime-local" @bind="manualStart" />
+            </div>
+            <div class="form-group">
+                <label for="manualFinish">Slit Finish Time (optional)</label>
+                <input id="manualFinish" type="datetime-local" @bind="manualFinish" />
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label for="manualShort">NDT Short Length Pipe</label>
+                <input id="manualShort" type="text" @bind="manualShort" />
+            </div>
+            <div class="form-group">
+                <label for="manualRejShort">Rejected Short Length Pipe</label>
+                <input id="manualRejShort" type="text" @bind="manualRejShort" />
+            </div>
+        </div>
+        <div class="form-group">
+            <label for="manualFileName">File name (optional)</label>
+            <input id="manualFileName" type="text" @bind="manualFileName" placeholder="Manual_01_….csv" />
+        </div>
+        <button class="btn btn-primary" @onclick="CreateManualInputSlit" disabled="@isBusy">
+            Create Input Slit CSV
+        </button>
+        <div class="status @(manualError ? "error" : "")" style="margin-top: 0.5rem;">@manualStatus</div>
+    </div>
+
+    <div class="card">
         <h3>Reconcile Bundle</h3>
-        <p class="text-muted">When the actual NDT pipe count in the plant does not match the application, select the NDT Batch No. and enter the correct count. This will update the value in the UI, reprint the tag with the new count, update the CSV file(s), and update the database (if configured).</p>
+        <p class="text-muted">
+            Primary tool when the printed tag count is wrong or pipes attached to the wrong batch.
+            Select the NDT Batch No., enter the corrected plant count, and reconcile — this updates the UI, reprints the tag, and updates CSV/SQL.
+            If the CSV never arrived (or arrived too early and still has no batch), use Manual Input Slit above after the tag exists.
+        </p>
         <div class="form-row">
             <div class="form-group">
                 <label for="reconcileBatchNo">NDT Batch No.</label>
@@ -102,7 +172,9 @@
                     <option value="">-- Select bundle --</option>
                     @foreach (var b in reconcileBundles)
                     {
-                        <option value="@b.BundleNo">@b.BundleNo (PO: @b.PoNumber, Mill: @b.MillNo, current: @b.TotalNdtPcs pcs)</option>
+                        <option value="@b.BundleNo">
+                            @b.BundleNo (PO: @b.PoNumber, Mill: @b.MillNo, current: @b.TotalNdtPcs pcs@(b.CountDiscrepancy || string.Equals(b.CsvFillState, "CsvOvershoot", StringComparison.OrdinalIgnoreCase) ? ", OVERSHOOT" : ""))
+                        </option>
                     }
                 </select>
             </div>
@@ -111,6 +183,13 @@
                 <input id="newNdtPipes" type="number" min="0" @bind="newNdtPipes" class="form-control" placeholder="e.g. 10" />
             </div>
         </div>
+        @if (SelectedReconcileBundleIsOvershoot)
+        {
+            <p class="status error" style="margin-top: 0.5rem;">
+                Overshoot: CSV stamped pipes exceed this tag total. Reconcile slit counts below (or use Manual Reconcile).
+                Inbox Input Slit files are updated on disk; SAP-Accepted files update SQL only (Accepted file unchanged).
+            </p>
+        }
         <button class="btn btn-primary" @onclick="ReconcileBundle" disabled="@(isBusy || string.IsNullOrEmpty(reconcileBatchNo) || newNdtPipes < 0)">
             Reconcile Bundle
         </button>
@@ -136,6 +215,19 @@
     private int newNdtPipes;
     private string reconcileStatus = "";
     private bool reconcileError;
+
+    private string manualPo = "";
+    private int manualMill = 1;
+    private string manualSlitNo = "";
+    private int manualNdt;
+    private int manualRejected;
+    private DateTime? manualStart;
+    private DateTime? manualFinish;
+    private string manualShort = "";
+    private string manualRejShort = "";
+    private string manualFileName = "";
+    private string manualStatus = "";
+    private bool manualError;
 
     protected override async Task OnInitializedAsync()
     {
@@ -163,6 +255,60 @@
         catch
         {
             reconcileBundles = new List<ReconcileBundleItem>();
+        }
+    }
+
+    private async Task CreateManualInputSlit()
+    {
+        var po = manualPo?.Trim() ?? "";
+        if (string.IsNullOrEmpty(po))
+        {
+            manualStatus = "Please enter a PO Number.";
+            manualError = true;
+            return;
+        }
+
+        isBusy = true;
+        manualError = false;
+        manualStatus = "Creating Input Slit CSV…";
+
+        try
+        {
+            var url = baseUrl.TrimEnd('/') + "/api/InputSlits/manual";
+            var body = new
+            {
+                PoNumber = po,
+                MillNo = manualMill,
+                SlitNo = manualSlitNo,
+                NdtPipes = manualNdt,
+                RejectedPipes = manualRejected,
+                SlitStartTime = manualStart,
+                SlitFinishTime = manualFinish,
+                NdtShortLengthPipe = manualShort,
+                RejectedShortLengthPipe = manualRejShort,
+                FileName = string.IsNullOrWhiteSpace(manualFileName) ? null : manualFileName
+            };
+            var response = await Http.PostAsJsonAsync(url, body);
+            var text = await response.Content.ReadAsStringAsync();
+            if (response.IsSuccessStatusCode)
+            {
+                manualStatus = text;
+                manualError = false;
+            }
+            else
+            {
+                manualStatus = $"Error {(int)response.StatusCode}: {text}";
+                manualError = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            manualStatus = "Error: " + ex.Message;
+            manualError = true;
+        }
+        finally
+        {
+            isBusy = false;
         }
     }
 
@@ -375,6 +521,23 @@
         public int MillNo { get; set; }
         public int TotalNdtPcs { get; set; }
         public string? SlitNo { get; set; }
+        public bool CountDiscrepancy { get; set; }
+        public string? CsvFillState { get; set; }
+        public int CsvFilled { get; set; }
+        public int? TargetNdtPcs { get; set; }
+    }
+
+    private bool SelectedReconcileBundleIsOvershoot
+    {
+        get
+        {
+            var b = reconcileBundles.FirstOrDefault(x =>
+                string.Equals(x.BundleNo, reconcileBatchNo, StringComparison.OrdinalIgnoreCase));
+            if (b is null)
+                return false;
+            return b.CountDiscrepancy
+                   || string.Equals(b.CsvFillState, "CsvOvershoot", StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     private sealed class ReconcileResult

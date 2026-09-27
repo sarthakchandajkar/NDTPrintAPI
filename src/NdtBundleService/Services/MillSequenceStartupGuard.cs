@@ -6,8 +6,7 @@ using NdtBundleService.Configuration;
 namespace NdtBundleService.Services;
 
 /// <summary>
-/// Seeds missing <c>Mill_Sequence</c> rows, then refuses to start when live bundles exceed the table
-/// (same refuse-by-default pattern as <see cref="FillCutoverStartupCheck"/>).
+/// Seeds missing <c>Mill_Sequence</c> rows, then refuses to start when live bundles exceed the table.
 /// </summary>
 public sealed class MillSequenceStartupGuard : IHostedService
 {

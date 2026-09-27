@@ -38,18 +38,21 @@ public interface ITraceabilityRepository
         CancellationToken cancellationToken);
 
     /// <summary>
-    /// True when <c>Input_Slit_File_Seen</c> has this path+write (terminal skip, e.g. no configured-mill rows).
+    /// True when <c>Input_Slit_File_Seen</c> has this path+write for <paramref name="millNo"/>
+    /// (terminal skip, e.g. no configured-mill rows for that mill instance).
     /// </summary>
     Task<bool> IsInputSlitFileSeenAsync(
         string sourceFileFullPath,
         DateTime fileLastWriteTimeUtc,
+        int millNo,
         CancellationToken cancellationToken);
 
-    /// <summary>Upserts a durable seen marker so reconcile will not re-queue the file version.</summary>
+    /// <summary>Upserts a durable seen marker scoped to <paramref name="millNo"/>.</summary>
     Task MarkInputSlitFileSeenAsync(
         string sourceFileFullPath,
         DateTime fileLastWriteTimeUtc,
         string reason,
+        int millNo,
         CancellationToken cancellationToken);
 
     /// <summary>
@@ -83,7 +86,15 @@ public interface ITraceabilityRepository
         IReadOnlyList<string> sourceFiles,
         CancellationToken cancellationToken);
 
-    Task RecordOutputSlitRowsAsync(string sourceFile, IReadOnlyList<(InputSlitRecord Record, string NdtBatchNo, int SourceRowNumber)> rows, CancellationToken cancellationToken);
+    /// <summary>
+    /// Inserts Output_Slit_Row rows. When <c>LinkBundleParent</c> is false (Constant / zero-NDT /
+    /// hollow-FG), <c>NDT_Batch_No</c> is stored as NULL and no <c>NDT_Bundle</c> parent is created;
+    /// the CSV still carries the literal batch value separately.
+    /// </summary>
+    Task RecordOutputSlitRowsAsync(
+        string sourceFile,
+        IReadOnlyList<(InputSlitRecord Record, string NdtBatchNo, int SourceRowNumber, bool LinkBundleParent)> rows,
+        CancellationToken cancellationToken);
     Task RecordManualStationRunAsync(
         string poNumber,
         string ndtBatchNo,
@@ -411,9 +422,10 @@ WHERE Source_File = @FullPath
     public async Task<bool> IsInputSlitFileSeenAsync(
         string sourceFileFullPath,
         DateTime fileLastWriteTimeUtc,
+        int millNo,
         CancellationToken cancellationToken)
     {
-        if (!Enabled || string.IsNullOrWhiteSpace(sourceFileFullPath))
+        if (!Enabled || string.IsNullOrWhiteSpace(sourceFileFullPath) || millNo is < 1 or > 4)
             return false;
 
         var full = Path.GetFullPath(sourceFileFullPath);
@@ -425,10 +437,12 @@ WHERE Source_File = @FullPath
 SELECT TOP 1 1
 FROM dbo.Input_Slit_File_Seen
 WHERE Source_File = @FullPath
-  AND Source_LastWriteTimeUtc = @FileLw;";
+  AND Source_LastWriteTimeUtc = @FileLw
+  AND Mill_No = @MillNo;";
             await using var cmd = new SqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("@FullPath", full);
             cmd.Parameters.AddWithValue("@FileLw", fileLastWriteTimeUtc);
+            cmd.Parameters.AddWithValue("@MillNo", millNo);
             var scalar = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
             return scalar is not null;
         }
@@ -439,9 +453,42 @@ WHERE Source_File = @FullPath
                 sourceFileFullPath);
             return false;
         }
+        catch (SqlException ex) when (IsMissingInputSlitFileSeenMillNoColumn(ex))
+        {
+            // Pre-alter schema: fall back to path+write only (legacy global key).
+            return await IsInputSlitFileSeenLegacyAsync(full, fileLastWriteTimeUtc, cancellationToken)
+                .ConfigureAwait(false);
+        }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Input_Slit_File_Seen check failed for {File}.", sourceFileFullPath);
+            return false;
+        }
+    }
+
+    private async Task<bool> IsInputSlitFileSeenLegacyAsync(
+        string fullPath,
+        DateTime fileLastWriteTimeUtc,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await OpenConnectionAsync(conn, "Input_Slit_File_Seen legacy check", cancellationToken).ConfigureAwait(false);
+            const string sql = @"
+SELECT TOP 1 1
+FROM dbo.Input_Slit_File_Seen
+WHERE Source_File = @FullPath
+  AND Source_LastWriteTimeUtc = @FileLw;";
+            await using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@FullPath", fullPath);
+            cmd.Parameters.AddWithValue("@FileLw", fileLastWriteTimeUtc);
+            var scalar = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            return scalar is not null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Input_Slit_File_Seen legacy check failed for {File}.", fullPath);
             return false;
         }
     }
@@ -450,9 +497,10 @@ WHERE Source_File = @FullPath
         string sourceFileFullPath,
         DateTime fileLastWriteTimeUtc,
         string reason,
+        int millNo,
         CancellationToken cancellationToken)
     {
-        if (!Enabled || string.IsNullOrWhiteSpace(sourceFileFullPath))
+        if (!Enabled || string.IsNullOrWhiteSpace(sourceFileFullPath) || millNo is < 1 or > 4)
             return;
 
         var full = Path.GetFullPath(sourceFileFullPath);
@@ -467,17 +515,25 @@ WHERE Source_File = @FullPath
             const string sql = @"
 IF NOT EXISTS (
     SELECT 1 FROM dbo.Input_Slit_File_Seen
-    WHERE Source_File = @FullPath AND Source_LastWriteTimeUtc = @FileLw)
+    WHERE Source_File = @FullPath
+      AND Source_LastWriteTimeUtc = @FileLw
+      AND Mill_No = @MillNo)
 BEGIN
-    INSERT INTO dbo.Input_Slit_File_Seen (Source_File, Source_LastWriteTimeUtc, Reason)
-    VALUES (@FullPath, @FileLw, @Reason);
+    INSERT INTO dbo.Input_Slit_File_Seen (Source_File, Source_LastWriteTimeUtc, Mill_No, Reason)
+    VALUES (@FullPath, @FileLw, @MillNo, @Reason);
 END";
             await using var cmd = new SqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("@FullPath", full);
             cmd.Parameters.AddWithValue("@FileLw", fileLastWriteTimeUtc);
+            cmd.Parameters.AddWithValue("@MillNo", millNo);
             cmd.Parameters.AddWithValue("@Reason", reasonTrim);
             await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            _writeTracker.RecordSuccess("Input_Slit_File_Seen", $"{Path.GetFileName(full)} ({reasonTrim})");
+            _writeTracker.RecordSuccess("Input_Slit_File_Seen", $"{Path.GetFileName(full)} mill={millNo} ({reasonTrim})");
+        }
+        catch (SqlException ex) when (IsDuplicateInputSlitFileSeenKey(ex))
+        {
+            // Concurrent insert from another poll — already marked for this mill.
+            _writeTracker.RecordSuccess("Input_Slit_File_Seen", $"{Path.GetFileName(full)} mill={millNo} ({reasonTrim}, race)");
         }
         catch (SqlException ex) when (IsMissingInputSlitFileSeenTable(ex))
         {
@@ -486,9 +542,16 @@ END";
                 sourceFileFullPath,
                 reasonTrim);
         }
+        catch (SqlException ex) when (IsMissingInputSlitFileSeenMillNoColumn(ex))
+        {
+            _logger.LogWarning(
+                "Input_Slit_File_Seen.Mill_No missing — run docs/Input_Slit_File_Seen_Alter_MillNo.sql. Could not mark {File} seen for mill {Mill}.",
+                sourceFileFullPath,
+                millNo);
+        }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to mark Input_Slit_File_Seen for {File}.", sourceFileFullPath);
+            _logger.LogWarning(ex, "Failed to mark Input_Slit_File_Seen for {File} mill {Mill}.", sourceFileFullPath, millNo);
         }
     }
 
@@ -683,7 +746,7 @@ END
 ELSE
     SELECT CAST(0 AS INT);";
         await using var cmd = new SqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("@PoNumber", po);
+        cmd.Parameters.AddWithValue("@PoNumber", InputSlitCsvParsing.NormalizePo(po));
         cmd.Parameters.AddWithValue("@MillNo", millNo is >= 1 and <= 4 ? millNo : 1);
         cmd.Parameters.AddWithValue("@BundleNo", batchNo);
         var created = (int?)await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) ?? 0;
@@ -942,7 +1005,7 @@ WHERE PO_Number = @Po
 
     private static bool IsMissingSapStatusTable(SqlException ex)
     {
-        // 208 = invalid object name
+        // 208 = invalid object name — do not match message-only (e.g. duplicate-key 2627).
         foreach (SqlError err in ex.Errors)
         {
             if (err.Number == 208
@@ -950,12 +1013,12 @@ WHERE PO_Number = @Po
                 return true;
         }
 
-        return ex.Message.Contains("Output_Slit_Sap_Status", StringComparison.OrdinalIgnoreCase);
+        return false;
     }
 
     private static bool IsMissingInputSlitFileSeenTable(SqlException ex)
     {
-        // 208 = invalid object name
+        // 208 = invalid object name — do not match message-only (duplicate-key 2627 was mislogged as missing).
         foreach (SqlError err in ex.Errors)
         {
             if (err.Number == 208
@@ -963,7 +1026,32 @@ WHERE PO_Number = @Po
                 return true;
         }
 
-        return ex.Message.Contains("Input_Slit_File_Seen", StringComparison.OrdinalIgnoreCase);
+        return false;
+    }
+
+    private static bool IsMissingInputSlitFileSeenMillNoColumn(SqlException ex)
+    {
+        // 207 = invalid column name
+        foreach (SqlError err in ex.Errors)
+        {
+            if (err.Number == 207
+                && err.Message.Contains("Mill_No", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsDuplicateInputSlitFileSeenKey(SqlException ex)
+    {
+        // 2627 = unique constraint; 2601 = unique index
+        foreach (SqlError err in ex.Errors)
+        {
+            if (err.Number is 2627 or 2601)
+                return true;
+        }
+
+        return false;
     }
 
     private static bool IsMissingSourceLastWriteColumn(SqlException ex)
@@ -981,7 +1069,7 @@ WHERE PO_Number = @Po
 
     public async Task RecordOutputSlitRowsAsync(
         string sourceFile,
-        IReadOnlyList<(InputSlitRecord Record, string NdtBatchNo, int SourceRowNumber)> rows,
+        IReadOnlyList<(InputSlitRecord Record, string NdtBatchNo, int SourceRowNumber, bool LinkBundleParent)> rows,
         CancellationToken cancellationToken)
     {
         if (!Enabled || rows.Count == 0)
@@ -1024,14 +1112,19 @@ INSERT INTO dbo.Output_Slit_Row
 VALUES
     (@PoNumber, @SlitNo, @NdtPipes, @RejectedP, @StartTime, @FinishTime, @MillNo, @NdtShort, @RejShort, @BatchNo, @SourceFile, @SourceRowNumber);";
 
-            foreach (var (r, batchNo, rowNo) in rows)
+            foreach (var (r, batchNo, rowNo, linkBundle) in rows)
             {
-                if (string.IsNullOrWhiteSpace(r.PoNumber) || string.IsNullOrWhiteSpace(batchNo))
+                if (string.IsNullOrWhiteSpace(r.PoNumber))
+                    continue;
+
+                // Linked rows require a non-empty batch; CSV-only constant/zero/hollow rows insert NULL batch.
+                if (linkBundle && string.IsNullOrWhiteSpace(batchNo))
                     continue;
 
                 try
                 {
-                    await EnsureBundleRowExistsAsync(conn, r, batchNo, cancellationToken).ConfigureAwait(false);
+                    if (linkBundle)
+                        await EnsureBundleRowExistsAsync(conn, r, batchNo, cancellationToken).ConfigureAwait(false);
 
                     await using var cmd = new SqlCommand(sql, conn);
                     cmd.Parameters.AddWithValue("@PoNumber", InputSlitCsvParsing.NormalizePo(r.PoNumber));
@@ -1043,7 +1136,9 @@ VALUES
                     cmd.Parameters.AddWithValue("@MillNo", r.MillNo == 0 ? (object)DBNull.Value : r.MillNo);
                     cmd.Parameters.AddWithValue("@NdtShort", (object?)NullIfEmpty(r.NdtShortLengthPipe) ?? DBNull.Value);
                     cmd.Parameters.AddWithValue("@RejShort", (object?)NullIfEmpty(r.RejectedShortLengthPipe) ?? DBNull.Value);
-                    cmd.Parameters.AddWithValue("@BatchNo", batchNo);
+                    cmd.Parameters.AddWithValue(
+                        "@BatchNo",
+                        linkBundle ? batchNo : (object)DBNull.Value);
                     cmd.Parameters.AddWithValue("@SourceFile", (object?)NullIfEmpty(sourceFile) ?? DBNull.Value);
                     cmd.Parameters.AddWithValue("@SourceRowNumber", rowNo);
                     await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
@@ -1054,7 +1149,7 @@ VALUES
                     _logger.LogError(
                         ex,
                         "Failed Output_Slit_Row insert for batch {BatchNo} PO {Po} row {RowNo} file {File}.",
-                        batchNo,
+                        linkBundle ? batchNo : "(null)",
                         r.PoNumber,
                         rowNo,
                         sourceFile);
@@ -1109,7 +1204,7 @@ WHERE NDT_Batch_No = @BatchNo
 
                 await using var cmd = new SqlCommand(delOutput, conn);
                 cmd.Parameters.AddWithValue("@BatchNo", ndtBatchNo.Trim());
-                cmd.Parameters.AddWithValue("@PoNumber", r.PoNumber);
+                cmd.Parameters.AddWithValue("@PoNumber", InputSlitCsvParsing.NormalizePo(r.PoNumber));
                 cmd.Parameters.AddWithValue("@RowNo", r.SourceRowNumber1Based);
                 cmd.Parameters.AddWithValue("@LikeWin", likeWin);
                 cmd.Parameters.AddWithValue("@LikeUnix", likeUnix);
@@ -1280,7 +1375,7 @@ WHERE Manual_Station_Run_ID = (
         string? hydrotestingType,
         string sourceFile)
     {
-        cmd.Parameters.AddWithValue("@PoNumber", poNumber);
+        cmd.Parameters.AddWithValue("@PoNumber", InputSlitCsvParsing.NormalizePo(poNumber));
         cmd.Parameters.AddWithValue("@BatchNo", ndtBatchNo);
         cmd.Parameters.AddWithValue("@NdtPcs", ndtPcs);
         cmd.Parameters.AddWithValue("@Ok", okPcs);
@@ -1337,7 +1432,7 @@ BEGIN
 END";
 
             await using var cmd = new SqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("@PoNumber", poNumber);
+            cmd.Parameters.AddWithValue("@PoNumber", InputSlitCsvParsing.NormalizePo(poNumber));
             cmd.Parameters.AddWithValue("@BatchNo", ndtBatchNo);
             cmd.Parameters.AddWithValue("@NdtPcs", ndtPcs);
             cmd.Parameters.AddWithValue("@Ok", okPcs);
@@ -1674,7 +1769,7 @@ BEGIN
 END";
 
             await using var cmd = new SqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("@PoNumber", poNumber);
+            cmd.Parameters.AddWithValue("@PoNumber", InputSlitCsvParsing.NormalizePo(poNumber));
             cmd.Parameters.AddWithValue("@BatchNo", ndtBatchNo.Trim());
             cmd.Parameters.AddWithValue("@NdtPcs", ndtPcs);
             cmd.Parameters.AddWithValue("@Ok", okPcs);

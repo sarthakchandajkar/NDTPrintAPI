@@ -12,9 +12,9 @@ namespace NdtBundleService.Services;
 /// <summary>
 /// Background service that periodically scans the Input Slit CSV folder,
 /// feeds records into the bundle engine, and reacts to PO-end signals.
-/// When <see cref="NdtBundleOptions.BackfillReconciliationEnabled"/> is true (and SQL is on),
-/// startup/periodic reconcile ingests inbox files absent from <c>Input_Slit_Row</c> within the lookback window.
-/// When disabled or SQL is off, pre-existing files are baseline-seeded (historical behavior).
+/// On startup, pre-existing inbox files are baseline-seeded as already handled (no automated
+/// historical backfill). Missed rows are added manually via the Input Slits UI/API.
+/// Optional periodic reconcile remains available when <see cref="NdtBundleOptions.BackfillReconciliationEnabled"/> is true.
 /// Inbox files may have no extension (SAP) or <c>.csv</c>; only reads them—never moves or deletes source files in <see cref="NdtBundleOptions.InputSlitFolder"/>.
 /// </summary>
 public sealed class SlitMonitoringWorker : BackgroundService
@@ -189,24 +189,14 @@ public sealed class SlitMonitoringWorker : BackgroundService
     }
 
     /// <summary>
-    /// F-5: reconcile against <c>Input_Slit_Row</c> when enabled+SQL; otherwise historical baseline seed.
+    /// Baseline-seed pre-existing inbox files so a restart does not reprocess the whole folder.
+    /// Does not run historical backfill reconcile — operators add missed rows via UI/SQL.
     /// </summary>
-    private async Task InitializeInputSlitBaselineAsync(CancellationToken cancellationToken)
+    private Task InitializeInputSlitBaselineAsync(CancellationToken cancellationToken)
     {
-        var o = _optionsMonitor.CurrentValue;
-        if (!o.BackfillReconciliationEnabled || !SqlTraceabilityConnection.IsSqlEnabled(o))
-        {
-            if (o.BackfillReconciliationEnabled && !SqlTraceabilityConnection.IsSqlEnabled(o))
-            {
-                _logger.LogWarning(
-                    "BackfillReconciliationEnabled=true but SQL is disabled; falling back to legacy Input Slit seed baseline.");
-            }
-
-            SeedPreExistingInputSlitCsvsAsProcessed();
-            return;
-        }
-
-        await ReconcileInputSlitInboxAsync(cancellationToken).ConfigureAwait(false);
+        _ = cancellationToken;
+        SeedPreExistingInputSlitCsvsAsProcessed();
+        return Task.CompletedTask;
     }
 
     private bool ShouldRunPeriodicBackfillReconcile(NdtBundleOptions o)
@@ -225,8 +215,12 @@ public sealed class SlitMonitoringWorker : BackgroundService
     {
         var o = _optionsMonitor.CurrentValue;
         var folder = (o.InputSlitFolder ?? string.Empty).Trim();
+        var accepted = (o.InputSlitAcceptedFolder ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
-            return;
+        {
+            if (string.IsNullOrWhiteSpace(accepted) || !Directory.Exists(accepted))
+                return;
+        }
 
         var lookbackHours = Math.Max(1, o.BackfillLookbackHours);
         var lookbackCutoff = DateTime.UtcNow.AddHours(-lookbackHours);
@@ -239,8 +233,9 @@ public sealed class SlitMonitoringWorker : BackgroundService
         var alreadyImported = 0;
         var queued = 0;
         var outsideLookback = 0;
+        var seenMills = GetFileSeenMillNos(o);
 
-        foreach (var path in InputSlitInboxEnumeration.EnumerateFiles(folder))
+        foreach (var path in InputSlitInboxEnumeration.EnumerateInboxPreferOverAccepted(folder, accepted))
         {
             cancellationToken.ThrowIfCancellationRequested();
             scanned++;
@@ -275,9 +270,18 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 continue;
             }
 
-            var seen = await _traceability
-                .IsInputSlitFileSeenAsync(full, lwUtc, cancellationToken)
-                .ConfigureAwait(false);
+            var seen = false;
+            foreach (var millNo in seenMills)
+            {
+                if (await _traceability
+                        .IsInputSlitFileSeenAsync(full, lwUtc, millNo, cancellationToken)
+                        .ConfigureAwait(false))
+                {
+                    seen = true;
+                    break;
+                }
+            }
+
             if (seen)
             {
                 _inputSlitLastHandledWriteUtc[full] = lwUtc;
@@ -343,7 +347,10 @@ public sealed class SlitMonitoringWorker : BackgroundService
     {
         var o = _optionsMonitor.CurrentValue;
         var inputFolder = (o.InputSlitFolder ?? string.Empty).Trim();
-        if (string.IsNullOrEmpty(inputFolder) || !Directory.Exists(inputFolder))
+        var acceptedFolder = (o.InputSlitAcceptedFolder ?? string.Empty).Trim();
+        var inboxOk = !string.IsNullOrEmpty(inputFolder) && Directory.Exists(inputFolder);
+        var acceptedOk = !string.IsNullOrEmpty(acceptedFolder) && Directory.Exists(acceptedFolder);
+        if (!inboxOk && !acceptedOk)
         {
             _logger.LogWarning(
                 "Input Slit folder is not available this poll cycle: {Folder}. Skipping until it is reachable again.",
@@ -351,10 +358,12 @@ public sealed class SlitMonitoringWorker : BackgroundService
             return;
         }
 
-        IEnumerable<string> filesEnumerable;
+        IReadOnlyList<string> filesEnumerable;
         try
         {
-            filesEnumerable = InputSlitInboxEnumeration.EnumerateFiles(inputFolder);
+            filesEnumerable = InputSlitInboxEnumeration.EnumerateInboxPreferOverAccepted(
+                inputFolder,
+                acceptedFolder);
         }
         catch (Exception ex)
         {
@@ -400,6 +409,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
             }
 
             _logger.LogInformation("Processing Input Slit file {File}", fileFull);
+            _sqlWriteTracker.ClearRecent();
 
             IReadOnlyList<(string RawLine, InputSlitRecord? Record)> rows =
                 Array.Empty<(string RawLine, InputSlitRecord? Record)>();
@@ -451,7 +461,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 // Build output content: same format as input with one extra column "NDT Batch No".
                 var outputLines = new List<string> { headerLine.TrimEnd() + ",NDT Batch No" };
                 var inputRowsForSql = new List<(InputSlitRecord Record, int SourceRowNumber)>();
-                var outputRowsForSql = new List<(InputSlitRecord Record, string NdtBatchNo, int SourceRowNumber)>();
+                var outputRowsForSql =
+                    new List<(InputSlitRecord Record, string NdtBatchNo, int SourceRowNumber, bool LinkBundleParent)>();
 
                 IReadOnlyDictionary<string, PoPlanWipRow> wipByPo =
                     _poPlanWipEnrichment.TryGetCachedEnrichment()?.ByPo
@@ -465,7 +476,13 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 var outputFileBaseName = Path.GetFileName(fileFull);
                 var fileSapIngestGate = await GetSapIngestGateAsync(outputFileBaseName, cancellationToken)
                     .ConfigureAwait(false);
-                if (isBackfill)
+                var ownedMillConstant = _millOwnership.SingleOwnedMill is int ownedM
+                    && MillCsvBatchModeResolver.Resolve(o, ownedM).IsConstant;
+                // Historical backfill / HoldReview only when explicitly enabled (deploy keeps this false).
+                var applyBackfillPolicy = isBackfill
+                    && o.BackfillReconciliationEnabled
+                    && !ownedMillConstant;
+                if (applyBackfillPolicy)
                 {
                     var eligibleForCoverage = rows
                         .Select(r => r.Record)
@@ -622,17 +639,52 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     var bundleNdtPipes = useLiveThisRow && plcNdt.HasValue ? record.NdtPipes : effectiveRecord.NdtPipes;
                     var bundleRecord = CloneRecordWithNdt(effectiveRecord, bundleNdtPipes);
 
+                    var millBatchMode = MillCsvBatchModeResolver.Resolve(o, bundleRecord.MillNo);
+                    var (pipeTypeEarly, pipeSizeEarly) = ResolvePipeInfoForPo(
+                        bundleRecord.PoNumber,
+                        wipByPo,
+                        pipeSizeByPo);
+                    var isHollowFg = NdtBatchNumberRules.ShouldOmitNdtBatchNumber(pipeTypeEarly, pipeSizeEarly);
+
+                    // Constant mills: CSV literal only — no backfill coverage, Manual_Review, or fill-stamp.
+                    if (millBatchMode.IsConstant)
+                    {
+                        var (csvBatch, linkBundle) = MillCsvBatchModeResolver.ResolveNonFillCsvBatch(
+                            millBatchMode,
+                            isHollowFg,
+                            bundleRecord.NdtPipes);
+                        var rawConst = row.RawLine;
+                        if (useLiveThisRow && plcNdt.HasValue && ndtColumnIndex >= 0)
+                            rawConst = InputSlitCsvParsing.ReplaceFieldAtIndex(
+                                row.RawLine,
+                                ndtColumnIndex,
+                                effectiveNdt.ToString(CultureInfo.InvariantCulture));
+                        if (poColumnIndex >= 0
+                            && !string.IsNullOrWhiteSpace(effectivePo)
+                            && !InputSlitCsvParsing.PoEquals(record.PoNumber, effectivePo))
+                        {
+                            rawConst = InputSlitCsvParsing.ReplaceFieldAtIndex(rawConst, poColumnIndex, effectivePo);
+                        }
+
+                        outputLines.Add(rawConst.TrimEnd() + "," + csvBatch);
+                        inputRowsForSql.Add((effectiveRecord, sourceRowNumber));
+                        outputRowsForSql.Add((bundleRecord, csvBatch, sourceRowNumber, linkBundle));
+                        anyRowBundled = true;
+                        sourceRowNumber++;
+                        continue;
+                    }
+
                     BackfillBundlingAction backfillAction = BackfillBundlingAction.NormalBundle;
                     var rowPhase = _poLifecycle.GetPhase(bundleRecord.MillNo, bundleRecord.PoNumber);
                     backfillAction = ClosedPoSlitIngestPolicy.DecideForRow(
-                        isBackfill,
+                        applyBackfillPolicy,
                         backfillCoverage,
                         rowPhase,
                         poEndSource,
                         o.AutoCloseOrphanBundles);
 
                     if (InputSlitBackfillFillGate.ShouldApply(
-                            isBackfill,
+                            applyBackfillPolicy,
                             backfillAction,
                             poEndSource,
                             MillCsvBatchModeResolver.Resolve(o, bundleRecord.MillNo).IsFillToTarget))
@@ -763,17 +815,6 @@ public sealed class SlitMonitoringWorker : BackgroundService
                                             .MarkManualReviewAsync(poMillKey.Item1, poMillKey.Item2, cancellationToken)
                                             .ConfigureAwait(false);
                                     }
-
-                                    await _fillAssigner
-                                        .AssignAsync(
-                                            fileFull,
-                                            bundleRecord.PoNumber,
-                                            bundleRecord.MillNo,
-                                            closedPoPipeSize,
-                                            Math.Max(0, bundleRecord.NdtPipes),
-                                            holdWhenNoOpenBundle: true,
-                                            cancellationToken)
-                                        .ConfigureAwait(false);
                                 }
                             }
                         }
@@ -808,162 +849,93 @@ public sealed class SlitMonitoringWorker : BackgroundService
                         outputLines.Add(rawTrace.TrimEnd() + "," + (closedPoBatchNo ?? string.Empty));
                         inputRowsForSql.Add((effectiveRecord, sourceRowNumber));
                         if (!string.IsNullOrWhiteSpace(closedPoBatchNo))
-                            outputRowsForSql.Add((bundleRecord, closedPoBatchNo, sourceRowNumber));
+                            outputRowsForSql.Add((bundleRecord, closedPoBatchNo, sourceRowNumber, linkBundleParent: true));
                         anyRowBundled = true;
                         sourceRowNumber++;
                         continue;
                     }
 
-                    var (pipeType, pipeSize) = ResolvePipeInfoForPo(bundleRecord.PoNumber, wipByPo, pipeSizeByPo);
-                    var omitBatch = NdtBatchNumberRules.ShouldOmitNdtBatchNumber(pipeType, pipeSize);
+                    var (pipeType, pipeSize) = (pipeTypeEarly, pipeSizeEarly);
+                    var omitBatch = isHollowFg;
 
                     string ndtBatchNoFormatted;
-                    if (omitBatch)
+                    var linkBundleParent = true;
+                    if (omitBatch || bundleRecord.NdtPipes <= 0)
                     {
-                        ndtBatchNoFormatted = string.Empty;
+                        (ndtBatchNoFormatted, linkBundleParent) = MillCsvBatchModeResolver.ResolveNonFillCsvBatch(
+                            millBatchMode,
+                            omitBatch,
+                            bundleRecord.NdtPipes);
                     }
                     else
                     {
-                        var millBatchMode = MillCsvBatchModeResolver.Resolve(o, bundleRecord.MillNo);
-                        if (millBatchMode.IsConstant)
+                        var bundleLock = await _millBundleStateLock
+                            .AcquireAsync(bundleRecord.MillNo, cancellationToken)
+                            .ConfigureAwait(false);
+                        try
                         {
-                            ndtBatchNoFormatted = millBatchMode.Value ?? "10001";
-                        }
-                        else
-                        {
-                            var bundleLock = await _millBundleStateLock
-                                .AcquireAsync(bundleRecord.MillNo, cancellationToken)
-                                .ConfigureAwait(false);
-                            try
-                            {
-                                var poMillKey = (
-                                    InputSlitCsvParsing.NormalizePo(bundleRecord.PoNumber),
-                                    bundleRecord.MillNo);
-                                ndtBatchNoFormatted = string.Empty;
+                            var poMillKey = (
+                                InputSlitCsvParsing.NormalizePo(bundleRecord.PoNumber),
+                                bundleRecord.MillNo);
+                            ndtBatchNoFormatted = string.Empty;
 
-                                var stickyBatch = await _traceability
-                                    .TryGetExistingOutputSlitBatchAsync(
+                            var stickyBatch = await _traceability
+                                .TryGetExistingOutputSlitBatchAsync(
+                                    fileFull,
+                                    bundleRecord.PoNumber,
+                                    bundleRecord.MillNo,
+                                    cancellationToken)
+                                .ConfigureAwait(false);
+                            if (!string.IsNullOrWhiteSpace(stickyBatch))
+                            {
+                                ndtBatchNoFormatted = stickyBatch;
+                                _logger.LogInformation(
+                                    "Slit file {File} PO {PO} Mill {Mill} keeps existing bundle {Batch} (sticky attach).",
+                                    Path.GetFileName(fileFull),
+                                    poMillKey.Item1,
+                                    poMillKey.Item2,
+                                    stickyBatch);
+                            }
+                            else if (fileSapIngestGate == OutputSlitIngestGate.Accepted)
+                            {
+                                _logger.LogWarning(
+                                    "SAP-Accepted gate: {File} has no Output_Slit_Row batch — skipping batch assignment "
+                                    + "(corrections must go through PPC).",
+                                    outputFileBaseName);
+                                ndtBatchNoFormatted = string.Empty;
+                                linkBundleParent = false;
+                            }
+                            else
+                            {
+                                // Fill-to-target: stamp only. No invented number, no NoOpenBundle hold,
+                                // no file-driven allocate — retry next poll or Manual Input Slit / Reconcile.
+                                var assign = await _fillAssigner
+                                    .AssignAsync(
                                         fileFull,
                                         bundleRecord.PoNumber,
                                         bundleRecord.MillNo,
+                                        pipeSize,
+                                        Math.Max(0, bundleRecord.NdtPipes),
+                                        holdWhenNoOpenBundle: false,
                                         cancellationToken)
                                     .ConfigureAwait(false);
-                                if (!string.IsNullOrWhiteSpace(stickyBatch))
+
+                                if (!string.IsNullOrWhiteSpace(assign.BatchNo))
                                 {
-                                    ndtBatchNoFormatted = stickyBatch;
-                                    _logger.LogInformation(
-                                        "Slit file {File} PO {PO} Mill {Mill} keeps existing bundle {Batch} (sticky attach).",
-                                        Path.GetFileName(fileFull),
-                                        poMillKey.Item1,
-                                        poMillKey.Item2,
-                                        stickyBatch);
-                                }
-                                else if (fileSapIngestGate == OutputSlitIngestGate.Accepted)
-                                {
-                                    _logger.LogWarning(
-                                        "SAP-Accepted gate: {File} has no Output_Slit_Row batch — skipping batch assignment "
-                                        + "(corrections must go through PPC).",
-                                        outputFileBaseName);
-                                    ndtBatchNoFormatted = string.Empty;
+                                    ndtBatchNoFormatted = assign.BatchNo;
                                 }
                                 else
                                 {
-                                    var trigger = BundleCloseTriggerParser.Parse(o.CloseTrigger);
-                                    var plcHealthy = _s7Registry.TryGet(bundleRecord.MillNo)?.IsHealthy == true;
-                                    var plcTraceabilityOnly = PlcOpenCsvIngestPolicy.ShouldIngestTraceabilityOnly(
-                                        trigger,
-                                        plcHealthy);
-
-                                    var assign = await _fillAssigner
-                                        .AssignAsync(
-                                            fileFull,
-                                            bundleRecord.PoNumber,
-                                            bundleRecord.MillNo,
-                                            pipeSize,
-                                            Math.Max(0, bundleRecord.NdtPipes),
-                                            holdWhenNoOpenBundle: plcTraceabilityOnly,
-                                            cancellationToken)
-                                        .ConfigureAwait(false);
-
-                                    if (!string.IsNullOrWhiteSpace(assign.BatchNo))
-                                    {
-                                        ndtBatchNoFormatted = assign.BatchNo;
-                                    }
-                                    else if (assign.Held)
-                                    {
-                                        ndtBatchNoFormatted = string.Empty;
-                                    }
-                                    else
-                                    {
-                                            int? closedPrintedBatch = null;
-                                            if (bundleRecord.NdtPipes > 0)
-                                            {
-                                                try
-                                                {
-                                                    await _bundleEngine.ProcessSlitRecordAsync(
-                                                        bundleRecord,
-                                                        async (contextRecord, _, totalNdtPcs) =>
-                                                        {
-                                                            if (totalNdtPcs <= 0)
-                                                                return;
-
-                                                            var seq = await _outputWriter
-                                                                .WriteBundleAsync(contextRecord, 0, totalNdtPcs, cancellationToken)
-                                                                .ConfigureAwait(false);
-                                                            closedPrintedBatch = seq;
-                                                            if (seq > 0)
-                                                            {
-                                                                _logger.LogInformation(
-                                                                    "Bundle output completed for {BatchNo} ({Pcs} pcs).",
-                                                                    FormatNdtBatchNo(seq, contextRecord.MillNo),
-                                                                    totalNdtPcs);
-                                                            }
-                                                        },
-                                                        cancellationToken,
-                                                        pipeSize).ConfigureAwait(false);
-                                                }
-                                                catch (Exception ex)
-                                                {
-                                                    _logger.LogError(ex, "Bundle close failed for record in {File}.", fileFull);
-                                                }
-                                            }
-
-                                            if (closedPrintedBatch is int closedSeq && closedSeq > 0)
-                                            {
-                                                var closedFormatted = FormatNdtBatchNo(closedSeq, effectiveRecord.MillNo);
-                                                var afterClose = await _fillAssigner
-                                                    .AssignAsync(
-                                                        fileFull,
-                                                        bundleRecord.PoNumber,
-                                                        bundleRecord.MillNo,
-                                                        pipeSize,
-                                                        Math.Max(0, bundleRecord.NdtPipes),
-                                                        holdWhenNoOpenBundle: true,
-                                                        cancellationToken)
-                                                    .ConfigureAwait(false);
-                                                ndtBatchNoFormatted = afterClose.BatchNo ?? closedFormatted;
-                                            }
-                                            else
-                                            {
-                                                var held = await _fillAssigner
-                                                    .AssignAsync(
-                                                        fileFull,
-                                                        bundleRecord.PoNumber,
-                                                        bundleRecord.MillNo,
-                                                        pipeSize,
-                                                        Math.Max(0, bundleRecord.NdtPipes),
-                                                        holdWhenNoOpenBundle: true,
-                                                        cancellationToken)
-                                                    .ConfigureAwait(false);
-                                                ndtBatchNoFormatted = held.BatchNo ?? string.Empty;
-                                            }
-                                    }
+                                    // Keep linkBundleParent true so the empty-batch skip below does not
+                                    // mark the file handled — next poll retries after PLC print.
+                                    ndtBatchNoFormatted = string.Empty;
+                                    linkBundleParent = true;
                                 }
                             }
-                            finally
-                            {
-                                bundleLock.Dispose();
-                            }
+                        }
+                        finally
+                        {
+                            bundleLock.Dispose();
                         }
                     }
 
@@ -978,7 +950,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                         rawOut = InputSlitCsvParsing.ReplaceFieldAtIndex(rawOut, poColumnIndex, effectivePo);
                     }
 
-                    if (string.IsNullOrWhiteSpace(ndtBatchNoFormatted) && !omitBatch)
+                    if (string.IsNullOrWhiteSpace(ndtBatchNoFormatted) && !omitBatch && linkBundleParent)
                     {
                         inputRowsForSql.Add((effectiveRecord, sourceRowNumber));
                         anyEligibleMillRow = true;
@@ -988,29 +960,15 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
                     outputLines.Add(rawOut.TrimEnd() + "," + ndtBatchNoFormatted);
                     inputRowsForSql.Add((effectiveRecord, sourceRowNumber));
-                    outputRowsForSql.Add((bundleRecord, ndtBatchNoFormatted, sourceRowNumber));
+                    outputRowsForSql.Add((bundleRecord, ndtBatchNoFormatted, sourceRowNumber, linkBundleParent));
                     anyRowBundled = true;
                     sourceRowNumber++;
                 }
 
-                await _csvFill
-                    .AdvanceQuietShortAsync(
-                        poNumber: null,
-                        millNo: _millOwnership.SingleOwnedMill,
-                        o.EffectiveCsvFillQuietMinutes,
-                        DateTime.UtcNow,
-                        forcePoEnd: false,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-                await _csvFill
-                    .EscalateExpiredHoldsAsync(
-                        o.EffectiveCsvFillQuietMinutes,
-                        DateTime.UtcNow,
-                        cancellationToken,
-                        _millOwnership.SingleOwnedMill)
-                    .ConfigureAwait(false);
+                // Quiet-short auto-finalize and hold→Manual_Review escalation are intentionally not
+                // called for FillToTarget (or Constant). Incomplete targets stay open until CSV stamps
+                // or Manual Reconcile; early CSV retries on the next poll.
 
-                // Write one output file under OutputBundleFolder using the same name as the input inbox file.
                 // Write one output file under OutputBundleFolder using the same name as the input inbox file.
                 var outputFolder = (o.OutputBundleFolder ?? string.Empty).Trim();
                 string? outputPath = null;
@@ -1027,13 +985,17 @@ public sealed class SlitMonitoringWorker : BackgroundService
                         var lw = File.GetLastWriteTimeUtc(fileFull);
                         _inputSlitLastHandledWriteUtc[fileFull] = lw;
                         _backfillCandidatePaths.Remove(fileFull);
-                        await _traceability
-                            .MarkInputSlitFileSeenAsync(
-                                fileFull,
-                                lw,
-                                "NoConfiguredMillRows",
-                                cancellationToken)
-                            .ConfigureAwait(false);
+                        foreach (var millNo in GetFileSeenMillNos(o))
+                        {
+                            await _traceability
+                                .MarkInputSlitFileSeenAsync(
+                                    fileFull,
+                                    lw,
+                                    "NoConfiguredMillRows",
+                                    millNo,
+                                    cancellationToken)
+                                .ConfigureAwait(false);
+                        }
                     }
                     else if (ShouldApplyPlcFileRetryBackoff(o, rows))
                     {
@@ -1124,8 +1086,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     var batchNosToSync = sapIngestGate != OutputSlitIngestGate.None
                         ? Enumerable.Empty<string>()
                         : outputRowsForSql
+                            .Where(r => r.LinkBundleParent && !string.IsNullOrWhiteSpace(r.NdtBatchNo))
                             .Select(r => r.NdtBatchNo)
-                            .Where(static b => !string.IsNullOrWhiteSpace(b))
                             .Distinct(StringComparer.OrdinalIgnoreCase);
                     foreach (var batchNo in batchNosToSync)
                     {
@@ -1218,13 +1180,17 @@ public sealed class SlitMonitoringWorker : BackgroundService
                         _fileRetryTracker.Clear(fileFull);
                         _inputSlitLastHandledWriteUtc[fileFull] = lwUtc;
                         _backfillCandidatePaths.Remove(fileFull);
-                        await _traceability
-                            .MarkInputSlitFileSeenAsync(
-                                fileFull,
-                                lwUtc,
-                                "MaxProcessingFailures",
-                                cancellationToken)
-                            .ConfigureAwait(false);
+                        foreach (var mill in reviewKeys.Select(k => k.Item2).Distinct())
+                        {
+                            await _traceability
+                                .MarkInputSlitFileSeenAsync(
+                                    fileFull,
+                                    lwUtc,
+                                    "MaxProcessingFailures",
+                                    mill,
+                                    cancellationToken)
+                                .ConfigureAwait(false);
+                        }
                     }
                 }
             }
@@ -1523,6 +1489,39 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
     private bool IsOwnedMillAllowed(NdtBundleOptions options, int millNo) =>
         IsMillAllowedForNdtInputSlit(options, millNo, _millOwnership.OwnedMills);
+
+    /// <summary>
+    /// Mills this instance may mark/read on <c>Input_Slit_File_Seen</c> (ownership ∩ process mills).
+    /// </summary>
+    private IReadOnlyList<int> GetFileSeenMillNos(NdtBundleOptions options)
+    {
+        var list = new List<int>(4);
+        for (var m = 1; m <= 4; m++)
+        {
+            if (IsOwnedMillAllowed(options, m))
+                list.Add(m);
+        }
+
+        // Shared / empty ownership: still need a mill key for MarkSeen — use configured process mills or all.
+        if (list.Count == 0)
+        {
+            var mills = options.InputSlitProcessMills;
+            if (mills is { Length: > 0 })
+            {
+                foreach (var m in mills)
+                {
+                    if (m is >= 1 and <= 4)
+                        list.Add(m);
+                }
+            }
+            else
+            {
+                list.AddRange(new[] { 1, 2, 3, 4 });
+            }
+        }
+
+        return list;
+    }
 
     private static string FormatInputSlitProcessMills(NdtBundleOptions options)
     {

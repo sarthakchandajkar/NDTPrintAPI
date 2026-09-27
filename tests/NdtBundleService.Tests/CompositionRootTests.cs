@@ -69,7 +69,6 @@ public sealed class CompositionRootTests : IDisposable
         Assert.DoesNotContain(typeof(MillInstanceStatusPublisher), types);
         Assert.DoesNotContain(typeof(PoReopenWipConfirmationBridge), types);
         Assert.DoesNotContain(typeof(MillInstanceLeaseHostedService), types);
-        Assert.DoesNotContain(typeof(FillCutoverStartupCheck), types);
         Assert.DoesNotContain(typeof(MillSequenceStartupGuard), types);
         Assert.IsType<SqlZplGenerationToggle>(provider.GetRequiredService<IZplGenerationToggle>());
         Assert.NotNull(provider.GetRequiredService<IMillSequenceService>());
@@ -95,7 +94,6 @@ public sealed class CompositionRootTests : IDisposable
         Assert.Contains(typeof(MillInstanceStatusPublisher), types);
         Assert.Contains(typeof(PoReopenWipConfirmationBridge), types);
         Assert.Contains(typeof(MillInstanceLeaseHostedService), types);
-        Assert.Contains(typeof(FillCutoverStartupCheck), types);
         Assert.Contains(typeof(MillSequenceStartupGuard), types);
         Assert.Contains(typeof(LegacyJsonStateStartupCheck), types);
         Assert.DoesNotContain(typeof(PoPlanWipImportHostedService), types);
@@ -220,10 +218,8 @@ public sealed class CompositionRootTests : IDisposable
         var lease = hosted.IndexOf(typeof(MillInstanceLeaseHostedService));
         var worker = hosted.IndexOf(typeof(SlitMonitoringWorker));
         var guard = hosted.IndexOf(typeof(MillSequenceStartupGuard));
-        var fill = hosted.IndexOf(typeof(FillCutoverStartupCheck));
-        Assert.True(guard >= 0 && fill >= 0 && lease >= 0 && worker >= 0);
-        Assert.True(guard < fill, "MillSequenceStartupGuard must start before FillCutover.");
-        Assert.True(fill < lease, "FillCutover must start after sequence seed.");
+        Assert.True(guard >= 0 && lease >= 0 && worker >= 0);
+        Assert.True(guard < lease, "MillSequenceStartupGuard must start before lease claim.");
         Assert.True(lease < worker, "MillInstanceLeaseHostedService must start before mill workers.");
 
         foreach (var hostedService in provider.GetServices<IHostedService>())

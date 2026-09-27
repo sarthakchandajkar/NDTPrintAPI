@@ -194,10 +194,18 @@ public sealed class MillSequenceServiceTests
             CancellationToken cancellationToken) =>
             Task.FromResult(false);
 
-        public Task<(int Sequence, string Formatted)> AllocateAndInsertBundleAsync(
+        public Task<(int Sequence, string Formatted, bool ClaimedCsvAdvance)> AllocateAndInsertBundleAsync(
             NdtBundleRecord pending,
             CancellationToken cancellationToken) =>
             throw new NotSupportedException();
+
+        public Task<(int Sequence, string Formatted)?> TryOpenCsvAdvanceStampTargetAsync(
+            string poNumber,
+            int millNo,
+            int provisionalTargetNdtPcs,
+            string? slitNo,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<(int Sequence, string Formatted)?>(null);
 
         public Task EnsureScanDoesNotExceedTableAsync(int millNo, CancellationToken cancellationToken)
         {

@@ -88,7 +88,8 @@ BEGIN
         Mill_No                   INT            NULL,
         NDT_Short_Length_Pipe     NVARCHAR(50)   NULL,
         Rejected_Short_Length_Pipe NVARCHAR(50)  NULL,
-        NDT_Batch_No              NVARCHAR(20)   NOT NULL,
+        -- NULL = Constant / zero-NDT / hollow-FG CSV-only batch (no NDT_Bundle parent; FK allows NULL)
+        NDT_Batch_No              NVARCHAR(20)   NULL,
         Source_File               NVARCHAR(500)  NULL,
         Source_Row_Number         INT            NULL,
         WrittenAtUtc              DATETIME2(2)   NOT NULL CONSTRAINT DF_Output_Slit_WrittenAtUtc DEFAULT (SYSUTCDATETIME()),

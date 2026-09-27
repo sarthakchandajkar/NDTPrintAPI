@@ -160,12 +160,17 @@ WHERE NDT_Batch_No = @OldBatch
 public sealed class CsvFillService : ICsvFillService
 {
     private readonly IOptionsMonitor<NdtBundleOptions> _options;
+    private readonly IMillSequenceService? _millSequence;
     private readonly ILogger<CsvFillService> _logger;
 
-    public CsvFillService(IOptionsMonitor<NdtBundleOptions> options, ILogger<CsvFillService> logger)
+    public CsvFillService(
+        IOptionsMonitor<NdtBundleOptions> options,
+        ILogger<CsvFillService> logger,
+        IMillSequenceService? millSequence = null)
     {
         _options = options;
         _logger = logger;
+        _millSequence = millSequence;
     }
 
     private NdtBundleOptions Opt => _options.CurrentValue;
@@ -319,7 +324,9 @@ WHERE Bundle_No = @BundleNo;";
                 await using var reader = await find.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
                 if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                 {
-                    await tx.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                    // Do not RollbackAsync while the reader is open — that throws
+                    // "already an open DataReader" and swallows the clean no-target null.
+                    // await using disposes reader then rolls back the uncommitted tx.
                     return null;
                 }
 
@@ -378,6 +385,14 @@ WHERE Bundle_No = @BundleNo;", conn, tx))
                     result.FillState);
             }
 
+            await TryOpenNextStampTargetAfterTerminalAsync(
+                    poNumber,
+                    millNo,
+                    bundleNo,
+                    result.FillState,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
             return result;
         }
         catch (Exception ex)
@@ -385,6 +400,68 @@ WHERE Bundle_No = @BundleNo;", conn, tx))
             _logger.LogWarning(ex, "TryStampFile failed for PO {PO} Mill {Mill}.", normalized, millNo);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Option A: after Complete/Overshoot, open the next Mill_Sequence as a stamp-only
+    /// <c>CsvAdvance</c> target when no other incomplete slot exists (no tag print).
+    /// </summary>
+    private async Task TryOpenNextStampTargetAfterTerminalAsync(
+        string poNumber,
+        int millNo,
+        string closedBundleNo,
+        string fillState,
+        CancellationToken cancellationToken)
+    {
+        if (_millSequence is not { IsEnabled: true })
+            return;
+
+        var anotherIncomplete = await TryGetOldestIncompleteAsync(poNumber, millNo, pipeSize: null, cancellationToken)
+            .ConfigureAwait(false);
+        if (!CsvFillSequenceAdvance.ShouldOpenNextStampTarget(fillState, anotherIncomplete is not null))
+            return;
+
+        int? manualOriginal = null;
+        int? targetPcs = null;
+        var totalPcs = 0;
+        string? slitNo = null;
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(@"
+SELECT Manual_Recon_Original_Total, Target_Ndt_Pcs, Total_NDT_Pcs, Context_Slit_No
+FROM dbo.NDT_Bundle
+WHERE Bundle_No = @BundleNo;", conn);
+            cmd.Parameters.AddWithValue("@BundleNo", closedBundleNo);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (!reader.IsDBNull(0))
+                    manualOriginal = reader.GetInt32(0);
+                if (!reader.IsDBNull(1))
+                    targetPcs = reader.GetInt32(1);
+                totalPcs = reader.IsDBNull(2) ? 0 : reader.GetInt32(2);
+                if (!reader.IsDBNull(3))
+                    slitNo = reader.GetString(3);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Could not read provisional target from closed bundle {BundleNo}; skipping CSV-advance open.",
+                closedBundleNo);
+            return;
+        }
+
+        var provisional = CsvFillSequenceAdvance.ResolveProvisionalTarget(manualOriginal, targetPcs, totalPcs);
+        if (provisional <= 0)
+            provisional = 1;
+
+        await _millSequence
+            .TryOpenCsvAdvanceStampTargetAsync(poNumber, millNo, provisional, slitNo, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public async Task<int> AdvanceQuietShortAsync(
@@ -503,7 +580,7 @@ MERGE dbo.NDT_Csv_Fill_Hold AS t
 USING (SELECT @File AS Source_File_Name) AS s
 ON t.Source_File_Name = s.Source_File_Name
 WHEN MATCHED THEN
-    UPDATE SET PO_Number = @Po, Mill_No = @Mill, Pipe_Size = @Size, Reason_Code = @Reason, Held_AtUtc = SYSUTCDATETIME()
+    UPDATE SET PO_Number = @Po, Mill_No = @Mill, Pipe_Size = @Size, Reason_Code = @Reason
 WHEN NOT MATCHED THEN
     INSERT (Source_File_Name, PO_Number, Mill_No, Pipe_Size, Reason_Code)
     VALUES (@File, @Po, @Mill, @Size, @Reason);";
@@ -597,7 +674,7 @@ WHERE Bundle_No = @Batch;", conn, tx))
                 await using var reader = await find.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
                 if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                 {
-                    await tx.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                    // Dispose reader before tx ends — do not RollbackAsync with reader open.
                     return;
                 }
 

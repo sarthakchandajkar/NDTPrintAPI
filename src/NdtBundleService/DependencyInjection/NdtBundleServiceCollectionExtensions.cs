@@ -199,9 +199,7 @@ public static class NdtBundleServiceCollectionExtensions
 
         if (role.IsMonolith || role.IsMill)
         {
-            // Seed/guard Mill_Sequence before FillCutover (open Bundle_Accumulation EXISTS).
             services.AddHostedService<MillSequenceStartupGuard>();
-            services.AddHostedService<FillCutoverStartupCheck>();
             // Lease claim must complete before mill workers StartAsync (registration order = start order).
             services.AddHostedService<MillInstanceLeaseHostedService>();
         }

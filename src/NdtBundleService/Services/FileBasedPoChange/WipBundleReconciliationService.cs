@@ -121,6 +121,15 @@ public sealed class WipBundleReconciliationService : IWipBundleReconciliationSer
             return 0;
         }
 
+        // Already waiting for WIP after this same ended PO — do not re-run PO-end every 5 minutes.
+        if (_wipRunningPo.IsWaitingForNewWipAfterPoEnd(millNo)
+            && _wipRunningPo.TryGetPoEndWaitContext(millNo, out _, out var waitingEnded)
+            && !string.IsNullOrWhiteSpace(waitingEnded)
+            && InputSlitCsvParsing.PoEquals(waitingEnded, endedPo))
+        {
+            return 0;
+        }
+
         if (sqlEnabled)
         {
             if (await _bundleRepository.HasPrintedBundleForPoAsync(millNo, newPo, cancellationToken).ConfigureAwait(false))

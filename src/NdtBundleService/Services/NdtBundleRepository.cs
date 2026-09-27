@@ -290,11 +290,14 @@ END";
     {
         const string sql = @"
 INSERT INTO dbo.NDT_Bundle
-    (PO_Number, Mill_No, Bundle_No, Total_NDT_Pcs, Target_Ndt_Pcs, Csv_Filled, Csv_Fill_State, Context_Slit_No, Slit_Start_Time, Slit_Finish_Time, Rejected_P, NDT_Short_Length_Pipe, Rejected_Short_Length_Pipe, IsReprint, Print_Status, Print_Attempted_At, Print_Error)
+    (PO_Number, Mill_No, Bundle_No, Total_NDT_Pcs, Target_Ndt_Pcs, Csv_Filled, Csv_Fill_State, Context_Slit_No, Slit_Start_Time, Slit_Finish_Time, Rejected_P, NDT_Short_Length_Pipe, Rejected_Short_Length_Pipe, IsReprint, Print_Status, Print_Attempted_At, Print_Error, Close_Source)
 VALUES
-    (@PoNumber, @MillNo, @BundleNo, @TotalNdtPcs, @TotalNdtPcs, 0, N'PlcClosed', @SlitNo, @SlitStartTime, @SlitFinishTime, @RejectedPipes, @NdtShortLengthPipe, @RejectedShortLengthPipe, 0, 'Pending', SYSDATETIME(), NULL);";
+    (@PoNumber, @MillNo, @BundleNo, @TotalNdtPcs, @TotalNdtPcs, 0, N'PlcClosed', @SlitNo, @SlitStartTime, @SlitFinishTime, @RejectedPipes, @NdtShortLengthPipe, @RejectedShortLengthPipe, 0, 'Pending', SYSDATETIME(), NULL, @CloseSource);";
         await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn, tx);
         AddBundleUpsertParameters(cmd, record);
+        cmd.Parameters.AddWithValue(
+            "@CloseSource",
+            string.IsNullOrWhiteSpace(record.CloseSource) ? (object)DBNull.Value : record.CloseSource.Trim());
         await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -388,7 +391,8 @@ WHERE NDT_Batch_No = @BatchNo
 
     private static void AddBundleUpsertParameters(Microsoft.Data.SqlClient.SqlCommand cmd, NdtBundleRecord record)
     {
-        cmd.Parameters.AddWithValue("@PoNumber", record.PoNumber);
+        // Canonical PO so fill-stamp (@Po / @PoNormalized) is not load-bearing for new rows.
+        cmd.Parameters.AddWithValue("@PoNumber", InputSlitCsvParsing.NormalizePo(record.PoNumber));
         cmd.Parameters.AddWithValue("@MillNo", record.MillNo);
         cmd.Parameters.AddWithValue("@BundleNo", record.BundleNo);
         cmd.Parameters.AddWithValue("@TotalNdtPcs", record.TotalNdtPcs);
@@ -905,6 +909,7 @@ ORDER BY
 UPDATE dbo.NDT_Bundle
 SET Manual_Review = 1
 WHERE Mill_No = @MillNo
+  AND Manual_Review = 0
   AND (PO_Number = @Po OR PO_Number = @PoNormalized);";
             await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("@MillNo", millNo);
