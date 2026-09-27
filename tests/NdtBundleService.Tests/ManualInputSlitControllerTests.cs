@@ -59,7 +59,7 @@ public sealed class ManualInputSlitControllerTests : IDisposable
 
         Assert.IsType<OkObjectResult>(result);
 
-        var expectedName = "06_260927_1000060999";
+        var expectedName = "06_260927_1000060999.csv";
         var path = Path.Combine(_outputFolder, expectedName);
         Assert.True(File.Exists(path));
         var lines = await File.ReadAllLinesAsync(path);
@@ -106,7 +106,7 @@ public sealed class ManualInputSlitControllerTests : IDisposable
                 CancellationToken.None);
 
             Assert.Empty(Directory.GetFiles(inbox));
-            Assert.True(File.Exists(Path.Combine(_outputFolder, "03_260927_1000060888")));
+            Assert.True(File.Exists(Path.Combine(_outputFolder, "03_260927_1000060888.csv")));
         }
         finally
         {
@@ -211,7 +211,7 @@ public sealed class ManualInputSlitControllerTests : IDisposable
             CancellationToken.None);
 
         Assert.IsType<OkObjectResult>(result);
-        Assert.True(File.Exists(Path.Combine(_outputFolder, "2606106_06_260927_1000061839")));
+        Assert.True(File.Exists(Path.Combine(_outputFolder, "2606106_06_260927_1000061839.csv")));
     }
 
     [Fact]
@@ -237,10 +237,46 @@ public sealed class ManualInputSlitControllerTests : IDisposable
             CancellationToken.None);
 
         Assert.IsType<OkObjectResult>(result);
-        var path = Path.Combine(_outputFolder, "06_260927_1000061839");
+        var path = Path.Combine(_outputFolder, "06_260927_1000061839.csv");
         var lines = await File.ReadAllLinesAsync(path);
         Assert.Contains("27.09.2026 14:53:31", lines[1], StringComparison.Ordinal);
         Assert.Contains("27.09.2026 15:00:00", lines[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CreateManualFile_writes_same_csv_shape_as_ndt_input_slit_folder()
+    {
+        var sut = new InputSlitsController(
+            Options.Create(new NdtBundleOptions { OutputBundleFolder = _outputFolder }),
+            new CapturingTraceability(),
+            new NoOpSapStatus(),
+            NullLogger<InputSlitsController>.Instance);
+
+        var result = await sut.CreateManualFile(
+            new ManualInputSlitRequest
+            {
+                PoNumber = "1000061839",
+                MillNo = 1,
+                SlitNo = "06",
+                NdtPipes = 12,
+                RejectedPipes = 0,
+                NdtBatchNo = "1226100001",
+                SlitStartTime = "27.09.2026 14:53:31",
+                SlitFinishTime = "27.09.2026 15:10:00",
+                NdtShortLengthPipe = "",
+                RejectedShortLengthPipe = ""
+            },
+            CancellationToken.None);
+
+        Assert.IsType<OkObjectResult>(result);
+        var path = Path.Combine(_outputFolder, "06_260927_1000061839.csv");
+        Assert.EndsWith(".csv", path, StringComparison.OrdinalIgnoreCase);
+        var bytes = await File.ReadAllBytesAsync(path);
+        // Worker uses UTF-8 without BOM — Excel-openable CSV like plant NDT Input Slit files.
+        Assert.False(bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF);
+        var lines = await File.ReadAllLinesAsync(path);
+        Assert.Equal(BundleCloseCsv.Header, lines[0]);
+        Assert.Equal(InputSlitsController.ManualNdtOutputCsvHeader, lines[0]);
     }
 
     [Fact]
@@ -250,7 +286,7 @@ public sealed class ManualInputSlitControllerTests : IDisposable
             "06",
             new DateTime(2026, 9, 27, 14, 53, 31),
             "1000061839");
-        Assert.Equal("06_260927_1000061839", name);
+        Assert.Equal("06_260927_1000061839.csv", name);
     }
 
     private sealed class CapturingTraceability : ITraceabilityRepository

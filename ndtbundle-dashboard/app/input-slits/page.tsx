@@ -148,8 +148,8 @@ function previewManualFileName(slitNo: string, start: string, po: string): strin
   const s = slitNo.trim();
   const p = po.trim();
   const d = yyMmDdFromSapSlitDateTime(start);
-  if (!s || !p || !d) return "SlitNumber_YYMMDD_PONumber";
-  return `${s}_${d}_${p}`;
+  if (!s || !p || !d) return "SlitNumber_YYMMDD_PONumber.csv";
+  return `${s}_${d}_${p}.csv`;
 }
 
 function SapSlitDateTimeField({
@@ -408,8 +408,9 @@ export default function InputSlitsPage() {
             ), including <strong>NDT Batch No</strong>, and writes the matching{" "}
             <code className="text-xs">Output_Slit_Row</code> in SQL for SAP. Does{" "}
             <strong>not</strong> write to the SAP Input Slit inbox. File name is always{" "}
-            <code className="text-xs">SlitNumber_YYMMDD_PONumber</code> (YYMMDD from Slit Start
-            Time). Times must be <code className="text-xs">dd.MM.yyyy HH:mm:ss</code> (e.g.{" "}
+            <code className="text-xs">SlitNumber_YYMMDD_PONumber.csv</code> (YYMMDD from Slit Start
+            Time) — same CSV format Excel opens as other files in that folder. Times must be{" "}
+            <code className="text-xs">dd.MM.yyyy HH:mm:ss</code> (e.g.{" "}
             <code className="text-xs">27.09.2026 14:53:31</code>). For wrong printed totals, use{" "}
             <Link href="/reconcile" className="text-primary-700 hover:underline font-medium">
               Reconcile Bundle

@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
@@ -205,10 +204,10 @@ public sealed class InputSlitsController : ControllerBase
 
         try
         {
+            // Same write path as SlitMonitoringWorker NDT Input Slit outputs (CSV Excel opens).
             await System.IO.File.WriteAllLinesAsync(
                     path,
                     new[] { ManualNdtOutputCsvHeader, row },
-                    Encoding.UTF8,
                     cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -296,11 +295,14 @@ public sealed class InputSlitsController : ControllerBase
         });
     }
 
-    /// <summary>Builds <c>{SlitNo}_{yyMMdd}_{PO}</c> (no extension), matching SAP Input Slit naming.</summary>
+    /// <summary>
+    /// Builds <c>{SlitNo}_{yyMMdd}_{PO}.csv</c> — same CSV Excel format as
+    /// <see cref="SlitMonitoringWorker"/> files under OutputBundleFolder.
+    /// </summary>
     public static string BuildManualOutputFileName(string slitNo, DateTime slitStart, string poNumber)
     {
         var yyMMdd = slitStart.ToString("yyMMdd", CultureInfo.InvariantCulture);
-        return $"{slitNo.Trim()}_{yyMMdd}_{InputSlitCsvParsing.NormalizePo(poNumber)}";
+        return $"{slitNo.Trim()}_{yyMMdd}_{InputSlitCsvParsing.NormalizePo(poNumber)}.csv";
     }
 
     private static bool TryParseSapSlitDateTime(string? raw, out DateTime parsed, out string normalized)
