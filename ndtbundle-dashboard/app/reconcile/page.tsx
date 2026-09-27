@@ -1,7 +1,16 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { api, stationPrintFollowUp, type BundleMergePreview, type PpcCorrectionItem, type ReconcileBundle, type ReconcileSlitItem } from "@/lib/api";
+import {
+  api,
+  isBundleOvershoot,
+  stationPrintFollowUp,
+  type BundleMergePreview,
+  type PpcCorrectionItem,
+  type ReconcileBundle,
+  type ReconcileSlitItem,
+} from "@/lib/api";
+import Link from "next/link";
 import { DateRangeFilter } from "@/components/DateRangeFilter";
 import { MillFilter } from "@/components/MillFilter";
 import {
@@ -533,6 +542,7 @@ export default function ReconcilePage() {
   };
 
   const selectedBundle = bundles.find((b) => b.bundleNo === selectedBatchNo) ?? null;
+  const selectedIsOvershoot = isBundleOvershoot(selectedBundle);
   const computedTotal = slits.reduce((sum, s) => sum + (typeof s.ndtPipes === "number" ? s.ndtPipes : 0), 0);
   const reconcileModeLabel = reconcileEnabled ? "ON" : "OFF";
 
@@ -556,8 +566,13 @@ export default function ReconcilePage() {
         each mill is switched to FillToTarget.
       </p>
       <p className="text-gray-600 text-sm">
-        Correct a bundle&apos;s total pipe count and reprint its tag in one step — no slit rows required.
-        Use slit traceability below to view or edit individual slit rows on any bundle.
+        Primary tool when the printed tag count is wrong or pipes attached to the wrong batch. Correct the
+        plant count and reconcile — this updates SQL, reprints the tag, and updates CSV where applicable.
+        If the CSV never arrived (or arrived too early and still has no batch), use{" "}
+        <Link href="/input-slits" className="text-primary-700 hover:underline font-medium">
+          Manual Input Slit
+        </Link>{" "}
+        after the tag exists. Use slit traceability below to view or edit individual slit rows.
       </p>
 
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-4 max-w-3xl flex items-center justify-between">
@@ -809,6 +824,14 @@ export default function ReconcilePage() {
               </div>
             )}
 
+            {selectedIsOvershoot && (
+              <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+                <span className="font-semibold">Overshoot:</span> CSV stamped pipes exceed this tag total.
+                Reconcile slit counts below (or use Manual Reconcile). Inbox Input Slit files are updated on
+                disk; SAP-Accepted files update SQL only (Accepted file unchanged).
+              </div>
+            )}
+
             <button
               type="button"
               onClick={manualBundleReconcile}
@@ -902,11 +925,16 @@ export default function ReconcilePage() {
                         active ? "bg-primary-50 border-l-4 border-primary-500 pl-3" : ""
                       }`}
                     >
-                      <div className="font-semibold text-gray-900 flex items-center gap-2">
+                      <div className="font-semibold text-gray-900 flex items-center gap-2 flex-wrap">
                         <span>{b.bundleNo}</span>
                         {b.isForming ? (
                           <span className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-sky-100 text-sky-800">
                             Forming
+                          </span>
+                        ) : null}
+                        {isBundleOvershoot(b) ? (
+                          <span className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-red-100 text-red-800">
+                            Overshoot
                           </span>
                         ) : null}
                       </div>
@@ -916,6 +944,7 @@ export default function ReconcilePage() {
                         {!b.isForming && b.slitSum != null && b.totalNdtPcs != null && b.slitSum > b.totalNdtPcs
                           ? ` (slits ${b.slitSum})`
                           : ""}
+                        {isBundleOvershoot(b) ? ", OVERSHOOT" : ""}
                       </div>
                       <div className="text-xs text-gray-400 pt-0.5">
                         {formatDisplayDate(b.slitFinishTime || b.slitStartTime || b.printedAt)}

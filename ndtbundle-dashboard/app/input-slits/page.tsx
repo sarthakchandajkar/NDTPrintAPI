@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { api, type InputSlitFile, type InputSlitContent } from "@/lib/api";
 import { DateRangeFilter } from "@/components/DateRangeFilter";
@@ -93,6 +94,13 @@ function resolveSlitRowDate(
   return modified || null;
 }
 
+function datetimeLocalToIso(value: string): string | null {
+  const v = value.trim();
+  if (!v) return null;
+  // datetime-local is local wall time without offset; append :00 if seconds missing.
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(v) ? `${v}:00` : v;
+}
+
 export default function InputSlitsPage() {
   const [files, setFiles] = useState<InputSlitFile[]>([]);
   const [dateRange, setDateRange] = useState<DateRange>(EMPTY_DATE_RANGE);
@@ -100,6 +108,20 @@ export default function InputSlitsPage() {
   const [error, setError] = useState<string | null>(null);
   const [secondsUntilRefresh, setSecondsUntilRefresh] = useState(30);
   const [fileContents, setFileContents] = useState<Record<string, FileContentState>>({});
+
+  const [manualPo, setManualPo] = useState("");
+  const [manualMill, setManualMill] = useState(1);
+  const [manualSlitNo, setManualSlitNo] = useState("");
+  const [manualNdt, setManualNdt] = useState(0);
+  const [manualRejected, setManualRejected] = useState(0);
+  const [manualStart, setManualStart] = useState("");
+  const [manualFinish, setManualFinish] = useState("");
+  const [manualShort, setManualShort] = useState("");
+  const [manualRejShort, setManualRejShort] = useState("");
+  const [manualFileName, setManualFileName] = useState("");
+  const [manualBusy, setManualBusy] = useState(false);
+  const [manualError, setManualError] = useState<string | null>(null);
+  const [manualSuccess, setManualSuccess] = useState<string | null>(null);
 
   const refresh = async () => {
     setLoading(true);
@@ -113,6 +135,41 @@ export default function InputSlitsPage() {
     } finally {
       setLoading(false);
       setSecondsUntilRefresh(30);
+    }
+  };
+
+  const createManualInputSlit = async () => {
+    const po = manualPo.trim();
+    if (!po) {
+      setManualError("Please enter a PO Number.");
+      setManualSuccess(null);
+      return;
+    }
+    setManualBusy(true);
+    setManualError(null);
+    setManualSuccess(null);
+    try {
+      const res = await api.createManualInputSlit({
+        poNumber: po,
+        millNo: manualMill,
+        slitNo: manualSlitNo.trim() || undefined,
+        ndtPipes: manualNdt,
+        rejectedPipes: manualRejected,
+        slitStartTime: datetimeLocalToIso(manualStart),
+        slitFinishTime: datetimeLocalToIso(manualFinish),
+        ndtShortLengthPipe: manualShort.trim() || undefined,
+        rejectedShortLengthPipe: manualRejShort.trim() || undefined,
+        fileName: manualFileName.trim() || null,
+      });
+      const name = res.fileName ? ` (${res.fileName})` : "";
+      setManualSuccess(
+        (res.message ?? "Input Slit file created; it will be processed on the next poll.") + name
+      );
+      await refresh();
+    } catch (e) {
+      setManualError(e instanceof Error ? e.message : "Failed to create Input Slit CSV.");
+    } finally {
+      setManualBusy(false);
     }
   };
 
@@ -166,7 +223,7 @@ export default function InputSlitsPage() {
   }, [files]);
 
   const excelRows = useMemo(() => {
-    const out: Array<SlitRow & { _key: string; _fileModified?: string }> = [];
+    const out: Array<SlitRow & { _key: string; _fileModified?: string; _fileName: string }> = [];
     const fileNames = (files ?? [])
       .map((f) => (f.fileName ?? "").trim())
       .filter((x) => x.length > 0);
@@ -177,26 +234,30 @@ export default function InputSlitsPage() {
 
     for (const fileName of fileNames) {
       const st = fileContents[fileName];
-      if (!st || st.status !== "loaded") continue;
-      const c = st.content;
-      const rows = Array.isArray(c?.rows) ? c.rows : [];
-      const fileModified = fileModifiedByName.get(fileName);
-      for (let i = 0; i < rows.length; i++) {
-        const r = rows[i];
-        const mapped = mapToSlitRow(c, r);
-        const rowDate = resolveSlitRowDate(mapped, fileName, fileModified);
-        if (isDateRangeActive(dateRange) && !isInDateRange(rowDate, dateRange)) continue;
-        out.push({ _key: `${fileName}:${i}`, _fileModified: fileModified, ...mapped });
-      }
+      if (st?.status !== "loaded") continue;
+      const rows = st.content.rows ?? [];
+      rows.forEach((row, i) => {
+        const mapped = mapToSlitRow(st.content, row);
+        out.push({
+          ...mapped,
+          _key: `${fileName}:${i}`,
+          _fileName: fileName,
+          _fileModified: fileModifiedByName.get(fileName),
+        });
+      });
     }
-    return out;
+
+    if (!isDateRangeActive(dateRange)) return out;
+    return out.filter((r) => {
+      const d = resolveSlitRowDate(r, r._fileName, r._fileModified);
+      return isInDateRange(d, dateRange);
+    });
   }, [files, fileContents, dateRange]);
 
   const filesWithRowsInRange = useMemo(() => {
-    if (!isDateRangeActive(dateRange)) return files.length;
-    const names = new Set(excelRows.map((r) => r._key.split(":")[0]));
+    const names = new Set(excelRows.map((r) => r._fileName));
     return names.size;
-  }, [dateRange, excelRows, files.length]);
+  }, [excelRows]);
 
   return (
     <div className="space-y-6">
@@ -218,6 +279,138 @@ export default function InputSlitsPage() {
           {error}
         </div>
       )}
+
+      <section className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3 bg-primary-50 text-gray-900 font-semibold border-b border-gray-200">
+          Manual Input Slit row
+        </div>
+        <div className="p-5 space-y-4">
+          <p className="text-sm text-gray-600">
+            Use when a SAP Input Slit file was missed or arrived before the PLC printed a tag. After the
+            bundle tag exists, create this row so the service can stamp the correct batch on the next poll.
+            Do not invent a batch number here — stamp attaches to the open fill target automatically. For
+            wrong tag counts, use{" "}
+            <Link href="/reconcile" className="text-primary-700 hover:underline font-medium">
+              Reconcile Bundle
+            </Link>
+            .
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">PO Number</label>
+              <input
+                value={manualPo}
+                onChange={(e) => setManualPo(e.target.value)}
+                placeholder="e.g. 1000055673"
+                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Mill No</label>
+              <select
+                value={manualMill}
+                onChange={(e) => setManualMill(parseInt(e.target.value, 10) || 1)}
+                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
+              >
+                {[1, 2, 3, 4].map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Slit No</label>
+              <input
+                value={manualSlitNo}
+                onChange={(e) => setManualSlitNo(e.target.value)}
+                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">NDT Pipes</label>
+              <input
+                type="number"
+                min={0}
+                value={manualNdt}
+                onChange={(e) => setManualNdt(parseInt(e.target.value, 10) || 0)}
+                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Rejected P</label>
+              <input
+                type="number"
+                min={0}
+                value={manualRejected}
+                onChange={(e) => setManualRejected(parseInt(e.target.value, 10) || 0)}
+                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Slit Start Time (optional)</label>
+              <input
+                type="datetime-local"
+                value={manualStart}
+                onChange={(e) => setManualStart(e.target.value)}
+                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Slit Finish Time (optional)</label>
+              <input
+                type="datetime-local"
+                value={manualFinish}
+                onChange={(e) => setManualFinish(e.target.value)}
+                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">NDT Short Length Pipe</label>
+              <input
+                value={manualShort}
+                onChange={(e) => setManualShort(e.target.value)}
+                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Rejected Short Length Pipe</label>
+              <input
+                value={manualRejShort}
+                onChange={(e) => setManualRejShort(e.target.value)}
+                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
+              />
+            </div>
+            <div className="sm:col-span-2">
+              <label className="block text-sm font-medium text-gray-700 mb-1">File name (optional)</label>
+              <input
+                value={manualFileName}
+                onChange={(e) => setManualFileName(e.target.value)}
+                placeholder="Manual_01_….csv"
+                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
+              />
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => void createManualInputSlit()}
+            disabled={manualBusy}
+            className="px-4 py-2 bg-primary-600 text-white text-sm font-medium rounded-md hover:bg-primary-700 disabled:opacity-50 disabled:pointer-events-none"
+          >
+            {manualBusy ? "Creating…" : "Create Input Slit CSV"}
+          </button>
+          {manualError && (
+            <div className="rounded-md bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+              {manualError}
+            </div>
+          )}
+          {manualSuccess && (
+            <div className="rounded-md bg-green-50 border border-green-200 px-3 py-2 text-sm text-green-800">
+              {manualSuccess}
+            </div>
+          )}
+        </div>
+      </section>
 
       <DateRangeFilter
         value={dateRange}
@@ -247,29 +440,29 @@ export default function InputSlitsPage() {
           <p className="px-5 py-8 text-gray-500 text-sm">
             {isDateRangeActive(dateRange)
               ? "No rows in the selected date range (files may still be loading)."
-              : "No rows loaded yet (files may still be reading)."}
+              : "No rows loaded yet."}
           </p>
         ) : (
-          <div className="overflow-x-auto max-h-[70vh] overflow-y-auto">
+          <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200 text-sm">
-              <thead className="bg-gray-50 sticky top-0">
+              <thead className="bg-gray-50">
                 <tr>
                   {EXCEL_HEADERS.map((h) => (
                     <th
                       key={h.key}
-                      className="px-3 py-2 text-left font-medium text-gray-500 whitespace-nowrap"
+                      className="px-4 py-2 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider"
                     >
                       {h.label}
                     </th>
                   ))}
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-200">
-                {excelRows.map((r) => (
-                  <tr key={r._key} className="hover:bg-gray-50">
+              <tbody className="bg-white divide-y divide-gray-100">
+                {excelRows.map((row) => (
+                  <tr key={row._key} className="hover:bg-gray-50">
                     {EXCEL_HEADERS.map((h) => (
-                      <td key={h.key} className="px-3 py-2 text-gray-700 whitespace-nowrap">
-                        {r[h.key]}
+                      <td key={h.key} className="px-4 py-2 text-gray-800 whitespace-nowrap">
+                        {row[h.key] || "—"}
                       </td>
                     ))}
                   </tr>

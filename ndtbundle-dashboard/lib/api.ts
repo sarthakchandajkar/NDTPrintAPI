@@ -187,6 +187,19 @@ export interface ReconcileBundle {
   isForming?: boolean;
   /** Live sum from Output_Slit_Row when includeForming is set. */
   slitSum?: number | null;
+  /** True when stamped slit sum != printed/PLC total. */
+  countDiscrepancy?: boolean;
+  /** Fill state e.g. PlcClosed, CsvComplete, CsvOvershoot. */
+  csvFillState?: string | null;
+  csvFilled?: number;
+  targetNdtPcs?: number | null;
+}
+
+/** True when CSV stamped pipes exceed / disagree with the tag total (overshoot or discrepancy). */
+export function isBundleOvershoot(b: ReconcileBundle | null | undefined): boolean {
+  if (!b) return false;
+  if (b.countDiscrepancy) return true;
+  return (b.csvFillState ?? "").toLowerCase() === "csvovershoot";
 }
 
 export interface ReconcileSlitSourceFile {
@@ -286,6 +299,26 @@ export interface InputSlitContent {
   header?: string;
   headers?: string[];
   rows?: string[][];
+}
+
+export interface ManualInputSlitRequest {
+  poNumber: string;
+  millNo: number;
+  slitNo?: string;
+  ndtPipes: number;
+  rejectedPipes?: number;
+  slitStartTime?: string | null;
+  slitFinishTime?: string | null;
+  ndtShortLengthPipe?: string;
+  rejectedShortLengthPipe?: string;
+  fileName?: string | null;
+}
+
+export interface ManualInputSlitResult {
+  message?: string;
+  fileName?: string;
+  fullPath?: string;
+  folder?: string;
 }
 
 export interface PlcStatus {
@@ -640,6 +673,11 @@ export const api = {
     }),
   inputSlitFiles: () => fetchApi<InputSlitFile[]>("/api/InputSlits/files"),
   inputSlitContent: (fileName: string) => fetchApi<InputSlitContent>(`/api/InputSlits/files/${encodeURIComponent(fileName)}/content`),
+  createManualInputSlit: (body: ManualInputSlitRequest) =>
+    fetchApi<ManualInputSlitResult>("/api/InputSlits/manual", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   plcStatus: () => fetchApi<PlcStatus>("/api/Status/plc"),
   plcLive: () => fetchApi<PlcLiveResponse>("/api/Status/plc-live"),
   printerStatus: () => fetchApi<PrinterStatus>("/api/Status/printer"),

@@ -22,33 +22,33 @@ $ErrorActionPreference = 'Stop'
 
 $exePath = Join-Path $BasePath 'bin\NdtBundleService.exe'
 if (-not (Test-Path -LiteralPath $exePath)) {
-    throw "Publish output not found: $exePath — run dotnet publish first."
+    throw "Publish output not found: $exePath - run dotnet publish first."
 }
 
 $definitions = @(
     @{
         Name        = 'NdtBundleService-Shared'
-        DisplayName = 'NDT Bundle Service — Shared (Dashboard API)'
+        DisplayName = 'NDT Bundle Service - Shared (Dashboard API)'
         ContentRoot = Join-Path $BasePath 'instances\shared'
     },
     @{
         Name        = 'NdtBundleService-M1'
-        DisplayName = 'NDT Bundle Service — Mill 1'
+        DisplayName = 'NDT Bundle Service - Mill 1'
         ContentRoot = Join-Path $BasePath 'instances\mill-1'
     },
     @{
         Name        = 'NdtBundleService-M2'
-        DisplayName = 'NDT Bundle Service — Mill 2'
+        DisplayName = 'NDT Bundle Service - Mill 2'
         ContentRoot = Join-Path $BasePath 'instances\mill-2'
     },
     @{
         Name        = 'NdtBundleService-M3'
-        DisplayName = 'NDT Bundle Service — Mill 3'
+        DisplayName = 'NDT Bundle Service - Mill 3'
         ContentRoot = Join-Path $BasePath 'instances\mill-3'
     },
     @{
         Name        = 'NdtBundleService-M4'
-        DisplayName = 'NDT Bundle Service — Mill 4'
+        DisplayName = 'NDT Bundle Service - Mill 4'
         ContentRoot = Join-Path $BasePath 'instances\mill-4'
     }
 )
@@ -95,7 +95,7 @@ Services installed. Update / start order:
   5) Start-Service NdtBundleService-M1,M2,M3,M4
 
 Dashboard/API: http://*:5000 (Shared)
-Mill workers:  http://127.0.0.1:5001–5004 (localhost only — block from firewall)
+Mill workers:  http://127.0.0.1:5001-5004 (localhost only - block from firewall)
 
 Before production cutover: docs/VALIDATION-MILL1-NONPROD.md and docs/DEPLOYMENT-FIVE-INSTANCE.md
 "@
