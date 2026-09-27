@@ -304,16 +304,18 @@ export interface InputSlitContent {
 export interface ManualInputSlitRequest {
   poNumber: string;
   millNo: number;
-  slitNo?: string;
+  /** Required — SlitNumber segment of SlitNumber_YYMMDD_PONumber. */
+  slitNo: string;
   ndtPipes: number;
   rejectedPipes?: number;
-  slitStartTime?: string | null;
-  slitFinishTime?: string | null;
+  /** Required — exact `dd.MM.yyyy HH:mm:ss` (e.g. 27.09.2026 14:53:31). */
+  slitStartTime: string;
+  /** Required — exact `dd.MM.yyyy HH:mm:ss`. */
+  slitFinishTime: string;
   ndtShortLengthPipe?: string;
   rejectedShortLengthPipe?: string;
   /** Required — written to NDT Input Slit output CSV + Output_Slit_Row. */
   ndtBatchNo: string;
-  fileName?: string | null;
 }
 
 export interface ManualInputSlitResult {

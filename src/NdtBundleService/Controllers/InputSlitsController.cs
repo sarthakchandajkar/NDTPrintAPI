@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
@@ -22,6 +23,13 @@ public sealed class InputSlitsController : ControllerBase
     /// <summary>NDT Input Slit output header (inbox columns + NDT Batch No).</summary>
     public const string ManualNdtOutputCsvHeader =
         "PO Number,Slit No,NDT Pipes,Rejected P,Slit Start Time,Slit Finish Time,Mill No,NDT Short Length Pipe,Rejected Short Length Pipe,NDT Batch No";
+
+    /// <summary>Mandatory CSV wall-clock format for Slit Start / Finish Time.</summary>
+    public const string SapSlitDateTimeFormat = "dd.MM.yyyy HH:mm:ss";
+
+    private static readonly Regex SapSlitDateTimePattern = new(
+        @"^\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}:\d{2}$",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     private readonly NdtBundleOptions _options;
     private readonly ITraceabilityRepository _traceability;
@@ -114,8 +122,8 @@ public sealed class InputSlitsController : ControllerBase
 
     /// <summary>
     /// Create an NDT Input Slit <b>output</b> CSV in <see cref="NdtBundleOptions.OutputBundleFolder"/>
-    /// (e.g. <c>Z:\To SAP\TM\NDT\NDT Input Slit\Input Slit</c>) with <c>NDT Batch No</c>, and record
-    /// <c>Output_Slit_Row</c> (+ SAP Pending status when SQL is enabled). Does not write to the SAP inbox.
+    /// named <c>{SlitNo}_{yyMMdd}_{PO}</c>, with mandatory SAP times (<c>dd.MM.yyyy HH:mm:ss</c>),
+    /// and record <c>Output_Slit_Row</c> (+ SAP Pending when enabled). Does not write to the SAP inbox.
     /// </summary>
     [HttpPost("manual")]
     public async Task<IActionResult> CreateManualFile(
@@ -138,9 +146,28 @@ public sealed class InputSlitsController : ControllerBase
         if (request.RejectedPipes < 0)
             return BadRequest(new { Message = "Rejected P must be >= 0." });
 
+        var slitNo = (request.SlitNo ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(slitNo))
+            return BadRequest(new { Message = "Slit No is required (used in file name SlitNumber_YYMMDD_PONumber)." });
+
+        if (slitNo.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || slitNo.Contains('_', StringComparison.Ordinal))
+            return BadRequest(new { Message = "Slit No must be a single token with no underscores or invalid file characters." });
+
         var batchNo = (request.NdtBatchNo ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(batchNo))
             return BadRequest(new { Message = "NDT Batch No is required." });
+
+        if (!TryParseSapSlitDateTime(request.SlitStartTime, out var startParsed, out var startText))
+            return BadRequest(new
+            {
+                Message = $"Slit Start Time is required and must be exactly {SapSlitDateTimeFormat} (e.g. 27.09.2026 14:53:31)."
+            });
+
+        if (!TryParseSapSlitDateTime(request.SlitFinishTime, out var finishParsed, out var finishText))
+            return BadRequest(new
+            {
+                Message = $"Slit Finish Time is required and must be exactly {SapSlitDateTimeFormat} (e.g. 27.09.2026 14:53:31)."
+            });
 
         var folder = (_options.OutputBundleFolder ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(folder))
@@ -156,7 +183,7 @@ public sealed class InputSlitsController : ControllerBase
             return StatusCode(500, new { Message = "NDT Input Slit output folder is not writable." });
         }
 
-        var fileName = BuildManualOutputFileName(request.FileName, request.MillNo, po);
+        var fileName = BuildManualOutputFileName(slitNo, startParsed, po);
         if (fileName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
             return BadRequest(new { Message = "Invalid file name." });
 
@@ -164,15 +191,13 @@ public sealed class InputSlitsController : ControllerBase
         if (System.IO.File.Exists(path))
             return Conflict(new { Message = $"File already exists: {fileName}" });
 
-        var start = FormatOptionalDateTime(request.SlitStartTime);
-        var finish = FormatOptionalDateTime(request.SlitFinishTime);
         var row = string.Join(",",
             CsvEscape(po),
-            CsvEscape(request.SlitNo ?? string.Empty),
+            CsvEscape(slitNo),
             request.NdtPipes.ToString(CultureInfo.InvariantCulture),
             request.RejectedPipes.ToString(CultureInfo.InvariantCulture),
-            CsvEscape(start),
-            CsvEscape(finish),
+            CsvEscape(startText),
+            CsvEscape(finishText),
             request.MillNo.ToString(CultureInfo.InvariantCulture),
             CsvEscape(request.NdtShortLengthPipe ?? string.Empty),
             CsvEscape(request.RejectedShortLengthPipe ?? string.Empty),
@@ -196,11 +221,11 @@ public sealed class InputSlitsController : ControllerBase
         var record = new InputSlitRecord
         {
             PoNumber = po,
-            SlitNo = request.SlitNo ?? string.Empty,
+            SlitNo = slitNo,
             NdtPipes = request.NdtPipes,
             RejectedPipes = request.RejectedPipes,
-            SlitStartTime = request.SlitStartTime,
-            SlitFinishTime = request.SlitFinishTime,
+            SlitStartTime = startParsed,
+            SlitFinishTime = finishParsed,
             MillNo = request.MillNo,
             NdtShortLengthPipe = request.NdtShortLengthPipe ?? string.Empty,
             RejectedShortLengthPipe = request.RejectedShortLengthPipe ?? string.Empty
@@ -271,19 +296,52 @@ public sealed class InputSlitsController : ControllerBase
         });
     }
 
-    private static string BuildManualOutputFileName(string? requested, int millNo, string po)
+    /// <summary>Builds <c>{SlitNo}_{yyMMdd}_{PO}</c> (no extension), matching SAP Input Slit naming.</summary>
+    public static string BuildManualOutputFileName(string slitNo, DateTime slitStart, string poNumber)
     {
-        if (!string.IsNullOrWhiteSpace(requested))
-            return Path.GetFileName(requested.Trim());
-
-        var stamp = DateTime.Now.ToString("yyMMdd_HHmmss", CultureInfo.InvariantCulture);
-        return $"Manual_{millNo:D2}_{po}_{stamp}.csv";
+        var yyMMdd = slitStart.ToString("yyMMdd", CultureInfo.InvariantCulture);
+        return $"{slitNo.Trim()}_{yyMMdd}_{InputSlitCsvParsing.NormalizePo(poNumber)}";
     }
 
-    private static string FormatOptionalDateTime(DateTime? value) =>
-        value.HasValue
-            ? value.Value.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)
-            : string.Empty;
+    private static bool TryParseSapSlitDateTime(string? raw, out DateTime parsed, out string normalized)
+    {
+        parsed = default;
+        normalized = string.Empty;
+        var text = NormalizeSapSlitDateTimeInput(raw);
+        if (!SapSlitDateTimePattern.IsMatch(text))
+            return false;
+
+        if (!DateTime.TryParseExact(
+                text,
+                SapSlitDateTimeFormat,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out parsed))
+            return false;
+
+        // Re-format so CSV always gets the canonical string even if spacing differed after trim.
+        normalized = parsed.ToString(SapSlitDateTimeFormat, CultureInfo.InvariantCulture);
+        return true;
+    }
+
+    /// <summary>Strip quotes/NBSP and collapse whitespace so operators can paste SAP times directly.</summary>
+    private static string NormalizeSapSlitDateTimeInput(string? raw)
+    {
+        var text = (raw ?? string.Empty)
+            .Replace('\u00a0', ' ')
+            .Replace('\t', ' ')
+            .Replace('\r', ' ')
+            .Replace('\n', ' ')
+            .Trim();
+        if (text.Length >= 2 &&
+            ((text[0] == '"' && text[^1] == '"') || (text[0] == '\'' && text[^1] == '\'')))
+            text = text[1..^1].Trim();
+
+        while (text.Contains("  ", StringComparison.Ordinal))
+            text = text.Replace("  ", " ", StringComparison.Ordinal);
+
+        return text;
+    }
 
     private static string CsvEscape(string value)
     {
@@ -298,15 +356,16 @@ public sealed class ManualInputSlitRequest
 {
     public string? PoNumber { get; set; }
     public int MillNo { get; set; } = 1;
+    /// <summary>Required; used as the SlitNumber segment of <c>SlitNumber_YYMMDD_PONumber</c>.</summary>
     public string? SlitNo { get; set; }
     public int NdtPipes { get; set; }
     public int RejectedPipes { get; set; }
-    public DateTime? SlitStartTime { get; set; }
-    public DateTime? SlitFinishTime { get; set; }
+    /// <summary>Required SAP wall time: <c>dd.MM.yyyy HH:mm:ss</c> (e.g. <c>27.09.2026 14:53:31</c>).</summary>
+    public string? SlitStartTime { get; set; }
+    /// <summary>Required SAP wall time: <c>dd.MM.yyyy HH:mm:ss</c>.</summary>
+    public string? SlitFinishTime { get; set; }
     public string? NdtShortLengthPipe { get; set; }
     public string? RejectedShortLengthPipe { get; set; }
     /// <summary>Required NDT Batch No for the output CSV and <c>Output_Slit_Row</c>.</summary>
     public string? NdtBatchNo { get; set; }
-    /// <summary>Optional basename under OutputBundleFolder; default <c>Manual_{mill}_{po}_{yyMMdd_HHmmss}.csv</c>.</summary>
-    public string? FileName { get; set; }
 }

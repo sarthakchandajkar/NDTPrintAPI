@@ -94,11 +94,102 @@ function resolveSlitRowDate(
   return modified || null;
 }
 
-function datetimeLocalToIso(value: string): string | null {
-  const v = value.trim();
-  if (!v) return null;
-  // datetime-local is local wall time without offset; append :00 if seconds missing.
-  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(v) ? `${v}:00` : v;
+/** SAP slit wall-clock: dd.MM.yyyy HH:mm:ss (e.g. 27.09.2026 14:53:31). */
+const SAP_SLIT_DATETIME = /^(\d{2})\.(\d{2})\.(\d{4}) (\d{2}):(\d{2}):(\d{2})$/;
+
+/**
+ * Normalize a pasted/typed wall-clock value for SAP slit times.
+ * Keeps free typing; on paste strips quotes/NBSP and collapses whitespace so
+ * `27.09.2026 14:53:31` can be pasted directly from Excel/SAP.
+ */
+function normalizeSapSlitDateTimeInput(raw: string): string {
+  let s = (raw ?? "")
+    .replace(/\u00a0/g, " ")
+    .replace(/[\t\r\n]+/g, " ")
+    .trim();
+  if (
+    (s.startsWith('"') && s.endsWith('"')) ||
+    (s.startsWith("'") && s.endsWith("'"))
+  ) {
+    s = s.slice(1, -1).trim();
+  }
+  s = s.replace(/\s+/g, " ");
+  return s;
+}
+
+function isSapSlitDateTime(value: string): boolean {
+  const m = SAP_SLIT_DATETIME.exec(normalizeSapSlitDateTimeInput(value));
+  if (!m) return false;
+  const day = Number(m[1]);
+  const month = Number(m[2]);
+  const year = Number(m[3]);
+  const hour = Number(m[4]);
+  const min = Number(m[5]);
+  const sec = Number(m[6]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return false;
+  if (hour > 23 || min > 59 || sec > 59) return false;
+  const dt = new Date(year, month - 1, day, hour, min, sec);
+  return (
+    !Number.isNaN(dt.getTime()) &&
+    dt.getFullYear() === year &&
+    dt.getMonth() === month - 1 &&
+    dt.getDate() === day
+  );
+}
+
+/** YYMMDD from a validated SAP slit datetime string. */
+function yyMmDdFromSapSlitDateTime(value: string): string | null {
+  const m = SAP_SLIT_DATETIME.exec(normalizeSapSlitDateTimeInput(value));
+  if (!m) return null;
+  return `${m[3]!.slice(-2)}${m[2]}${m[1]}`;
+}
+
+function previewManualFileName(slitNo: string, start: string, po: string): string {
+  const s = slitNo.trim();
+  const p = po.trim();
+  const d = yyMmDdFromSapSlitDateTime(start);
+  if (!s || !p || !d) return "SlitNumber_YYMMDD_PONumber";
+  return `${s}_${d}_${p}`;
+}
+
+function SapSlitDateTimeField({
+  id,
+  label,
+  value,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  return (
+    <div>
+      <label htmlFor={id} className="block text-sm font-medium text-gray-700 mb-1">
+        {label}
+      </label>
+      <input
+        id={id}
+        type="text"
+        inputMode="text"
+        autoComplete="off"
+        spellCheck={false}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onPaste={(e) => {
+          const pasted = e.clipboardData.getData("text");
+          if (!pasted) return;
+          e.preventDefault();
+          onChange(normalizeSapSlitDateTimeInput(pasted));
+        }}
+        onBlur={() => onChange(normalizeSapSlitDateTimeInput(value))}
+        placeholder="27.09.2026 14:53:31"
+        title="Paste or type dd.MM.yyyy HH:mm:ss"
+        className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500 font-mono"
+      />
+      <p className="mt-1 text-xs text-gray-500">Paste dd.MM.yyyy HH:mm:ss directly</p>
+    </div>
+  );
 }
 
 export default function InputSlitsPage() {
@@ -119,10 +210,11 @@ export default function InputSlitsPage() {
   const [manualFinish, setManualFinish] = useState("");
   const [manualShort, setManualShort] = useState("");
   const [manualRejShort, setManualRejShort] = useState("");
-  const [manualFileName, setManualFileName] = useState("");
   const [manualBusy, setManualBusy] = useState(false);
   const [manualError, setManualError] = useState<string | null>(null);
   const [manualSuccess, setManualSuccess] = useState<string | null>(null);
+
+  const manualFilePreview = previewManualFileName(manualSlitNo, manualStart, manualPo);
 
   const refresh = async () => {
     setLoading(true);
@@ -142,13 +234,36 @@ export default function InputSlitsPage() {
   const createManualInputSlit = async () => {
     const po = manualPo.trim();
     const batch = manualBatchNo.trim();
+    const slitNo = manualSlitNo.trim();
+    const start = normalizeSapSlitDateTimeInput(manualStart);
+    const finish = normalizeSapSlitDateTimeInput(manualFinish);
     if (!po) {
       setManualError("Please enter a PO Number.");
       setManualSuccess(null);
       return;
     }
+    if (!slitNo) {
+      setManualError("Please enter a Slit No (used in file name SlitNumber_YYMMDD_PONumber).");
+      setManualSuccess(null);
+      return;
+    }
+    if (slitNo.includes("_")) {
+      setManualError("Slit No must not contain underscores.");
+      setManualSuccess(null);
+      return;
+    }
     if (!batch) {
       setManualError("Please enter an NDT Batch No.");
+      setManualSuccess(null);
+      return;
+    }
+    if (!isSapSlitDateTime(start)) {
+      setManualError("Slit Start Time is required in format 27.09.2026 14:53:31");
+      setManualSuccess(null);
+      return;
+    }
+    if (!isSapSlitDateTime(finish)) {
+      setManualError("Slit Finish Time is required in format 27.09.2026 14:53:31");
       setManualSuccess(null);
       return;
     }
@@ -159,15 +274,14 @@ export default function InputSlitsPage() {
       const res = await api.createManualInputSlit({
         poNumber: po,
         millNo: manualMill,
-        slitNo: manualSlitNo.trim() || undefined,
+        slitNo,
         ndtPipes: manualNdt,
         rejectedPipes: manualRejected,
         ndtBatchNo: batch,
-        slitStartTime: datetimeLocalToIso(manualStart),
-        slitFinishTime: datetimeLocalToIso(manualFinish),
+        slitStartTime: start,
+        slitFinishTime: finish,
         ndtShortLengthPipe: manualShort.trim() || undefined,
         rejectedShortLengthPipe: manualRejShort.trim() || undefined,
-        fileName: manualFileName.trim() || null,
       });
       const name = res.fileName ? ` (${res.fileName})` : "";
       const folder = res.folder ? ` in ${res.folder}` : "";
@@ -298,8 +412,10 @@ export default function InputSlitsPage() {
             <code className="text-xs">…\TM\NDT\NDT Input Slit\Input Slit</code>
             ), including <strong>NDT Batch No</strong>, and writes the matching{" "}
             <code className="text-xs">Output_Slit_Row</code> in SQL for SAP. Does{" "}
-            <strong>not</strong> write to the SAP Input Slit inbox. Use the file list below only as a
-            reference for missed SAP rows. For wrong printed totals, use{" "}
+            <strong>not</strong> write to the SAP Input Slit inbox. File name is always{" "}
+            <code className="text-xs">SlitNumber_YYMMDD_PONumber</code> (YYMMDD from Slit Start
+            Time). Times must be <code className="text-xs">dd.MM.yyyy HH:mm:ss</code> (e.g.{" "}
+            <code className="text-xs">27.09.2026 14:53:31</code>). For wrong printed totals, use{" "}
             <Link href="/reconcile" className="text-primary-700 hover:underline font-medium">
               Reconcile Bundle
             </Link>
@@ -343,6 +459,7 @@ export default function InputSlitsPage() {
               <input
                 value={manualSlitNo}
                 onChange={(e) => setManualSlitNo(e.target.value)}
+                placeholder="Required (file name segment)"
                 className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
               />
             </div>
@@ -366,24 +483,18 @@ export default function InputSlitsPage() {
                 className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
               />
             </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Slit Start Time (optional)</label>
-              <input
-                type="datetime-local"
-                value={manualStart}
-                onChange={(e) => setManualStart(e.target.value)}
-                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Slit Finish Time (optional)</label>
-              <input
-                type="datetime-local"
-                value={manualFinish}
-                onChange={(e) => setManualFinish(e.target.value)}
-                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
-              />
-            </div>
+            <SapSlitDateTimeField
+              id="manual-slit-start"
+              label="Slit Start Time"
+              value={manualStart}
+              onChange={setManualStart}
+            />
+            <SapSlitDateTimeField
+              id="manual-slit-finish"
+              label="Slit Finish Time"
+              value={manualFinish}
+              onChange={setManualFinish}
+            />
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">NDT Short Length Pipe</label>
               <input
@@ -400,16 +511,14 @@ export default function InputSlitsPage() {
                 className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
               />
             </div>
-            <div className="sm:col-span-2">
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Output file name (optional)
-              </label>
-              <input
-                value={manualFileName}
-                onChange={(e) => setManualFileName(e.target.value)}
-                placeholder="Manual_01_….csv (written under NDT Input Slit output)"
-                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
-              />
+            <div className="sm:col-span-2 lg:col-span-4">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Output file name</label>
+              <p className="w-full border border-gray-200 bg-gray-50 rounded-md px-3 py-2 text-sm font-mono text-gray-800">
+                {manualFilePreview}
+              </p>
+              <p className="mt-1 text-xs text-gray-500">
+                Built automatically from Slit No + Slit Start Time (YYMMDD) + PO Number. Not editable.
+              </p>
             </div>
           </div>
           <button

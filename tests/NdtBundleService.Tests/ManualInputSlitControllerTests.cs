@@ -33,7 +33,7 @@ public sealed class ManualInputSlitControllerTests : IDisposable
     }
 
     [Fact]
-    public async Task CreateManualFile_writes_ndt_output_csv_with_batch_column()
+    public async Task CreateManualFile_writes_ndt_output_csv_with_batch_column_and_sap_times()
     {
         var trace = new CapturingTraceability();
         var sap = new NoOpSapStatus();
@@ -48,22 +48,26 @@ public sealed class ManualInputSlitControllerTests : IDisposable
             {
                 PoNumber = "1000060999",
                 MillNo = 1,
-                SlitNo = "S1",
+                SlitNo = "06",
                 NdtPipes = 12,
                 RejectedPipes = 0,
                 NdtBatchNo = "BND-1000060999-01",
-                FileName = "manual_test_row.csv"
+                SlitStartTime = "27.09.2026 14:53:31",
+                SlitFinishTime = "27.09.2026 15:10:00"
             },
             CancellationToken.None);
 
         Assert.IsType<OkObjectResult>(result);
 
-        var path = Path.Combine(_outputFolder, "manual_test_row.csv");
+        var expectedName = "06_260927_1000060999";
+        var path = Path.Combine(_outputFolder, expectedName);
         Assert.True(File.Exists(path));
         var lines = await File.ReadAllLinesAsync(path);
         Assert.Equal(InputSlitsController.ManualNdtOutputCsvHeader, lines[0]);
         Assert.Contains("1000060999", lines[1], StringComparison.Ordinal);
         Assert.Contains("BND-1000060999-01", lines[1], StringComparison.Ordinal);
+        Assert.Contains("27.09.2026 14:53:31", lines[1], StringComparison.Ordinal);
+        Assert.Contains("27.09.2026 15:10:00", lines[1], StringComparison.Ordinal);
         Assert.Contains(",12,", lines[1], StringComparison.Ordinal);
         Assert.Single(trace.Calls);
         Assert.Equal(path, trace.Calls[0].SourceFile);
@@ -93,14 +97,16 @@ public sealed class ManualInputSlitControllerTests : IDisposable
                 {
                     PoNumber = "1000060888",
                     MillNo = 2,
+                    SlitNo = "03",
                     NdtPipes = 5,
                     NdtBatchNo = "BATCH-A",
-                    FileName = "only_in_ndt_out.csv"
+                    SlitStartTime = "27.09.2026 10:00:00",
+                    SlitFinishTime = "27.09.2026 10:05:00"
                 },
                 CancellationToken.None);
 
             Assert.Empty(Directory.GetFiles(inbox));
-            Assert.True(File.Exists(Path.Combine(_outputFolder, "only_in_ndt_out.csv")));
+            Assert.True(File.Exists(Path.Combine(_outputFolder, "03_260927_1000060888")));
         }
         finally
         {
@@ -118,7 +124,40 @@ public sealed class ManualInputSlitControllerTests : IDisposable
             NullLogger<InputSlitsController>.Instance);
 
         var result = await sut.CreateManualFile(
-            new ManualInputSlitRequest { PoNumber = "1", MillNo = 1, NdtPipes = 1 },
+            new ManualInputSlitRequest
+            {
+                PoNumber = "1",
+                MillNo = 1,
+                SlitNo = "01",
+                NdtPipes = 1,
+                SlitStartTime = "27.09.2026 14:53:31",
+                SlitFinishTime = "27.09.2026 14:54:00"
+            },
+            CancellationToken.None);
+
+        Assert.IsType<BadRequestObjectResult>(result);
+    }
+
+    [Fact]
+    public async Task CreateManualFile_rejects_invalid_time_format()
+    {
+        var sut = new InputSlitsController(
+            Options.Create(new NdtBundleOptions { OutputBundleFolder = _outputFolder }),
+            new CapturingTraceability(),
+            new NoOpSapStatus(),
+            NullLogger<InputSlitsController>.Instance);
+
+        var result = await sut.CreateManualFile(
+            new ManualInputSlitRequest
+            {
+                PoNumber = "1",
+                MillNo = 1,
+                SlitNo = "01",
+                NdtPipes = 1,
+                NdtBatchNo = "B1",
+                SlitStartTime = "2026-09-27 14:53:31",
+                SlitFinishTime = "27.09.2026 14:54:00"
+            },
             CancellationToken.None);
 
         Assert.IsType<BadRequestObjectResult>(result);
@@ -134,10 +173,58 @@ public sealed class ManualInputSlitControllerTests : IDisposable
             NullLogger<InputSlitsController>.Instance);
 
         var result = await sut.CreateManualFile(
-            new ManualInputSlitRequest { PoNumber = "1", MillNo = 9, NdtPipes = 1, NdtBatchNo = "B1" },
+            new ManualInputSlitRequest
+            {
+                PoNumber = "1",
+                MillNo = 9,
+                SlitNo = "01",
+                NdtPipes = 1,
+                NdtBatchNo = "B1",
+                SlitStartTime = "27.09.2026 14:53:31",
+                SlitFinishTime = "27.09.2026 14:54:00"
+            },
             CancellationToken.None);
 
         Assert.IsType<BadRequestObjectResult>(result);
+    }
+
+    [Fact]
+    public async Task CreateManualFile_accepts_pasted_time_with_extra_whitespace()
+    {
+        var sut = new InputSlitsController(
+            Options.Create(new NdtBundleOptions { OutputBundleFolder = _outputFolder }),
+            new CapturingTraceability(),
+            new NoOpSapStatus(),
+            NullLogger<InputSlitsController>.Instance);
+
+        var result = await sut.CreateManualFile(
+            new ManualInputSlitRequest
+            {
+                PoNumber = "1000061839",
+                MillNo = 1,
+                SlitNo = "06",
+                NdtPipes = 1,
+                NdtBatchNo = "1226100001",
+                SlitStartTime = "  \"27.09.2026  14:53:31\"  ",
+                SlitFinishTime = "27.09.2026\t15:00:00\r\n"
+            },
+            CancellationToken.None);
+
+        Assert.IsType<OkObjectResult>(result);
+        var path = Path.Combine(_outputFolder, "06_260927_1000061839");
+        var lines = await File.ReadAllLinesAsync(path);
+        Assert.Contains("27.09.2026 14:53:31", lines[1], StringComparison.Ordinal);
+        Assert.Contains("27.09.2026 15:00:00", lines[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildManualOutputFileName_is_slit_yymmdd_po()
+    {
+        var name = InputSlitsController.BuildManualOutputFileName(
+            "06",
+            new DateTime(2026, 9, 27, 14, 53, 31),
+            "1000061839");
+        Assert.Equal("06_260927_1000061839", name);
     }
 
     private sealed class CapturingTraceability : ITraceabilityRepository

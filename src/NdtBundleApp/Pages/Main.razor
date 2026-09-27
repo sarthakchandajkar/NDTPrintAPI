@@ -93,11 +93,11 @@
     </div>
 
     <div class="card">
-        <h3>Manual Input Slit row</h3>
+        <h3>Manual NDT Input Slit output</h3>
         <p class="text-muted">
-            Use when a SAP Input Slit file was missed or arrived before the PLC printed a tag.
-            After the bundle tag exists, create this row so the service can stamp the correct batch on the next poll.
-            Do not invent a batch number here — stamp attaches to the open fill target automatically.
+            Creates a CSV in the NDT Input Slit output folder with NDT Batch No and records Output_Slit_Row.
+            File name is always SlitNumber_YYMMDD_PONumber (YYMMDD from Slit Start Time).
+            Times must be dd.MM.yyyy HH:mm:ss (e.g. 27.09.2026 14:53:31). Does not write to the SAP inbox.
         </p>
         <div class="form-row">
             <div class="form-group">
@@ -113,11 +113,15 @@
                     <option value="4">4</option>
                 </select>
             </div>
+            <div class="form-group">
+                <label for="manualBatchNo">NDT Batch No</label>
+                <input id="manualBatchNo" type="text" @bind="manualBatchNo" placeholder="Required" />
+            </div>
         </div>
         <div class="form-row">
             <div class="form-group">
                 <label for="manualSlitNo">Slit No</label>
-                <input id="manualSlitNo" type="text" @bind="manualSlitNo" />
+                <input id="manualSlitNo" type="text" @bind="manualSlitNo" placeholder="Required (file name segment)" />
             </div>
             <div class="form-group">
                 <label for="manualNdt">NDT Pipes</label>
@@ -130,12 +134,18 @@
         </div>
         <div class="form-row">
             <div class="form-group">
-                <label for="manualStart">Slit Start Time (optional)</label>
-                <input id="manualStart" type="datetime-local" @bind="manualStart" />
+                <label for="manualStart">Slit Start Time</label>
+                <input id="manualStart" type="text" @bind="manualStart" @bind:event="oninput"
+                       placeholder="27.09.2026 14:53:31" autocomplete="off" spellcheck="false"
+                       title="Paste or type dd.MM.yyyy HH:mm:ss" />
+                <span class="text-muted" style="font-size:0.8rem;">Paste dd.MM.yyyy HH:mm:ss directly</span>
             </div>
             <div class="form-group">
-                <label for="manualFinish">Slit Finish Time (optional)</label>
-                <input id="manualFinish" type="datetime-local" @bind="manualFinish" />
+                <label for="manualFinish">Slit Finish Time</label>
+                <input id="manualFinish" type="text" @bind="manualFinish" @bind:event="oninput"
+                       placeholder="27.09.2026 14:53:31" autocomplete="off" spellcheck="false"
+                       title="Paste or type dd.MM.yyyy HH:mm:ss" />
+                <span class="text-muted" style="font-size:0.8rem;">Paste dd.MM.yyyy HH:mm:ss directly</span>
             </div>
         </div>
         <div class="form-row">
@@ -148,12 +158,8 @@
                 <input id="manualRejShort" type="text" @bind="manualRejShort" />
             </div>
         </div>
-        <div class="form-group">
-            <label for="manualFileName">File name (optional)</label>
-            <input id="manualFileName" type="text" @bind="manualFileName" placeholder="Manual_01_….csv" />
-        </div>
         <button class="btn btn-primary" @onclick="CreateManualInputSlit" disabled="@isBusy">
-            Create Input Slit CSV
+            Create NDT Input Slit CSV
         </button>
         <div class="status @(manualError ? "error" : "")" style="margin-top: 0.5rem;">@manualStatus</div>
     </div>
@@ -221,11 +227,11 @@
     private string manualSlitNo = "";
     private int manualNdt;
     private int manualRejected;
-    private DateTime? manualStart;
-    private DateTime? manualFinish;
+    private string manualBatchNo = "";
+    private string manualStart = "";
+    private string manualFinish = "";
     private string manualShort = "";
     private string manualRejShort = "";
-    private string manualFileName = "";
     private string manualStatus = "";
     private bool manualError;
 
@@ -261,16 +267,38 @@
     private async Task CreateManualInputSlit()
     {
         var po = manualPo?.Trim() ?? "";
+        var batch = manualBatchNo?.Trim() ?? "";
+        var slitNo = manualSlitNo?.Trim() ?? "";
+        var start = manualStart?.Trim() ?? "";
+        var finish = manualFinish?.Trim() ?? "";
         if (string.IsNullOrEmpty(po))
         {
             manualStatus = "Please enter a PO Number.";
             manualError = true;
             return;
         }
+        if (string.IsNullOrEmpty(slitNo))
+        {
+            manualStatus = "Please enter a Slit No.";
+            manualError = true;
+            return;
+        }
+        if (string.IsNullOrEmpty(batch))
+        {
+            manualStatus = "Please enter an NDT Batch No.";
+            manualError = true;
+            return;
+        }
+        if (string.IsNullOrEmpty(start) || string.IsNullOrEmpty(finish))
+        {
+            manualStatus = "Slit Start and Finish Time are required (dd.MM.yyyy HH:mm:ss).";
+            manualError = true;
+            return;
+        }
 
         isBusy = true;
         manualError = false;
-        manualStatus = "Creating Input Slit CSV…";
+        manualStatus = "Creating NDT Input Slit CSV…";
 
         try
         {
@@ -279,14 +307,14 @@
             {
                 PoNumber = po,
                 MillNo = manualMill,
-                SlitNo = manualSlitNo,
+                SlitNo = slitNo,
                 NdtPipes = manualNdt,
                 RejectedPipes = manualRejected,
-                SlitStartTime = manualStart,
-                SlitFinishTime = manualFinish,
+                SlitStartTime = start,
+                SlitFinishTime = finish,
                 NdtShortLengthPipe = manualShort,
                 RejectedShortLengthPipe = manualRejShort,
-                FileName = string.IsNullOrWhiteSpace(manualFileName) ? null : manualFileName
+                NdtBatchNo = batch
             };
             var response = await Http.PostAsJsonAsync(url, body);
             var text = await response.Content.ReadAsStringAsync();
