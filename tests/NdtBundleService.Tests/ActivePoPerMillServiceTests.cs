@@ -114,29 +114,68 @@ public sealed class ActivePoPerMillServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task GetLatestPoByMillAsync_PrefersInboxOverAcceptedSameBasename()
+    public async Task GetLatestPoByMillAsync_IgnoresAcceptedFolder_UsesInboxOnly()
     {
         var inbox = Path.Combine(_tempDir, "inbox");
         var accepted = Path.Combine(_tempDir, "accepted");
         Directory.CreateDirectory(inbox);
         Directory.CreateDirectory(accepted);
 
-        var name = "same_name.csv";
-        await File.WriteAllTextAsync(Path.Combine(accepted, name),
+        // Accepted-only file must not be scanned (UNC Accepted hangs Shared Summary).
+        await File.WriteAllTextAsync(Path.Combine(accepted, "accepted_only.csv"),
             "PO Number,Mill No,NDT Pipes\n" +
             "1000000001,1,5\n");
-        // Make Accepted look newer so write-time merge would wrongly prefer it.
-        File.SetLastWriteTimeUtc(Path.Combine(accepted, name), DateTime.UtcNow.AddMinutes(5));
 
-        await File.WriteAllTextAsync(Path.Combine(inbox, name),
+        await File.WriteAllTextAsync(Path.Combine(inbox, "inbox.csv"),
             "PO Number,Mill No,NDT Pipes\n" +
-            "1000000999,1,5\n");
-        File.SetLastWriteTimeUtc(Path.Combine(inbox, name), DateTime.UtcNow.AddMinutes(-5));
+            "1000000999,2,5\n");
 
         var service = CreateService(inbox, acceptedFolder: accepted);
         var result = await service.GetLatestPoByMillAsync(CancellationToken.None);
 
-        Assert.Equal("1000000999", result[1]);
+        Assert.False(result.ContainsKey(1));
+        Assert.Equal("1000000999", result[2]);
+    }
+
+    [Fact]
+    public async Task GetLatestPoByMillAsync_SkipsSlitScanWhenMillPublishedCoversAllMills()
+    {
+        var accepted = Path.Combine(_tempDir, "accepted-huge");
+        Directory.CreateDirectory(accepted);
+        // Would hang/scan if ActivePo still enumerated Accepted before SQL Running_Po.
+        await File.WriteAllTextAsync(Path.Combine(accepted, "noise.csv"),
+            "PO Number,Mill No,NDT Pipes\n1000000001,1,5\n");
+
+        var store = new InMemoryMillInstanceStatusStore();
+        for (var mill = 1; mill <= 4; mill++)
+        {
+            store.Upsert(
+                new PlcHandshakeMillStatus
+                {
+                    MillNo = mill,
+                    MillName = $"Mill-{mill}",
+                    RunningPoNumber = $"100000000{mill}",
+                    WaitingForNewWip = false,
+                    RunningPoSource = "Wip",
+                    RunningPoUpdatedAtUtc = DateTimeOffset.UtcNow,
+                    LastUpdateUtc = DateTimeOffset.UtcNow
+                },
+                Guid.NewGuid(),
+                "vm",
+                $"Mill-{mill}");
+        }
+
+        var service = CreateService(
+            Path.Combine(_tempDir, "empty-inbox"),
+            acceptedFolder: accepted,
+            useSql: true,
+            millStatus: store);
+        Directory.CreateDirectory(Path.Combine(_tempDir, "empty-inbox"));
+
+        var result = await service.GetLatestPoByMillAsync(CancellationToken.None);
+        Assert.Equal(4, result.Count);
+        Assert.Equal("1000000001", result[1]);
+        Assert.Equal("1000000004", result[4]);
     }
 
     [Fact]

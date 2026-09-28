@@ -33,17 +33,45 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
         var inbox = _options.InputSlitFolder?.Trim();
         if (!string.IsNullOrEmpty(inbox))
             list.Add(inbox);
-        var accepted = _options.InputSlitAcceptedFolder?.Trim();
-        if (!string.IsNullOrEmpty(accepted))
-            list.Add(accepted);
+        // Accepted is not used for ActivePo / Summary PO resolution (UNC archive hangs Shared).
         return list;
     }
 
     /// <inheritdoc />
     public async Task<IReadOnlyDictionary<int, string>> GetLatestPoByMillAsync(CancellationToken cancellationToken)
     {
-        var result = await BuildSlitPoMapAsync(cancellationToken).ConfigureAwait(false);
-        OverlayMillPublishedRunningPo(result);
+        // Prefer mill-published Running_Po from SQL first so Shared dashboard does not wait on a
+        // UNC scan of Input Slit Accepted (that archive often hangs / times out Next.js → "Internal Server Error").
+        var result = new Dictionary<int, string>();
+        var waitingMills = OverlayMillPublishedRunningPo(result);
+
+        var needSlitFallback = false;
+        for (var mill = 1; mill <= 4; mill++)
+        {
+            if (waitingMills.Contains(mill))
+                continue;
+            if (!result.ContainsKey(mill))
+            {
+                needSlitFallback = true;
+                break;
+            }
+        }
+
+        if (needSlitFallback)
+        {
+            var fromSlit = await BuildSlitPoMapAsync(cancellationToken).ConfigureAwait(false);
+            foreach (var kv in fromSlit)
+            {
+                if (waitingMills.Contains(kv.Key))
+                    continue;
+                if (!result.ContainsKey(kv.Key))
+                    result[kv.Key] = kv.Value;
+            }
+
+            // Re-apply so fresh Running_Po / Waiting still beat any slit fill.
+            OverlayMillPublishedRunningPo(result);
+        }
+
         return await MergeRunningPoFromWipAsync(result, cancellationToken).ConfigureAwait(false);
     }
 
@@ -89,11 +117,13 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
     /// <summary>
     /// Shared dashboard: prefer each mill's published <c>Running_Po</c> / waiting flag from
     /// <c>Mill_Instance_Status</c> (fresh telemetry only) over slit CSV / SQL.
+    /// Returns mill numbers currently WaitingForNewWip so callers do not refill them from slit files.
     /// </summary>
-    private void OverlayMillPublishedRunningPo(Dictionary<int, string> result)
+    private HashSet<int> OverlayMillPublishedRunningPo(Dictionary<int, string> result)
     {
+        var waiting = new HashSet<int>();
         if (!UseDatabaseForSummary)
-            return;
+            return waiting;
 
         try
         {
@@ -107,6 +137,7 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
 
                 if (row.WaitingForNewWip)
                 {
+                    waiting.Add(row.MillNo);
                     result.Remove(row.MillNo);
                     continue;
                 }
@@ -119,6 +150,8 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
         {
             _logger.LogWarning(ex, "Failed to overlay mill-published Running_Po from Mill_Instance_Status.");
         }
+
+        return waiting;
     }
 
     /// <summary>
@@ -155,9 +188,14 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
         var minUtc = SourceFileEligibility.ParseMinUtc(_options);
         const int maxFilesToScan = 300;
 
-        // Inbox ∪ Accepted by basename; inbox wins so live SAP drops beat archived Accepted copies.
+        // Live inbox only. Do not enumerate Input Slit Accepted — that archive is large on UNC and
+        // blocked Shared Summary polls (Next.js rewrite → plain "Internal Server Error").
+        var inbox = (_options.InputSlitFolder ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(inbox) || !Directory.Exists(inbox))
+            return result;
+
         var files = InputSlitInboxEnumeration
-            .EnumerateInboxPreferOverAccepted(_options.InputSlitFolder, _options.InputSlitAcceptedFolder)
+            .EnumerateFiles(inbox)
             .Select(p => new FileInfo(p))
             .Where(fi => SourceFileEligibility.IncludeFileUtc(fi.LastWriteTimeUtc, minUtc))
             .ToList();
@@ -330,8 +368,13 @@ WHERE rn = 1;";
     private List<string> GetEligibleInputSlitCsvFilesOrdered()
     {
         var minUtc = SourceFileEligibility.ParseMinUtc(_options);
+        var inbox = (_options.InputSlitFolder ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(inbox) || !Directory.Exists(inbox))
+            return new List<string>();
+
+        // Inbox only — same reason as GetLatestPoPerMillFromLatestFilesAsync (Accepted UNC hangs).
         return InputSlitInboxEnumeration
-            .EnumerateInboxPreferOverAccepted(_options.InputSlitFolder, _options.InputSlitAcceptedFolder)
+            .EnumerateFiles(inbox)
             .Where(f => SourceFileEligibility.IncludeFileUtc(File.GetLastWriteTimeUtc(f), minUtc))
             .Select(f => new FileInfo(f))
             .OrderBy(f => f.LastWriteTimeUtc)

@@ -30,7 +30,7 @@ export async function fetchApi<T>(path: string, options?: RequestInit): Promise<
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
     throw new Error(
-      `Cannot reach API at ${url || path} (${reason}). Is NdtBundleService running on port 5000?`
+      `Cannot reach API at ${url || path} (${reason}). Is NdtBundleService-Shared running on port 5000?`
     );
   }
 
@@ -38,41 +38,63 @@ export async function fetchApi<T>(path: string, options?: RequestInit): Promise<
   if (!res.ok) {
     if (!text.trim()) {
       throw new Error(
-        `API ${res.status} from ${path}: empty response. Is NdtBundleService running on port 5000?`
+        `API ${res.status} from ${path}: empty response. Is NdtBundleService-Shared running on port 5000?`
       );
     }
-    try {
-      const json = JSON.parse(text) as {
-        message?: string;
-        Message?: string;
-        error?: string;
-        Error?: string;
-        detail?: string;
-        Detail?: string;
-      };
-      const msg = json.message ?? json.Message ?? `API ${res.status}`;
-      const err = json.error ?? json.Error;
-      const detail = json.detail ?? json.Detail;
-      const parts = [msg, err, detail].filter(Boolean);
+    const parsed = tryParseApiErrorJson(text);
+    if (parsed) {
+      const parts = [parsed.message, parsed.error, parsed.detail].filter(Boolean);
       throw new Error(parts.join(" — "));
-    } catch (e) {
-      if (e instanceof Error && e.message !== text && !e.message.startsWith("API ")) throw e;
-      throw new Error(`API ${res.status}: ${text}`);
     }
+    const snippet = text.slice(0, 120).replace(/\s+/g, " ").trim();
+    if (/^Internal Server Error$/i.test(snippet) || res.status === 502 || res.status === 504) {
+      throw new Error(
+        `API ${res.status} from ${path}: backend timed out or is overloaded (Shared /api). Retry shortly.`
+      );
+    }
+    throw new Error(`API ${res.status} from ${path}: ${snippet}`);
   }
 
   if (!text.trim()) {
     throw new Error(
-      `API ${path} returned an empty body. Is NdtBundleService running and reachable via Next rewrite to port 5000?`
+      `API ${path} returned an empty body. Is NdtBundleService-Shared running and reachable via Next rewrite to port 5000?`
     );
   }
 
   try {
     return JSON.parse(text) as T;
   } catch {
-    throw new Error(
-      `API ${path} returned non-JSON (starts with: ${text.slice(0, 80).replace(/\s+/g, " ")}).`
-    );
+    const snippet = text.slice(0, 80).replace(/\s+/g, " ");
+    if (/Internal Server Error/i.test(snippet)) {
+      throw new Error(
+        `API ${path}: proxy returned Internal Server Error (Shared timed out). Not a JSON payload.`
+      );
+    }
+    throw new Error(`API ${path} returned non-JSON (starts with: ${snippet}).`);
+  }
+}
+
+function tryParseApiErrorJson(text: string): {
+  message?: string;
+  error?: string;
+  detail?: string;
+} | null {
+  try {
+    const json = JSON.parse(text) as {
+      message?: string;
+      Message?: string;
+      error?: string;
+      Error?: string;
+      detail?: string;
+      Detail?: string;
+    };
+    return {
+      message: json.message ?? json.Message ?? `API error`,
+      error: json.error ?? json.Error,
+      detail: json.detail ?? json.Detail,
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -114,14 +136,6 @@ export interface WipByMillsResponse {
   mills?: WipByMillRow[];
   sourcePath?: string;
   liveMillNdt?: LiveMillNdtPayload;
-}
-
-/** GET /api/Test/live-mill-ndt — lightweight poll; millNo 0 uses MillSlitLive.ApplyToMillNo on the server. */
-export interface LiveMillNdtPollResponse {
-  millNo?: number;
-  ndtCount?: number | null;
-  liveMillConfigured?: number;
-  message?: string;
 }
 
 export interface PoEndPending {
@@ -583,8 +597,6 @@ export interface UploadBundleGenerationResponse {
 export const api = {
   wipInfo: () => fetchApi<WipInfo>("/api/Test/wip-info"),
   wipByMills: () => fetchApi<WipByMillsResponse>("/api/Test/wip-by-mills"),
-  liveMillNdt: (millNo = 0) =>
-    fetchApi<LiveMillNdtPollResponse>(`/api/Test/live-mill-ndt?millNo=${encodeURIComponent(String(millNo))}`),
   ndtSummary: (poNumber: string, millNo: number) =>
     fetchApi<NdtSummary>(`/api/Test/ndt-summary?poNumber=${encodeURIComponent(poNumber)}&millNo=${millNo}`),
   ndtSummaryRunningPo: () => fetchApi<RunningPoNdtSummary[]>("/api/Test/ndt-summary-running-po"),

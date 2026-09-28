@@ -20,28 +20,9 @@ function parseMillNo(row: WipByMillRow): number {
   return Number.NaN;
 }
 
-/** Live PLC counts per mill (handshake API or plc-server Socket.IO). */
-type PlcLiveByMill = Record<
-  number,
-  {
-    ndtCount: number | null;
-    okCount: number | null;
-    nokCount: number | null;
-    lineRunning: boolean | null;
-    connected: boolean;
-    accumulatedValue: number | null;
-    thresholdValue: number | null;
-    hooterActive: boolean;
-  }
->;
-
-/** API-backed live NDT (MillSlitLive.ApplyToMillNo) when socket unavailable. */
-type LiveNdtState = { millNo: number; count: number | null };
-
 export default function SummaryPage() {
   const [millRows, setMillRows] = useState<MillRowState[]>([]);
   const plcLive = usePlcCountsByMill();
-  const [liveNdt, setLiveNdt] = useState<LiveNdtState | null>(null);
   const [sourcePath, setSourcePath] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -68,20 +49,9 @@ export default function SummaryPage() {
 
       setMillRows(withNdt);
       setZplEnabled(typeof zplStatus?.enabled === "boolean" ? zplStatus.enabled : null);
-
-      const lm = byMills.liveMillNdt;
-      if (lm && typeof lm.millNo === "number" && lm.millNo >= 1 && lm.millNo <= 4) {
-        const c = lm.ndtCount;
-        setLiveNdt({
-          millNo: lm.millNo,
-          count:
-            typeof c === "number" && Number.isFinite(c) ? Math.trunc(c) : null,
-        });
-      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
-      setMillRows([]);
-      setSourcePath(null);
+      // Keep last good millRows so a transient Shared timeout does not blank the Summary page.
     } finally {
       setLoading(false);
       setSecondsUntilRefresh(30);
@@ -90,33 +60,6 @@ export default function SummaryPage() {
 
   useEffect(() => {
     refresh();
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const r = await api.liveMillNdt(0);
-        if (cancelled) return;
-        const m =
-          typeof r.millNo === "number" && r.millNo >= 1 && r.millNo <= 4 ? r.millNo : null;
-        if (m == null) return;
-        const c = r.ndtCount;
-        setLiveNdt({
-          millNo: m,
-          count:
-            typeof c === "number" && Number.isFinite(c) ? Math.trunc(c) : null,
-        });
-      } catch {
-        // ignore transient API errors during poll
-      }
-    };
-    void tick();
-    const id = setInterval(() => void tick(), 2500);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
   }, []);
 
   useEffect(() => {
@@ -278,17 +221,7 @@ export default function SummaryPage() {
                   const plc = Number.isFinite(parsedMillNo) ? plcLive[parsedMillNo] : undefined;
                   const displayOk = plc?.okCount != null ? plc.okCount : "—";
                   const displayNok = plc?.nokCount != null ? plc.nokCount : "—";
-                  let displayNdt: number | string = "—";
-                  if (plc?.ndtCount != null) {
-                    displayNdt = plc.ndtCount;
-                  } else if (
-                    liveNdt != null &&
-                    Number.isFinite(parsedMillNo) &&
-                    parsedMillNo === liveNdt.millNo &&
-                    liveNdt.count != null
-                  ) {
-                    displayNdt = liveNdt.count;
-                  }
+                  const displayNdt = plc?.ndtCount != null ? plc.ndtCount : "—";
                   return (
                     <tr key={Number.isFinite(parsedMillNo) ? `mill-${parsedMillNo}` : `mill-${String(m)}`} className="hover:bg-gray-50">
                       <td className="px-4 py-3 font-semibold text-gray-900 whitespace-nowrap">
