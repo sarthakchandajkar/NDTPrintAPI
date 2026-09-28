@@ -21,13 +21,33 @@ public sealed class MillInstanceStatusTests
             Connected = true,
             PlcConnectionEnabled = true,
             NdtCount = 80,
-            LastUpdateUtc = now.AddSeconds(-6)
+            LastUpdateUtc = now.AddSeconds(-31)
         };
 
         var applied = MillInstanceStatusFreshness.Apply(row, now);
         Assert.False(applied.Connected);
         Assert.Equal(80, applied.NdtCount);
         Assert.Contains("stale", applied.LastError, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Fresh_row_within_stale_window_stays_connected()
+    {
+        var now = new DateTimeOffset(2026, 9, 22, 18, 0, 0, TimeSpan.Zero);
+        var row = new PlcHandshakeMillStatus
+        {
+            MillNo = 1,
+            MillName = "Mill-1",
+            Connected = true,
+            PlcConnectionEnabled = true,
+            NdtCount = 80,
+            LastUpdateUtc = now.AddSeconds(-6)
+        };
+
+        var applied = MillInstanceStatusFreshness.Apply(row, now);
+        Assert.True(applied.Connected);
+        Assert.Equal(80, applied.NdtCount);
+        Assert.True(string.IsNullOrWhiteSpace(applied.LastError));
     }
 
     [Fact]

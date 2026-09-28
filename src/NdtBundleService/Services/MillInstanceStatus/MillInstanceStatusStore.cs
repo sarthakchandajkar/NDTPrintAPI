@@ -19,8 +19,12 @@ public interface IMillInstanceStatusStore
 
 public static class MillInstanceStatusFreshness
 {
-    /// <summary>UI treats a mill as down if its instance stopped publishing (not used for bundle close).</summary>
-    public static readonly TimeSpan StaleAfter = TimeSpan.FromSeconds(5);
+    /// <summary>
+    /// UI treats a mill as down if its instance stopped publishing (not used for bundle close).
+    /// Kept well above the publisher interval (~0.5–2s) plus occasional SQL/WIP hiccups so
+    /// Shared does not flicker Connected when the PLC is still healthy.
+    /// </summary>
+    public static readonly TimeSpan StaleAfter = TimeSpan.FromSeconds(30);
 
     public static PlcHandshakeMillStatus Apply(PlcHandshakeMillStatus status, DateTimeOffset utcNow)
     {
