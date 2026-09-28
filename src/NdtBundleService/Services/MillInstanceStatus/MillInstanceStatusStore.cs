@@ -20,21 +20,43 @@ public interface IMillInstanceStatusStore
 public static class MillInstanceStatusFreshness
 {
     /// <summary>
-    /// UI treats a mill as down if its instance stopped publishing (not used for bundle close).
-    /// Kept well above the publisher interval (~0.5–2s) plus occasional SQL/WIP hiccups so
-    /// Shared does not flicker Connected when the PLC is still healthy.
+    /// Soft stale: annotate that telemetry is delayed but keep last known Connected/counts so the
+    /// dashboard does not flicker offline when SQL publish briefly lags.
     /// </summary>
-    public static readonly TimeSpan StaleAfter = TimeSpan.FromSeconds(30);
+    public static readonly TimeSpan SoftStaleAfter = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Hard stale: treat the mill as disconnected (instance likely stopped publishing).
+    /// </summary>
+    public static readonly TimeSpan HardStaleAfter = TimeSpan.FromSeconds(120);
+
+    /// <summary>Backward-compatible alias for <see cref="SoftStaleAfter"/> (ActivePo freshness, etc.).</summary>
+    public static readonly TimeSpan StaleAfter = SoftStaleAfter;
 
     public static PlcHandshakeMillStatus Apply(PlcHandshakeMillStatus status, DateTimeOffset utcNow)
     {
-        if (status.LastUpdateUtc + StaleAfter >= utcNow)
+        var age = utcNow - status.LastUpdateUtc;
+        if (age <= SoftStaleAfter)
             return status;
 
         var copy = MillInstanceStatusMapper.Clone(status);
-        copy.Connected = false;
-        if (string.IsNullOrWhiteSpace(copy.LastError))
-            copy.LastError = "mill telemetry stale (instance not publishing)";
+        if (age > HardStaleAfter)
+        {
+            copy.Connected = false;
+            if (string.IsNullOrWhiteSpace(copy.LastError)
+                || copy.LastError.Contains("stale", StringComparison.OrdinalIgnoreCase)
+                || copy.LastError.Contains("telemetry delayed", StringComparison.OrdinalIgnoreCase))
+            {
+                copy.LastError = "mill telemetry stale (instance not publishing)";
+            }
+        }
+        else
+        {
+            // Soft window: keep last known Connected / counts; only note the delay.
+            if (string.IsNullOrWhiteSpace(copy.LastError))
+                copy.LastError = "mill telemetry delayed (publish lag)";
+        }
+
         return copy;
     }
 

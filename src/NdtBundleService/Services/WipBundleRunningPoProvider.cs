@@ -48,6 +48,7 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
     private FileSystemWatcher? _watchAccepted;
     private FileSystemWatcher? _watchFgBundle;
     private FileSystemWatcher? _watchFgAccepted;
+    private Timer? _periodicRescanTimer;
 
     public WipBundleRunningPoProvider(
         IOptions<NdtBundleOptions> options,
@@ -63,6 +64,22 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
         _fileBasedPoChangeQueue = fileBasedPoChangeQueue;
 
         TryStartWatchers();
+        // UNC FileSystemWatcher is unreliable — keep a slow background rescan off the publish path.
+        _periodicRescanTimer = new Timer(
+            _ =>
+            {
+                try
+                {
+                    MaybeRescan(DateTime.UtcNow);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Periodic WIP rescan failed.");
+                }
+            },
+            null,
+            dueTime: TimeSpan.FromSeconds(15),
+            period: TimeSpan.FromSeconds(15));
     }
 
     private bool IsFileBasedPoEndForMill(int millNo) =>
@@ -76,8 +93,9 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
         if (millNo is < 1 or > 4)
             return Task.FromResult<string?>(null);
 
-        MaybeRescan(DateTime.UtcNow);
-
+        // Never MaybeRescan here. Disk/UNC WIP scans must not block callers such as
+        // Mill_Instance_Status publish (otherwise Shared marks the mill offline).
+        // Rescans run from FileSystemWatcher events and the periodic timer.
         lock (_lock)
         {
             var st = _mills[millNo - 1];
@@ -248,6 +266,8 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
 
     public void Dispose()
     {
+        try { _periodicRescanTimer?.Dispose(); } catch { /* ignore */ }
+        _periodicRescanTimer = null;
         try { _watchBundle?.Dispose(); } catch { /* ignore */ }
         try { _watchAccepted?.Dispose(); } catch { /* ignore */ }
         try { _watchFgBundle?.Dispose(); } catch { /* ignore */ }

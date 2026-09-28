@@ -11,7 +11,7 @@ namespace NdtBundleService.Tests;
 public sealed class MillInstanceStatusTests
 {
     [Fact]
-    public void Stale_row_is_reported_disconnected_without_clearing_counts()
+    public void Soft_stale_keeps_connected_and_counts()
     {
         var now = new DateTimeOffset(2026, 9, 22, 18, 0, 0, TimeSpan.Zero);
         var row = new PlcHandshakeMillStatus
@@ -21,7 +21,27 @@ public sealed class MillInstanceStatusTests
             Connected = true,
             PlcConnectionEnabled = true,
             NdtCount = 80,
-            LastUpdateUtc = now.AddSeconds(-31)
+            LastUpdateUtc = now.AddSeconds(-45)
+        };
+
+        var applied = MillInstanceStatusFreshness.Apply(row, now);
+        Assert.True(applied.Connected);
+        Assert.Equal(80, applied.NdtCount);
+        Assert.Contains("delayed", applied.LastError, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Hard_stale_row_is_reported_disconnected_without_clearing_counts()
+    {
+        var now = new DateTimeOffset(2026, 9, 22, 18, 0, 0, TimeSpan.Zero);
+        var row = new PlcHandshakeMillStatus
+        {
+            MillNo = 1,
+            MillName = "Mill-1",
+            Connected = true,
+            PlcConnectionEnabled = true,
+            NdtCount = 80,
+            LastUpdateUtc = now.AddSeconds(-121)
         };
 
         var applied = MillInstanceStatusFreshness.Apply(row, now);
