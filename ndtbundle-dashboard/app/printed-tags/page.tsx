@@ -18,6 +18,9 @@ export default function PrintedTagsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [secondsUntilRefresh, setSecondsUntilRefresh] = useState(30);
+  const [reprintingBatchNo, setReprintingBatchNo] = useState<string | null>(null);
+  const [reprintMessage, setReprintMessage] = useState<string | null>(null);
+  const [reprintError, setReprintError] = useState<string | null>(null);
 
   const filteredBundles = useMemo(() => {
     const byMill = filterBundlesByMill(bundles, millFilter);
@@ -36,6 +39,42 @@ export default function PrintedTagsPage() {
     } finally {
       setLoading(false);
       setSecondsUntilRefresh(30);
+    }
+  };
+
+  const reprintTag = async (bundle: ReconcileBundle) => {
+    const batchNo = bundle.bundleNo?.trim();
+    if (!batchNo) {
+      setReprintError("Bundle has no NDT Batch No.");
+      return;
+    }
+    if (bundle.isForming) {
+      setReprintError(`Bundle ${batchNo} is still forming and has no printed tag yet.`);
+      return;
+    }
+    if (
+      !window.confirm(
+        `Reprint tag for ${batchNo} (${bundle.totalNdtPcs ?? "?"} pcs)?\n\nThe label will include the Reprint marker.`
+      )
+    ) {
+      return;
+    }
+
+    setReprintingBatchNo(batchNo);
+    setReprintError(null);
+    setReprintMessage(null);
+    try {
+      const res = await api.printReconciledBundle(batchNo);
+      setReprintMessage(
+        res.message ??
+          `Reprint sent for ${res.ndtBatchNo ?? batchNo}${
+            res.ndtPcs != null ? ` (${res.ndtPcs} pcs)` : ""
+          }.`
+      );
+    } catch (e) {
+      setReprintError(e instanceof Error ? e.message : `Failed to reprint ${batchNo}.`);
+    } finally {
+      setReprintingBatchNo(null);
     }
   };
 
@@ -74,6 +113,18 @@ export default function PrintedTagsPage() {
       {error && (
         <div className="rounded-md bg-red-50 border border-red-200 p-4 text-red-700 text-sm">
           {error}
+        </div>
+      )}
+
+      {reprintError && (
+        <div className="rounded-md bg-red-50 border border-red-200 p-4 text-red-700 text-sm">
+          {reprintError}
+        </div>
+      )}
+
+      {reprintMessage && (
+        <div className="rounded-md bg-green-50 border border-green-200 p-4 text-green-800 text-sm">
+          {reprintMessage}
         </div>
       )}
 
@@ -123,21 +174,42 @@ export default function PrintedTagsPage() {
                   <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">Slit No</th>
                   <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">Slit finish</th>
                   <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">NDT Pipes</th>
+                  <th className="px-5 py-2 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
-                {filteredBundles.map((b) => (
-                  <tr key={b.bundleNo} className="hover:bg-gray-50">
-                    <td className="px-5 py-2 text-sm font-medium text-gray-900">{b.bundleNo}</td>
-                    <td className="px-5 py-2 text-sm text-gray-700">{b.poNumber}</td>
-                    <td className="px-5 py-2 text-sm text-gray-700">{b.millNo}</td>
-                    <td className="px-5 py-2 text-sm text-gray-700">{b.slitNo}</td>
-                    <td className="px-5 py-2 text-sm text-gray-700 whitespace-nowrap">
-                      {formatDisplayDate(b.slitFinishTime || b.slitStartTime || b.printedAt)}
-                    </td>
-                    <td className="px-5 py-2 text-sm text-gray-700">{b.totalNdtPcs}</td>
-                  </tr>
-                ))}
+                {filteredBundles.map((b) => {
+                  const batchNo = b.bundleNo?.trim() ?? "";
+                  const canReprint = Boolean(batchNo) && !b.isForming;
+                  const isReprinting = reprintingBatchNo === batchNo;
+                  return (
+                    <tr key={b.bundleNo} className="hover:bg-gray-50">
+                      <td className="px-5 py-2 text-sm font-medium text-gray-900">{b.bundleNo}</td>
+                      <td className="px-5 py-2 text-sm text-gray-700">{b.poNumber}</td>
+                      <td className="px-5 py-2 text-sm text-gray-700">{b.millNo}</td>
+                      <td className="px-5 py-2 text-sm text-gray-700">{b.slitNo}</td>
+                      <td className="px-5 py-2 text-sm text-gray-700 whitespace-nowrap">
+                        {formatDisplayDate(b.slitFinishTime || b.slitStartTime || b.printedAt)}
+                      </td>
+                      <td className="px-5 py-2 text-sm text-gray-700">{b.totalNdtPcs}</td>
+                      <td className="px-5 py-2 text-sm text-right whitespace-nowrap">
+                        <button
+                          type="button"
+                          onClick={() => void reprintTag(b)}
+                          disabled={!canReprint || reprintingBatchNo != null}
+                          title={
+                            b.isForming
+                              ? "Still forming — no printed tag yet"
+                              : "Reprint ZPL tag with Reprint marker"
+                          }
+                          className="px-3 py-1.5 rounded-md border border-violet-300 bg-violet-50 text-violet-900 text-xs font-medium hover:bg-violet-100 disabled:opacity-50 disabled:pointer-events-none"
+                        >
+                          {isReprinting ? "Reprint…" : "Reprint"}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
