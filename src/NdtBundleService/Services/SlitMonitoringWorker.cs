@@ -136,6 +136,9 @@ public sealed class SlitMonitoringWorker : BackgroundService
         {
             try
             {
+                // Durable claims first — does not require the file to still be in Input Slit.
+                await ProcessPendingInputSlitClaimsAsync(stoppingToken).ConfigureAwait(false);
+
                 await ProcessNewSlitFilesAsync(stoppingToken).ConfigureAwait(false);
 
                 if (ShouldRunPeriodicBackfillReconcile(_optionsMonitor.CurrentValue))
@@ -997,6 +1000,16 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     }
                     else if (ShouldApplyPlcFileRetryBackoff(o, rows))
                     {
+                        // Claim into SQL so stamp/output survives the inbox file moving to Accepted.
+                        await ClaimAwaitingInputSlitPendingAsync(
+                                fileFull,
+                                lwUtc,
+                                inputRowsForSql,
+                                wipByPo,
+                                pipeSizeByPo,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+
                         var (delay, shouldLog, step) = _fileRetryTracker.Park(
                             fileFull,
                             DateTime.UtcNow,
@@ -1007,7 +1020,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                             if (step == 0)
                             {
                                 _logger.LogWarning(
-                                    "Awaiting open fill target for {File}; no NDT Input Slit output yet. Retry backoff {DelaySeconds}s (tag print / Manual Input Slit).",
+                                    "Awaiting open fill target for {File}; claimed to Input_Slit_Pending (survives Accepted move). Retry backoff {DelaySeconds}s (tag print / Manual Input Slit).",
                                     Path.GetFileName(fileFull),
                                     (int)delay.TotalSeconds);
                             }
@@ -1133,6 +1146,27 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     _fileRetryTracker.Clear(fileFull);
                     _inputSlitLastHandledWriteUtc[fileFull] = File.GetLastWriteTimeUtc(fileFull);
                     _backfillCandidatePaths.Remove(fileFull);
+
+                    // Inbox path won the race — complete any durable claim so ProcessPending does not re-emit.
+                    var primaryBatch = outputRowsForSql
+                        .Where(r => !string.IsNullOrWhiteSpace(r.NdtBatchNo))
+                        .Select(r => r.NdtBatchNo)
+                        .FirstOrDefault() ?? string.Empty;
+                    foreach (var millNo in outputRowsForSql
+                                 .Select(r => r.Record.MillNo)
+                                 .Where(m => m > 0)
+                                 .Distinct())
+                    {
+                        await _traceability
+                            .TryCompleteInputSlitPendingByKeyAsync(
+                                Path.GetFileName(fileFull),
+                                lwUtc,
+                                millNo,
+                                primaryBatch,
+                                outputPath,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                    }
                 }
             }
             catch (Exception ex)
@@ -1445,6 +1479,247 @@ public sealed class SlitMonitoringWorker : BackgroundService
             .ConfigureAwait(false);
         return OutputSlitSapStatusPolicy.DecideIngestGate(
             statuses.TryGetValue(outputFileName, out var status) ? status : null);
+    }
+
+    /// <summary>
+    /// Persists awaiting fill-target rows so stamp + NDT CSV emit no longer depend on the inbox file path.
+    /// </summary>
+    private async Task ClaimAwaitingInputSlitPendingAsync(
+        string fileFull,
+        DateTime lwUtc,
+        IReadOnlyList<(InputSlitRecord Record, int SourceRowNumber)> inputRowsForSql,
+        IReadOnlyDictionary<string, PoPlanWipRow> wipByPo,
+        IReadOnlyDictionary<string, string> pipeSizeByPo,
+        CancellationToken cancellationToken)
+    {
+        if (inputRowsForSql.Count == 0)
+            return;
+
+        foreach (var millGroup in inputRowsForSql.GroupBy(r => r.Record.MillNo).Where(g => g.Key > 0))
+        {
+            var claimRows = millGroup
+                .Select(r =>
+                {
+                    var (_, pipeSize) = ResolvePipeInfoForPo(r.Record.PoNumber, wipByPo, pipeSizeByPo);
+                    return (r.Record, r.SourceRowNumber, (string?)pipeSize);
+                })
+                .ToList();
+
+            await _traceability
+                .UpsertInputSlitPendingAsync(fileFull, lwUtc, millGroup.Key, claimRows, cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Processes <c>Input_Slit_Pending</c> AwaitingTarget claims: stamp when a fill target exists,
+    /// write <c>Output_Slit_Row</c>, then generate the NDT Input Slit CSV from SQL-shaped rows.
+    /// Independent of whether the source file is still in Input Slit or has moved to Accepted.
+    /// </summary>
+    private async Task ProcessPendingInputSlitClaimsAsync(CancellationToken cancellationToken)
+    {
+        var o = _optionsMonitor.CurrentValue;
+        if (!SqlTraceabilityConnection.IsSqlEnabled(o))
+            return;
+
+        var mills = GetFileSeenMillNos(o);
+        if (mills.Count == 0)
+            return;
+
+        var claims = await _traceability
+            .ListAwaitingInputSlitPendingAsync(mills, cancellationToken)
+            .ConfigureAwait(false);
+        if (claims.Count == 0)
+            return;
+
+        var outputFolder = (o.OutputBundleFolder ?? string.Empty).Trim();
+
+        foreach (var claim in claims)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (claim.Rows.Count == 0)
+                continue;
+
+            try
+            {
+                var outputRows =
+                    new List<(InputSlitRecord Record, string NdtBatchNo, int SourceRowNumber, bool LinkBundleParent)>();
+                string? lastBatch = null;
+
+                foreach (var row in claim.Rows)
+                {
+                    var record = row.Record;
+                    if (record.NdtPipes <= 0)
+                    {
+                        outputRows.Add((record, string.Empty, row.SourceRowNumber, linkBundleParent: false));
+                        continue;
+                    }
+
+                    var sticky = await _traceability
+                        .TryGetExistingOutputSlitBatchAsync(
+                            claim.SourceFileName,
+                            record.PoNumber,
+                            record.MillNo > 0 ? record.MillNo : claim.MillNo,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    if (!string.IsNullOrWhiteSpace(sticky))
+                    {
+                        lastBatch = sticky;
+                        outputRows.Add((record, sticky, row.SourceRowNumber, linkBundleParent: true));
+                        continue;
+                    }
+
+                    var millNo = record.MillNo > 0 ? record.MillNo : claim.MillNo;
+                    var bundleLock = await _millBundleStateLock
+                        .AcquireAsync(millNo, cancellationToken)
+                        .ConfigureAwait(false);
+                    using (bundleLock)
+                    {
+                        var assign = await _fillAssigner
+                            .AssignAsync(
+                                claim.SourceFileClaimed ?? claim.SourceFileName,
+                                record.PoNumber,
+                                millNo,
+                                row.PipeSize,
+                                Math.Max(0, record.NdtPipes),
+                                holdWhenNoOpenBundle: false,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+
+                        if (string.IsNullOrWhiteSpace(assign.BatchNo))
+                        {
+                            // Still no target — leave claim AwaitingTarget for next poll.
+                            outputRows.Clear();
+                            lastBatch = null;
+                            break;
+                        }
+
+                        lastBatch = assign.BatchNo;
+                        outputRows.Add((record, assign.BatchNo, row.SourceRowNumber, linkBundleParent: true));
+                    }
+                }
+
+                if (outputRows.Count == 0 || string.IsNullOrWhiteSpace(lastBatch))
+                    continue;
+
+                if (outputRows.Any(r => r.LinkBundleParent && string.IsNullOrWhiteSpace(r.NdtBatchNo)))
+                    continue;
+
+                string? outputPath = null;
+                if (!string.IsNullOrWhiteSpace(outputFolder))
+                {
+                    Directory.CreateDirectory(outputFolder);
+                    outputPath = Path.Combine(outputFolder, claim.SourceFileName);
+                    var gate = await GetSapIngestGateAsync(claim.SourceFileName, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (gate == OutputSlitIngestGate.None)
+                    {
+                        var lines = NdtInputSlitOutputCsv.BuildLines(
+                            outputRows.Select(r => (r.Record, r.NdtBatchNo)));
+                        await File.WriteAllLinesAsync(outputPath, lines, cancellationToken).ConfigureAwait(false);
+                        _logger.LogInformation(
+                            "Wrote NDT Input Slit CSV from pending claim {File} batch {Batch}: {Path}",
+                            claim.SourceFileName,
+                            lastBatch,
+                            outputPath);
+                        await SeedSapStatusPendingAsync(outputPath, cancellationToken).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        _logger.LogWarning(
+                            "Pending claim {File}: SAP ingest gate {Gate} — skipping CSV re-emit; still completing SQL.",
+                            claim.SourceFileName,
+                            gate);
+                    }
+                }
+
+                var sourceForSql = outputPath
+                    ?? claim.SourceFileClaimed
+                    ?? claim.SourceFileName;
+                var inputRows = claim.Rows
+                    .Select(r => (r.Record, r.SourceRowNumber))
+                    .ToList();
+                await _traceability
+                    .RecordInputSlitRowsAsync(
+                        sourceForSql,
+                        inputRows,
+                        cancellationToken,
+                        claim.SourceLastWriteTimeUtc)
+                    .ConfigureAwait(false);
+
+                var gateForSql = await GetSapIngestGateAsync(claim.SourceFileName, cancellationToken)
+                    .ConfigureAwait(false);
+                if (gateForSql == OutputSlitIngestGate.None)
+                {
+                    await _traceability
+                        .RecordOutputSlitRowsAsync(sourceForSql, outputRows, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
+                foreach (var batchNo in outputRows
+                             .Where(r => r.LinkBundleParent && !string.IsNullOrWhiteSpace(r.NdtBatchNo))
+                             .Select(r => r.NdtBatchNo)
+                             .Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        if (await _bundleRepository
+                                .IsManualReconLockedAsync(batchNo, cancellationToken)
+                                .ConfigureAwait(false))
+                        {
+                            await _bundleRepository
+                                .TryUpdatePostReconCsvSumAsync(batchNo, cancellationToken)
+                                .ConfigureAwait(false);
+                            continue;
+                        }
+
+                        await _bundleRepository
+                            .TrySyncBundleTotalFromSlitsAsync(batchNo, forceFromSlits: false, cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    catch (Exception syncEx)
+                    {
+                        _logger.LogWarning(
+                            syncEx,
+                            "Pending claim: failed to sync NDT_Bundle total for batch {BatchNo}.",
+                            batchNo);
+                    }
+                }
+
+                await _traceability
+                    .MarkInputSlitPendingCompletedAsync(
+                        claim.PendingId,
+                        lastBatch,
+                        outputPath,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
+                await _traceability
+                    .MarkInputSlitFileSeenAsync(
+                        claim.SourceFileClaimed ?? claim.SourceFileName,
+                        claim.SourceLastWriteTimeUtc,
+                        "PendingClaimCompleted",
+                        claim.MillNo,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
+                _fileRetryTracker.Clear(claim.SourceFileClaimed ?? claim.SourceFileName);
+                _logger.LogInformation(
+                    "Completed Input_Slit_Pending {Id} file {File} Mill {Mill} batch {Batch}.",
+                    claim.PendingId,
+                    claim.SourceFileName,
+                    claim.MillNo,
+                    lastBatch);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Failed processing Input_Slit_Pending {Id} file {File}; will retry next poll.",
+                    claim.PendingId,
+                    claim.SourceFileName);
+            }
+        }
     }
 
     /// <summary>

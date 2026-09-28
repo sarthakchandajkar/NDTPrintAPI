@@ -53,6 +53,8 @@ public sealed class SqlTraceabilityHealth : ISqlTraceabilityHealth
         "Manual_Station_Run",
         "NDT_Process_Consolidated",
         "Input_Slit_File_Seen",
+        "Input_Slit_Pending",
+        "Input_Slit_Pending_Row",
         "Output_Slit_Sap_Status",
         "Output_Slit_Sap_Status_Event",
         "Ppc_Correction_Item",

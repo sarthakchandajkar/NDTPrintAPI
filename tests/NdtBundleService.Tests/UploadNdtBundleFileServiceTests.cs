@@ -162,5 +162,9 @@ public sealed class UploadNdtBundleFileServiceTests : IDisposable
         public Task<int> UpdateOutputSlitRowNdtPipesByBatchAndSlitAsync(string ndtBatchNo, string slitNo, int newNdtPipes, CancellationToken cancellationToken) => Task.FromResult(0);
         public Task SyncOutputSlitRowsFromPerSlitCsvForBatchAsync(string ndtBatchNo, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task UpdateNdtProcessConsolidatedFromStationsAsync(string poNumber, string ndtBatchNo, int ndtPcs, int okPcs, int visualReject, int hydrotestReject, int revisualReject, DateTime? bundleStart, DateTime? bundleEnd, string? outputFilePath, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task UpsertInputSlitPendingAsync(string sourceFileFullPath, DateTime sourceLastWriteTimeUtc, int millNo, IReadOnlyList<(InputSlitRecord Record, int SourceRowNumber, string? PipeSize)> rows, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<IReadOnlyList<InputSlitPendingClaim>> ListAwaitingInputSlitPendingAsync(IReadOnlyList<int> millNos, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<InputSlitPendingClaim>>(Array.Empty<InputSlitPendingClaim>());
+        public Task MarkInputSlitPendingCompletedAsync(long pendingId, string ndtBatchNo, string? outputFile, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task TryCompleteInputSlitPendingByKeyAsync(string sourceFileName, DateTime sourceLastWriteTimeUtc, int millNo, string ndtBatchNo, string? outputFile, CancellationToken cancellationToken) => Task.CompletedTask;
     }
 }

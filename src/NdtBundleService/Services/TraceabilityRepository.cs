@@ -190,6 +190,41 @@ public interface ITraceabilityRepository
         DateTime? bundleEnd,
         string? outputFilePath,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Upserts an <c>Input_Slit_Pending</c> claim (AwaitingTarget) with parsed rows so stamp/output
+    /// can proceed after the inbox file leaves for Accepted. Keyed by basename + LastWrite + mill.
+    /// </summary>
+    Task UpsertInputSlitPendingAsync(
+        string sourceFileFullPath,
+        DateTime sourceLastWriteTimeUtc,
+        int millNo,
+        IReadOnlyList<(InputSlitRecord Record, int SourceRowNumber, string? PipeSize)> rows,
+        CancellationToken cancellationToken);
+
+    /// <summary>AwaitingTarget claims for the given mills (durable retry independent of inbox path).</summary>
+    Task<IReadOnlyList<InputSlitPendingClaim>> ListAwaitingInputSlitPendingAsync(
+        IReadOnlyList<int> millNos,
+        CancellationToken cancellationToken);
+
+    /// <summary>Marks a pending claim Completed after Output CSV + <c>Output_Slit_Row</c> succeed.</summary>
+    Task MarkInputSlitPendingCompletedAsync(
+        long pendingId,
+        string ndtBatchNo,
+        string? outputFile,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Completes a pending claim by basename + LastWrite + mill (used when the live inbox path
+    /// stamps first so ProcessPending does not double-write).
+    /// </summary>
+    Task TryCompleteInputSlitPendingByKeyAsync(
+        string sourceFileName,
+        DateTime sourceLastWriteTimeUtc,
+        int millNo,
+        string ndtBatchNo,
+        string? outputFile,
+        CancellationToken cancellationToken);
 }
 
 public sealed class UploadBundleRow
@@ -1845,6 +1880,371 @@ ELSE
                 InputSlitCsvParsing.NormalizePo(record.PoNumber),
                 record.MillNo);
         }
+    }
+
+    public async Task UpsertInputSlitPendingAsync(
+        string sourceFileFullPath,
+        DateTime sourceLastWriteTimeUtc,
+        int millNo,
+        IReadOnlyList<(InputSlitRecord Record, int SourceRowNumber, string? PipeSize)> rows,
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled || rows.Count == 0 || millNo < 1)
+            return;
+
+        var full = Path.GetFullPath(sourceFileFullPath);
+        var fileName = Path.GetFileName(full);
+        if (string.IsNullOrWhiteSpace(fileName))
+            return;
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await OpenConnectionAsync(conn, "Input_Slit_Pending upsert", cancellationToken).ConfigureAwait(false);
+            await using var tx = (SqlTransaction)await conn
+                .BeginTransactionAsync(cancellationToken)
+                .ConfigureAwait(false);
+
+            long pendingId;
+            await using (var find = new SqlCommand(
+                             """
+                             SELECT Input_Slit_Pending_ID, Status
+                             FROM dbo.Input_Slit_Pending
+                             WHERE Source_File_Name = @FileName
+                               AND Source_LastWriteTimeUtc = @Lw
+                               AND Mill_No = @Mill;
+                             """,
+                             conn,
+                             tx))
+            {
+                find.Parameters.AddWithValue("@FileName", fileName);
+                find.Parameters.AddWithValue("@Lw", sourceLastWriteTimeUtc);
+                find.Parameters.AddWithValue("@Mill", millNo);
+                await using var reader = await find.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    pendingId = reader.GetInt64(0);
+                    var status = reader.GetString(1);
+                    await reader.CloseAsync().ConfigureAwait(false);
+                    if (string.Equals(status, InputSlitPendingStatus.Completed, StringComparison.OrdinalIgnoreCase))
+                    {
+                        await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
+                        return;
+                    }
+
+                    await using var upd = new SqlCommand(
+                        """
+                        UPDATE dbo.Input_Slit_Pending
+                        SET Source_File_Claimed = @Claimed,
+                            Status = N'AwaitingTarget',
+                            Claimed_AtUtc = SYSUTCDATETIME()
+                        WHERE Input_Slit_Pending_ID = @Id;
+                        """,
+                        conn,
+                        tx);
+                    upd.Parameters.AddWithValue("@Claimed", full);
+                    upd.Parameters.AddWithValue("@Id", pendingId);
+                    await upd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+
+                    await using var del = new SqlCommand(
+                        "DELETE FROM dbo.Input_Slit_Pending_Row WHERE Input_Slit_Pending_ID = @Id;",
+                        conn,
+                        tx);
+                    del.Parameters.AddWithValue("@Id", pendingId);
+                    await del.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    await reader.CloseAsync().ConfigureAwait(false);
+                    await using var ins = new SqlCommand(
+                        """
+                        INSERT INTO dbo.Input_Slit_Pending
+                            (Source_File_Name, Source_File_Claimed, Source_LastWriteTimeUtc, Mill_No, Status)
+                        OUTPUT INSERTED.Input_Slit_Pending_ID
+                        VALUES (@FileName, @Claimed, @Lw, @Mill, N'AwaitingTarget');
+                        """,
+                        conn,
+                        tx);
+                    ins.Parameters.AddWithValue("@FileName", fileName);
+                    ins.Parameters.AddWithValue("@Claimed", full);
+                    ins.Parameters.AddWithValue("@Lw", sourceLastWriteTimeUtc);
+                    ins.Parameters.AddWithValue("@Mill", millNo);
+                    pendingId = (long)(await ins.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false)
+                                       ?? throw new InvalidOperationException("Input_Slit_Pending insert returned no id."));
+                }
+            }
+
+            foreach (var (record, rowNo, pipeSize) in rows)
+            {
+                await using var rowCmd = new SqlCommand(
+                    """
+                    INSERT INTO dbo.Input_Slit_Pending_Row
+                        (Input_Slit_Pending_ID, Source_Row_Number, PO_Number, Slit_No, NDT_Pipes, Rejected_P,
+                         Slit_Start_Time, Slit_Finish_Time, Mill_No, NDT_Short_Length_Pipe,
+                         Rejected_Short_Length_Pipe, Pipe_Size)
+                    VALUES
+                        (@PendingId, @RowNo, @Po, @Slit, @Ndt, @Rej, @Start, @Finish, @Mill,
+                         @NdtShort, @RejShort, @PipeSize);
+                    """,
+                    conn,
+                    tx);
+                rowCmd.Parameters.AddWithValue("@PendingId", pendingId);
+                rowCmd.Parameters.AddWithValue("@RowNo", rowNo);
+                rowCmd.Parameters.AddWithValue("@Po", InputSlitCsvParsing.NormalizePo(record.PoNumber));
+                rowCmd.Parameters.AddWithValue("@Slit", (object?)NullIfEmpty(record.SlitNo) ?? DBNull.Value);
+                rowCmd.Parameters.AddWithValue("@Ndt", record.NdtPipes);
+                rowCmd.Parameters.AddWithValue("@Rej", record.RejectedPipes);
+                rowCmd.Parameters.AddWithValue("@Start", (object?)record.SlitStartTime ?? DBNull.Value);
+                rowCmd.Parameters.AddWithValue("@Finish", (object?)record.SlitFinishTime ?? DBNull.Value);
+                rowCmd.Parameters.AddWithValue("@Mill", record.MillNo > 0 ? record.MillNo : millNo);
+                rowCmd.Parameters.AddWithValue("@NdtShort", (object?)NullIfEmpty(record.NdtShortLengthPipe) ?? DBNull.Value);
+                rowCmd.Parameters.AddWithValue("@RejShort", (object?)NullIfEmpty(record.RejectedShortLengthPipe) ?? DBNull.Value);
+                rowCmd.Parameters.AddWithValue("@PipeSize", (object?)NullIfEmpty(pipeSize) ?? DBNull.Value);
+                await rowCmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
+            _writeTracker.RecordSuccess(
+                "Input_Slit_Pending",
+                $"{fileName} mill={millNo} rows={rows.Count}");
+            _logger.LogInformation(
+                "Claimed Input Slit pending {File} Mill {Mill} ({Count} row(s)); stamp/output no longer depends on inbox path.",
+                fileName,
+                millNo,
+                rows.Count);
+        }
+        catch (SqlException ex) when (IsMissingInputSlitPendingTable(ex))
+        {
+            _logger.LogWarning(
+                "Input_Slit_Pending missing (run docs/Input_Slit_Pending_AddTable.sql); cannot claim {File}.",
+                Path.GetFileName(sourceFileFullPath));
+        }
+        catch (Exception ex)
+        {
+            _writeTracker.RecordFailure("Input_Slit_Pending", ex.Message, sourceFileFullPath);
+            _logger.LogWarning(ex, "Failed to upsert Input_Slit_Pending for {File} Mill {Mill}.", fileName, millNo);
+        }
+    }
+
+    public async Task<IReadOnlyList<InputSlitPendingClaim>> ListAwaitingInputSlitPendingAsync(
+        IReadOnlyList<int> millNos,
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled || millNos.Count == 0)
+            return Array.Empty<InputSlitPendingClaim>();
+
+        var distinctMills = millNos.Where(m => m > 0).Distinct().ToList();
+        if (distinctMills.Count == 0)
+            return Array.Empty<InputSlitPendingClaim>();
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await OpenConnectionAsync(conn, "Input_Slit_Pending list awaiting", cancellationToken).ConfigureAwait(false);
+
+            var millParams = new List<string>();
+            await using var cmd = new SqlCommand { Connection = conn };
+            for (var i = 0; i < distinctMills.Count; i++)
+            {
+                var p = "@M" + i.ToString(CultureInfo.InvariantCulture);
+                millParams.Add(p);
+                cmd.Parameters.AddWithValue(p, distinctMills[i]);
+            }
+
+            cmd.CommandText =
+                $"""
+                 SELECT p.Input_Slit_Pending_ID, p.Source_File_Name, p.Source_File_Claimed,
+                        p.Source_LastWriteTimeUtc, p.Mill_No, p.Status, p.NDT_Batch_No, p.Output_File,
+                        r.Source_Row_Number, r.PO_Number, r.Slit_No, r.NDT_Pipes, r.Rejected_P,
+                        r.Slit_Start_Time, r.Slit_Finish_Time, r.Mill_No, r.NDT_Short_Length_Pipe,
+                        r.Rejected_Short_Length_Pipe, r.Pipe_Size
+                 FROM dbo.Input_Slit_Pending p
+                 INNER JOIN dbo.Input_Slit_Pending_Row r ON r.Input_Slit_Pending_ID = p.Input_Slit_Pending_ID
+                 WHERE p.Status = N'AwaitingTarget'
+                   AND p.Mill_No IN ({string.Join(", ", millParams)})
+                 ORDER BY p.Claimed_AtUtc, p.Input_Slit_Pending_ID, r.Source_Row_Number;
+                 """;
+
+            var byId = new Dictionary<long, (InputSlitPendingClaim Header, List<InputSlitPendingRow> Rows)>();
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var id = reader.GetInt64(0);
+                if (!byId.TryGetValue(id, out var entry))
+                {
+                    var header = new InputSlitPendingClaim
+                    {
+                        PendingId = id,
+                        SourceFileName = reader.GetString(1),
+                        SourceFileClaimed = reader.IsDBNull(2) ? null : reader.GetString(2),
+                        SourceLastWriteTimeUtc = reader.GetDateTime(3),
+                        MillNo = reader.GetInt32(4),
+                        Status = reader.GetString(5),
+                        NdtBatchNo = reader.IsDBNull(6) ? null : reader.GetString(6),
+                        OutputFile = reader.IsDBNull(7) ? null : reader.GetString(7)
+                    };
+                    entry = (header, new List<InputSlitPendingRow>());
+                    byId[id] = entry;
+                }
+
+                var millFromRow = reader.IsDBNull(15) ? entry.Header.MillNo : reader.GetInt32(15);
+                entry.Rows.Add(new InputSlitPendingRow
+                {
+                    SourceRowNumber = reader.GetInt32(8),
+                    PipeSize = reader.IsDBNull(18) ? null : reader.GetString(18),
+                    Record = new InputSlitRecord
+                    {
+                        PoNumber = reader.GetString(9),
+                        SlitNo = reader.IsDBNull(10) ? string.Empty : reader.GetString(10),
+                        NdtPipes = reader.GetInt32(11),
+                        RejectedPipes = reader.GetInt32(12),
+                        SlitStartTime = reader.IsDBNull(13) ? null : reader.GetDateTime(13),
+                        SlitFinishTime = reader.IsDBNull(14) ? null : reader.GetDateTime(14),
+                        MillNo = millFromRow,
+                        NdtShortLengthPipe = reader.IsDBNull(16) ? string.Empty : reader.GetString(16),
+                        RejectedShortLengthPipe = reader.IsDBNull(17) ? string.Empty : reader.GetString(17)
+                    }
+                });
+            }
+
+            return byId.Values
+                .Select(v => new InputSlitPendingClaim
+                {
+                    PendingId = v.Header.PendingId,
+                    SourceFileName = v.Header.SourceFileName,
+                    SourceFileClaimed = v.Header.SourceFileClaimed,
+                    SourceLastWriteTimeUtc = v.Header.SourceLastWriteTimeUtc,
+                    MillNo = v.Header.MillNo,
+                    Status = v.Header.Status,
+                    NdtBatchNo = v.Header.NdtBatchNo,
+                    OutputFile = v.Header.OutputFile,
+                    Rows = v.Rows
+                })
+                .ToList();
+        }
+        catch (SqlException ex) when (IsMissingInputSlitPendingTable(ex))
+        {
+            _logger.LogDebug("Input_Slit_Pending missing; no awaiting claims to process.");
+            return Array.Empty<InputSlitPendingClaim>();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to list awaiting Input_Slit_Pending claims.");
+            return Array.Empty<InputSlitPendingClaim>();
+        }
+    }
+
+    public async Task MarkInputSlitPendingCompletedAsync(
+        long pendingId,
+        string ndtBatchNo,
+        string? outputFile,
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled || pendingId <= 0)
+            return;
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await OpenConnectionAsync(conn, "Input_Slit_Pending complete", cancellationToken).ConfigureAwait(false);
+            await using var cmd = new SqlCommand(
+                """
+                UPDATE dbo.Input_Slit_Pending
+                SET Status = N'Completed',
+                    NDT_Batch_No = @Batch,
+                    Output_File = @Output,
+                    Completed_AtUtc = SYSUTCDATETIME()
+                WHERE Input_Slit_Pending_ID = @Id
+                  AND Status = N'AwaitingTarget';
+                """,
+                conn);
+            cmd.Parameters.AddWithValue("@Batch", (object?)NullIfEmpty(ndtBatchNo) ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@Output", (object?)NullIfEmpty(outputFile) ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@Id", pendingId);
+            var updated = await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            if (updated > 0)
+            {
+                _writeTracker.RecordSuccess("Input_Slit_Pending", $"completed id={pendingId} batch={ndtBatchNo}");
+            }
+        }
+        catch (SqlException ex) when (IsMissingInputSlitPendingTable(ex))
+        {
+            _logger.LogDebug("Input_Slit_Pending missing; skip complete for id {Id}.", pendingId);
+        }
+        catch (Exception ex)
+        {
+            _writeTracker.RecordFailure("Input_Slit_Pending", ex.Message, $"id={pendingId}");
+            _logger.LogWarning(ex, "Failed to mark Input_Slit_Pending {Id} completed.", pendingId);
+        }
+    }
+
+    public async Task TryCompleteInputSlitPendingByKeyAsync(
+        string sourceFileName,
+        DateTime sourceLastWriteTimeUtc,
+        int millNo,
+        string ndtBatchNo,
+        string? outputFile,
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled || string.IsNullOrWhiteSpace(sourceFileName) || millNo < 1)
+            return;
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await OpenConnectionAsync(conn, "Input_Slit_Pending complete by key", cancellationToken).ConfigureAwait(false);
+            await using var cmd = new SqlCommand(
+                """
+                UPDATE dbo.Input_Slit_Pending
+                SET Status = N'Completed',
+                    NDT_Batch_No = @Batch,
+                    Output_File = @Output,
+                    Completed_AtUtc = SYSUTCDATETIME()
+                WHERE Source_File_Name = @FileName
+                  AND Source_LastWriteTimeUtc = @Lw
+                  AND Mill_No = @Mill
+                  AND Status = N'AwaitingTarget';
+                """,
+                conn);
+            cmd.Parameters.AddWithValue("@Batch", (object?)NullIfEmpty(ndtBatchNo) ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@Output", (object?)NullIfEmpty(outputFile) ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@FileName", Path.GetFileName(sourceFileName));
+            cmd.Parameters.AddWithValue("@Lw", sourceLastWriteTimeUtc);
+            cmd.Parameters.AddWithValue("@Mill", millNo);
+            var updated = await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            if (updated > 0)
+            {
+                _writeTracker.RecordSuccess(
+                    "Input_Slit_Pending",
+                    $"completed {Path.GetFileName(sourceFileName)} mill={millNo} batch={ndtBatchNo}");
+            }
+        }
+        catch (SqlException ex) when (IsMissingInputSlitPendingTable(ex))
+        {
+            // Table not deployed yet — ignore.
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Failed to complete Input_Slit_Pending by key for {File} Mill {Mill}.",
+                sourceFileName,
+                millNo);
+        }
+    }
+
+    private static bool IsMissingInputSlitPendingTable(SqlException ex)
+    {
+        // 208 = invalid object name
+        foreach (SqlError err in ex.Errors)
+        {
+            if (err.Number == 208
+                && (err.Message.Contains("Input_Slit_Pending", StringComparison.OrdinalIgnoreCase)
+                    || err.Message.Contains("Input_Slit_Pending_Row", StringComparison.OrdinalIgnoreCase)))
+                return true;
+        }
+
+        return ex.Message.Contains("Input_Slit_Pending", StringComparison.OrdinalIgnoreCase);
     }
 }
 
