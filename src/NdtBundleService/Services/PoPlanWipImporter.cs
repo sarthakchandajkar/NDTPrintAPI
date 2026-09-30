@@ -38,6 +38,9 @@ public sealed class PoPlanWipImporter : IPoPlanWipImporter
         _logger = logger;
     }
 
+    /// <summary>
+    /// Reads eligible PO Accepted CSVs and inserts SQL rows. Source files are never modified, moved, or deleted.
+    /// </summary>
     public async Task<PoPlanWipImportResult> ImportEligibleFilesAsync(CancellationToken cancellationToken)
     {
         if (!PoPlanWipImportSettings.IsEnabled(_options))

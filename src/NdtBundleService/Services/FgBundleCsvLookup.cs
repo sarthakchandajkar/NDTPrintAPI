@@ -94,11 +94,7 @@ public static class FgBundleCsvLookup
         int? millNo,
         CancellationToken cancellationToken)
     {
-        await using var stream = new FileStream(
-            filePath,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete);
+        await using var stream = CsvFolderReadOnlyIO.OpenRead(filePath);
         using var reader = new StreamReader(stream);
         var headerRaw = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
         if (headerRaw is null)

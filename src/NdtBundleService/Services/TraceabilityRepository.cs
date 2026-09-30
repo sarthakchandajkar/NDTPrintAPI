@@ -119,6 +119,20 @@ public interface ITraceabilityRepository
         string? printError,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Lists Visual / Hydro / Revisual station runs for the Printed Tags dashboard
+    /// (newest first). Joins mill from <c>NDT_Bundle</c> when present.
+    /// </summary>
+    Task<IReadOnlyList<ManualStationPrintedTag>> GetManualStationPrintedTagsAsync(
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Station runs for one NDT batch (oldest first) used to restore Visual/Hydro/Revisual flow after process restart.
+    /// </summary>
+    Task<IReadOnlyList<ManualStationPrintedTag>> GetManualStationRunsForBatchAsync(
+        string ndtBatchNo,
+        CancellationToken cancellationToken);
+
     /// <summary>One row per completed NDT process CSV (after Revisual), matching the consolidated export columns.</summary>
     Task RecordNdtProcessConsolidatedAsync(
         string poNumber,
@@ -144,6 +158,32 @@ public interface ITraceabilityRepository
         CancellationToken cancellationToken);
 
     Task RecordUploadBundleRowsAsync(string generatedFile, IReadOnlyList<UploadBundleRow> rows, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Latest <c>Upload_Bundle_Row</c> per <c>Bundle_Number</c> (by <c>GeneratedAtUtc</c>). Empty when SQL disabled.
+    /// </summary>
+    Task<IReadOnlyList<UploadBundleRow>> GetLatestUploadBundleRowsAsync(
+        int take,
+        CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<UploadBundleRow>>(Array.Empty<UploadBundleRow>());
+
+    /// <summary>
+    /// Distinct non-empty <c>Output_Slit_Row.Slit_No</c> values for the batch, ordered by latest
+    /// <c>Slit_Finish_Time</c> descending (nulls last). Empty when SQL is disabled.
+    /// </summary>
+    Task<IReadOnlyList<(string SlitNo, DateTime? SlitFinishTime)>> GetOutputSlitsByFinishTimeForBatchAsync(
+        string ndtBatchNo,
+        CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<(string, DateTime?)>>(Array.Empty<(string, DateTime?)>());
+
+    /// <summary>
+    /// Slit numbers already used as <c>NDT_Bundle.Context_Slit_No</c> or <c>Upload_Bundle_Row.Slit_No</c>
+    /// on a different bundle than <paramref name="excludeBundleNo"/>. Empty when SQL is disabled.
+    /// </summary>
+    Task<IReadOnlyCollection<string>> GetSlitNosClaimedByOtherBundlesAsync(
+        string excludeBundleNo,
+        CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyCollection<string>>(Array.Empty<string>());
 
     /// <summary>
     /// Deletes Output_Slit_Row rows that correspond to removed per-slit output CSV lines (same source file basename and row number as when the worker imported the file). Input_Slit_Row is not modified.
@@ -241,6 +281,28 @@ public sealed class UploadBundleRow
     public string TotalBundleWt { get; init; } = string.Empty;
     public string LenPerPipe { get; init; } = string.Empty;
     public bool? IsFullBundle { get; init; }
+    public string SourceFile { get; init; } = string.Empty;
+    public DateTime? GeneratedAtUtc { get; init; }
+}
+
+/// <summary>One Visual / Hydro / Revisual station run for Printed Tags.</summary>
+public sealed class ManualStationPrintedTag
+{
+    public long Id { get; init; }
+    public string PoNumber { get; init; } = string.Empty;
+    public string NdtBatchNo { get; init; } = string.Empty;
+    public int? MillNo { get; init; }
+    public int NdtPcs { get; init; }
+    public int OkPcs { get; init; }
+    public int RejectPcs { get; init; }
+    public string WorkStation { get; init; } = string.Empty;
+    public string? HydrotestingType { get; init; }
+    public DateTime BundleStart { get; init; }
+    public DateTime BundleEnd { get; init; }
+    public DateTime ImportedAtUtc { get; init; }
+    public string? PrintStatus { get; init; }
+    public string? PrintError { get; init; }
+    public string? SourceFile { get; init; }
 }
 
 public sealed class TraceabilityRepository : ITraceabilityRepository
@@ -1397,6 +1459,142 @@ WHERE Manual_Station_Run_ID = (
         }
     }
 
+    public async Task<IReadOnlyList<ManualStationPrintedTag>> GetManualStationPrintedTagsAsync(
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled)
+            return Array.Empty<ManualStationPrintedTag>();
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await OpenConnectionAsync(conn, "Manual_Station_Run list", cancellationToken).ConfigureAwait(false);
+
+            const string sql = @"
+SELECT
+    r.Manual_Station_Run_ID,
+    r.PO_Number,
+    r.NDT_Batch_No,
+    b.Mill_No,
+    r.NDT_Pcs,
+    r.OK_Pcs,
+    r.Reject_Pcs,
+    r.Work_Station,
+    r.Hydrotesting_Type,
+    r.Bundle_Start,
+    r.Bundle_End,
+    r.ImportedAtUtc,
+    r.Print_Status,
+    r.Print_Error,
+    r.Source_File
+FROM dbo.Manual_Station_Run r
+LEFT JOIN dbo.NDT_Bundle b ON b.Bundle_No = r.NDT_Batch_No
+ORDER BY r.ImportedAtUtc DESC, r.Manual_Station_Run_ID DESC;";
+
+            await using var cmd = new SqlCommand(sql, conn);
+            var list = new List<ManualStationPrintedTag>();
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                list.Add(new ManualStationPrintedTag
+                {
+                    Id = reader.GetInt64(0),
+                    PoNumber = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                    NdtBatchNo = reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
+                    MillNo = reader.IsDBNull(3) ? null : reader.GetInt32(3),
+                    NdtPcs = reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
+                    OkPcs = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
+                    RejectPcs = reader.IsDBNull(6) ? 0 : reader.GetInt32(6),
+                    WorkStation = reader.IsDBNull(7) ? string.Empty : reader.GetString(7),
+                    HydrotestingType = reader.IsDBNull(8) ? null : reader.GetString(8),
+                    BundleStart = reader.GetDateTime(9),
+                    BundleEnd = reader.GetDateTime(10),
+                    ImportedAtUtc = reader.GetDateTime(11),
+                    PrintStatus = reader.IsDBNull(12) ? null : reader.GetString(12),
+                    PrintError = reader.IsDBNull(13) ? null : reader.GetString(13),
+                    SourceFile = reader.IsDBNull(14) ? null : reader.GetString(14)
+                });
+            }
+
+            return list;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to list Manual_Station_Run for Printed Tags.");
+            return Array.Empty<ManualStationPrintedTag>();
+        }
+    }
+
+    public async Task<IReadOnlyList<ManualStationPrintedTag>> GetManualStationRunsForBatchAsync(
+        string ndtBatchNo,
+        CancellationToken cancellationToken)
+    {
+        var batch = (ndtBatchNo ?? string.Empty).Trim();
+        if (!Enabled || string.IsNullOrWhiteSpace(batch))
+            return Array.Empty<ManualStationPrintedTag>();
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await OpenConnectionAsync(conn, "Manual_Station_Run by batch", cancellationToken).ConfigureAwait(false);
+
+            const string sql = @"
+SELECT
+    r.Manual_Station_Run_ID,
+    r.PO_Number,
+    r.NDT_Batch_No,
+    b.Mill_No,
+    r.NDT_Pcs,
+    r.OK_Pcs,
+    r.Reject_Pcs,
+    r.Work_Station,
+    r.Hydrotesting_Type,
+    r.Bundle_Start,
+    r.Bundle_End,
+    r.ImportedAtUtc,
+    r.Print_Status,
+    r.Print_Error,
+    r.Source_File
+FROM dbo.Manual_Station_Run r
+LEFT JOIN dbo.NDT_Bundle b ON b.Bundle_No = r.NDT_Batch_No
+WHERE r.NDT_Batch_No = @BatchNo
+ORDER BY r.ImportedAtUtc ASC, r.Manual_Station_Run_ID ASC;";
+
+            await using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@BatchNo", batch);
+            var list = new List<ManualStationPrintedTag>();
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                list.Add(new ManualStationPrintedTag
+                {
+                    Id = reader.GetInt64(0),
+                    PoNumber = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                    NdtBatchNo = reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
+                    MillNo = reader.IsDBNull(3) ? null : reader.GetInt32(3),
+                    NdtPcs = reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
+                    OkPcs = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
+                    RejectPcs = reader.IsDBNull(6) ? 0 : reader.GetInt32(6),
+                    WorkStation = reader.IsDBNull(7) ? string.Empty : reader.GetString(7),
+                    HydrotestingType = reader.IsDBNull(8) ? null : reader.GetString(8),
+                    BundleStart = reader.GetDateTime(9),
+                    BundleEnd = reader.GetDateTime(10),
+                    ImportedAtUtc = reader.GetDateTime(11),
+                    PrintStatus = reader.IsDBNull(12) ? null : reader.GetString(12),
+                    PrintError = reader.IsDBNull(13) ? null : reader.GetString(13),
+                    SourceFile = reader.IsDBNull(14) ? null : reader.GetString(14)
+                });
+            }
+
+            return list;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to load Manual_Station_Run for batch {BatchNo}.", batch);
+            return Array.Empty<ManualStationPrintedTag>();
+        }
+    }
+
     private static void AddManualStationParameters(
         SqlCommand cmd,
         string poNumber,
@@ -1587,6 +1785,173 @@ VALUES
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to record Upload_Bundle_Row for file {File}.", generatedFile);
+        }
+    }
+
+    public async Task<IReadOnlyList<UploadBundleRow>> GetLatestUploadBundleRowsAsync(
+        int take,
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled)
+            return Array.Empty<UploadBundleRow>();
+
+        var limit = take <= 0 ? 200 : Math.Min(take, 2000);
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await OpenConnectionAsync(conn, "Upload_Bundle_Row list", cancellationToken).ConfigureAwait(false);
+
+            const string sql = @"
+SELECT TOP (@Take)
+    PO_NO, Slit_No, HRC_Number, Slit_Width, Slit_Thick, NSS, Slit_Grade,
+    Bundle_Number, NumOfPipes, TotalBundleWt, LenPerPipe, IsFullBundle, Source_File, GeneratedAtUtc
+FROM (
+    SELECT
+        PO_NO, Slit_No, HRC_Number, Slit_Width, Slit_Thick, NSS, Slit_Grade,
+        Bundle_Number, NumOfPipes, TotalBundleWt, LenPerPipe, IsFullBundle, Source_File, GeneratedAtUtc,
+        ROW_NUMBER() OVER (
+            PARTITION BY Bundle_Number
+            ORDER BY GeneratedAtUtc DESC, Upload_Bundle_Row_ID DESC) AS rn
+    FROM dbo.Upload_Bundle_Row
+    WHERE Bundle_Number IS NOT NULL AND LTRIM(RTRIM(Bundle_Number)) <> N''
+) ranked
+WHERE rn = 1
+ORDER BY GeneratedAtUtc DESC, Bundle_Number DESC;";
+
+            await using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@Take", limit);
+            var list = new List<UploadBundleRow>();
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                list.Add(new UploadBundleRow
+                {
+                    PoNo = reader.IsDBNull(0) ? string.Empty : reader.GetString(0),
+                    SlitNo = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                    HrcNumber = reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
+                    SlitWidth = reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
+                    SlitThick = reader.IsDBNull(4) ? string.Empty : reader.GetString(4),
+                    Nss = reader.IsDBNull(5) ? string.Empty : reader.GetString(5),
+                    SlitGrade = reader.IsDBNull(6) ? string.Empty : reader.GetString(6),
+                    BundleNumber = reader.IsDBNull(7) ? string.Empty : reader.GetString(7),
+                    NumOfPipes = reader.IsDBNull(8) ? 0 : reader.GetInt32(8),
+                    TotalBundleWt = reader.IsDBNull(9) ? string.Empty : reader.GetString(9),
+                    LenPerPipe = reader.IsDBNull(10) ? string.Empty : reader.GetString(10),
+                    IsFullBundle = reader.IsDBNull(11) ? null : reader.GetBoolean(11),
+                    SourceFile = reader.IsDBNull(12) ? string.Empty : reader.GetString(12),
+                    GeneratedAtUtc = reader.IsDBNull(13) ? null : reader.GetDateTime(13)
+                });
+            }
+
+            return list;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to list Upload_Bundle_Row rows.");
+            return Array.Empty<UploadBundleRow>();
+        }
+    }
+
+    public async Task<IReadOnlyList<(string SlitNo, DateTime? SlitFinishTime)>> GetOutputSlitsByFinishTimeForBatchAsync(
+        string ndtBatchNo,
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled || string.IsNullOrWhiteSpace(ndtBatchNo))
+            return Array.Empty<(string, DateTime?)>();
+
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await OpenConnectionAsync(conn, "Output_Slit_Row finish-time lookup", cancellationToken)
+                .ConfigureAwait(false);
+
+            const string sql = @"
+SELECT
+    LTRIM(RTRIM(Slit_No)) AS SlitNo,
+    MAX(Slit_Finish_Time) AS SlitFinishTime
+FROM dbo.Output_Slit_Row
+WHERE NDT_Batch_No = @BatchNo
+  AND Slit_No IS NOT NULL
+  AND LTRIM(RTRIM(Slit_No)) <> N''
+  AND LTRIM(RTRIM(Slit_No)) NOT IN (N'—', N'-', N'?')
+GROUP BY LTRIM(RTRIM(Slit_No))
+ORDER BY
+    CASE WHEN MAX(Slit_Finish_Time) IS NULL THEN 1 ELSE 0 END,
+    MAX(Slit_Finish_Time) DESC,
+    LTRIM(RTRIM(Slit_No)) ASC;";
+
+            await using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@BatchNo", ndtBatchNo.Trim());
+            var list = new List<(string, DateTime?)>();
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var slit = reader.IsDBNull(0) ? string.Empty : reader.GetString(0).Trim();
+                if (string.IsNullOrWhiteSpace(slit))
+                    continue;
+                DateTime? finish = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
+                list.Add((slit, finish));
+            }
+
+            return list;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Failed to load Output_Slit_Row finish times for batch {BatchNo}.",
+                ndtBatchNo);
+            return Array.Empty<(string, DateTime?)>();
+        }
+    }
+
+    public async Task<IReadOnlyCollection<string>> GetSlitNosClaimedByOtherBundlesAsync(
+        string excludeBundleNo,
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled)
+            return Array.Empty<string>();
+
+        var exclude = (excludeBundleNo ?? string.Empty).Trim();
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await OpenConnectionAsync(conn, "claimed slit lookup", cancellationToken).ConfigureAwait(false);
+
+            const string sql = @"
+SELECT DISTINCT LTRIM(RTRIM(v.SlitNo)) AS SlitNo
+FROM (
+    SELECT Context_Slit_No AS SlitNo, Bundle_No AS BundleNo
+    FROM dbo.NDT_Bundle
+    WHERE Context_Slit_No IS NOT NULL
+      AND LTRIM(RTRIM(Context_Slit_No)) <> N''
+    UNION ALL
+    SELECT Slit_No AS SlitNo, Bundle_Number AS BundleNo
+    FROM dbo.Upload_Bundle_Row
+    WHERE Slit_No IS NOT NULL
+      AND LTRIM(RTRIM(Slit_No)) <> N''
+) v
+WHERE (@ExcludeBundle = N'' OR v.BundleNo IS NULL OR LTRIM(RTRIM(v.BundleNo)) <> @ExcludeBundle);";
+
+            await using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@ExcludeBundle", exclude);
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (reader.IsDBNull(0))
+                    continue;
+                var slit = reader.GetString(0).Trim();
+                if (!string.IsNullOrWhiteSpace(slit))
+                    set.Add(slit);
+            }
+
+            return set;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to load claimed slit numbers excluding bundle {BundleNo}.", exclude);
+            return Array.Empty<string>();
         }
     }
 

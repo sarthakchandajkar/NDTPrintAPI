@@ -1,4 +1,4 @@
-﻿using System.Reflection;
+using System.Reflection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
@@ -501,6 +501,14 @@ public sealed class WipBundleProductionTimeOrderingTests : IDisposable
             Guid? correlationId,
             int? plcNdtCountFinal) =>
             Task.FromResult(new PoEndWorkflowResult());
+
+        public Task<(int BundlesClosed, int TotalPcs)> CompleteSlitEndDeferredFlushAsync(
+            string poNumber,
+            int millNo,
+            int? plcNdtCountFinal,
+            Guid? correlationId,
+            CancellationToken cancellationToken) =>
+            Task.FromResult((0, 0));
     }
 
     private sealed class NoOpRuntimeStore : INdtBundleRuntimeStateStore

@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Models;
@@ -75,6 +75,80 @@ public sealed class PoEndImmediateRemainderTests
     }
 
     [Fact]
+    public async Task Immediate_defers_when_buttend_configured_and_live_ndt_positive()
+    {
+        var opts = CreateImmediateOpts();
+        opts.PlcHandshake!.SlitEndTriggerDbNumber = 270;
+        opts.PlcHandshake.SlitEndTriggerByte = 13;
+        opts.PlcHandshake.SlitEndTriggerBit = 0;
+
+        var runtime = new InMemoryRuntime();
+        await runtime.EnsureInitializedAsync(CancellationToken.None);
+        runtime.SetSizeCounts("1000060163", 1, new Dictionary<string, int> { ["Default"] = 4 });
+
+        var closed = new List<(int Batch, int Pcs)>();
+        var deferral = new PoEndSlitEndFlushDeferral();
+        var workflow = CreateWorkflow(
+            TestEngineFactory.Create(new FormationStub(10), new PipeSizeStub(), runtime),
+            closed,
+            new List<int>(),
+            runtime,
+            new RecordingWip(),
+            opts,
+            deferral);
+
+        var result = await workflow.ExecuteAsync(
+            "1000060163",
+            1,
+            false,
+            CancellationToken.None,
+            Guid.NewGuid(),
+            plcNdtCountFinal: 3);
+
+        Assert.True(result.FlushDeferred);
+        Assert.Empty(closed);
+        Assert.Equal(4, runtime.GetSizeCounts("1000060163", 1)["Default"]);
+        Assert.True(deferral.TryGet(1, out _));
+    }
+
+    [Fact]
+    public async Task Immediate_deferred_flush_prints_combined_remainder_after_slit_end()
+    {
+        var opts = CreateImmediateOpts();
+        opts.PlcHandshake!.SlitEndTriggerDbNumber = 270;
+        opts.PlcHandshake.SlitEndTriggerByte = 13;
+        opts.PlcHandshake.SlitEndTriggerBit = 0;
+
+        var runtime = new InMemoryRuntime();
+        await runtime.EnsureInitializedAsync(CancellationToken.None);
+        runtime.SetSizeCounts("1000060163", 1, new Dictionary<string, int> { ["Default"] = 4 });
+
+        var closed = new List<(int Batch, int Pcs)>();
+        var deferral = new PoEndSlitEndFlushDeferral();
+        var workflow = CreateWorkflow(
+            TestEngineFactory.Create(new FormationStub(10), new PipeSizeStub(), runtime),
+            closed,
+            new List<int>(),
+            runtime,
+            new RecordingWip(),
+            opts,
+            deferral);
+
+        Assert.True((await workflow.ExecuteAsync(
+            "1000060163", 1, false, CancellationToken.None, Guid.NewGuid(), plcNdtCountFinal: 3)).FlushDeferred);
+
+        runtime.IncrementSizeCount("1000060163", 1, "Default", 5);
+        Assert.True(deferral.TryTake(1, out var pending));
+
+        var (bundles, pcs) = await workflow.CompleteSlitEndDeferredFlushAsync(
+            pending.PoNumber, pending.MillNo, pending.PlcNdtAtArm, pending.CorrelationId, CancellationToken.None);
+
+        Assert.Equal(1, bundles);
+        Assert.Equal(9, pcs);
+        Assert.Equal(9, closed.Sum(c => c.Pcs));
+    }
+
+    [Fact]
     public void RemainderResolver_prefers_sizeCounts_over_plc()
     {
         var runtime = new InMemoryRuntime();
@@ -87,6 +161,47 @@ public sealed class PoEndImmediateRemainderTests
             handshakeStatus: null,
             plcNdtCountFinal: 99);
         Assert.Equal(4, n);
+    }
+
+    [Fact]
+    public void ManualConfirm_merges_sizeCounts_with_live_when_mw56_not_ahead()
+    {
+        var runtime = new InMemoryRuntime();
+        runtime.SetSizeCounts("1226100003", 1, new Dictionary<string, int> { ["Default"] = 4 });
+        var status = new PlcHandshakeStatusRegistry();
+        status.RegisterMill(1, new PlcHandshakeMillStatus
+        {
+            MillNo = 1,
+            MillName = "Mill-1",
+            AccumulatedValue = 4
+        });
+
+        var n = PoEndRemainderResolver.ResolveForManualConfirm(
+            "1226100003",
+            1,
+            pipeSize: null,
+            runtime,
+            status,
+            livePlcNdt: 5);
+
+        Assert.Equal(9, n);
+    }
+
+    [Fact]
+    public void ManualConfirm_takes_max_when_live_already_covers_total()
+    {
+        var runtime = new InMemoryRuntime();
+        runtime.SetSizeCounts("1226100003", 1, new Dictionary<string, int> { ["Default"] = 4 });
+
+        var n = PoEndRemainderResolver.ResolveForManualConfirm(
+            "1226100003",
+            1,
+            pipeSize: null,
+            runtime,
+            handshakeStatus: null,
+            livePlcNdt: 9);
+
+        Assert.Equal(9, n);
     }
 
     private static NdtBundleOptions CreateImmediateOpts() =>
@@ -107,7 +222,8 @@ public sealed class PoEndImmediateRemainderTests
         List<int> metadataBatches,
         INdtBundleRuntimeStateStore runtime,
         IWipBundleRunningPoProvider wip,
-        NdtBundleOptions opts)
+        NdtBundleOptions opts,
+        IPoEndSlitEndFlushDeferral? deferral = null)
     {
         return new PoEndWorkflowService(
             engine,
@@ -122,6 +238,7 @@ public sealed class PoEndImmediateRemainderTests
             new CapturingRepo(metadataBatches),
             NoOpCsvFillService.Instance,
             new PlcHandshakeStatusRegistry(),
+            deferral ?? new PoEndSlitEndFlushDeferral(),
             new TestOptionsMonitor<NdtBundleOptions>(opts),
             NullLogger<PoEndWorkflowService>.Instance);
     }
@@ -270,6 +387,18 @@ public sealed class PoEndImmediateRemainderTests
         }
         public void SetSizeCounts(string poNumber, int millNo, IReadOnlyDictionary<string, int> counts) =>
             _sizes[Key(poNumber, millNo)] = new Dictionary<string, int>(counts, StringComparer.OrdinalIgnoreCase);
+        public void IncrementSizeCount(string poNumber, int millNo, string sizeKey, int delta)
+        {
+            var k = Key(poNumber, millNo);
+            if (!_sizes.TryGetValue(k, out var d))
+            {
+                d = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                _sizes[k] = d;
+            }
+
+            d.TryGetValue(sizeKey, out var cur);
+            d[sizeKey] = cur + delta;
+        }
         public int GetRunningTotal(string poNumber, int millNo) => 0;
         public void ClearRunningTotal(string poNumber, int millNo) { }
         public void ClearOpenAccumulation(string poNumber, int millNo) => ClearRunningTotal(poNumber, millNo);

@@ -428,7 +428,7 @@ public sealed class PoEndWorkflowResult
     public bool WaitingForNewWip { get; init; }
     public bool AdvancedPoPlanFile { get; init; }
 
-    /// <summary>True when Plc <c>AfterDrain</c> deferred the partial flush to the drain window.</summary>
+    /// <summary>True when Plc deferred the partial flush (AfterDrain window, or await slit-end bit).</summary>
     public bool FlushDeferred { get; init; }
 }
 
@@ -452,6 +452,17 @@ public interface IPoEndWorkflowService
         CancellationToken cancellationToken,
         Guid? correlationId,
         int? plcNdtCountFinal);
+
+    /// <summary>
+    /// Completes an Immediate remainder flush that was armed because M40.6 arrived while a slit was in progress.
+    /// Acquires the mill bundle lock.
+    /// </summary>
+    Task<(int BundlesClosed, int TotalPcs)> CompleteSlitEndDeferredFlushAsync(
+        string poNumber,
+        int millNo,
+        int? plcNdtCountFinal,
+        Guid? correlationId,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>

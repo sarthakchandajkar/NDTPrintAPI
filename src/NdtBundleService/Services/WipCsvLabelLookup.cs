@@ -157,59 +157,72 @@ public static class WipCsvLabelLookup
         if (!File.Exists(filePath))
             return false;
 
-        await using var stream = File.OpenRead(filePath);
-        using var reader = new StreamReader(stream);
-        var headerRaw = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
-        if (headerRaw is null)
-            return false;
-
-        var headers = InputSlitCsvParsing.SplitDataFields(InputSlitCsvParsing.StripBom(headerRaw));
-        var poIdx = InputSlitCsvParsing.HeaderIndex(headers, "PO_No", "PO Number", "PO No");
-        var millIdx = InputSlitCsvParsing.HeaderIndex(headers, "Mill Number", "Mill No", "Mill Line No");
-        var gradeIdx = InputSlitCsvParsing.HeaderIndex(headers, "Pipe Grade", "Grade");
-        var sizeIdx = InputSlitCsvParsing.HeaderIndex(headers, "Pipe Size", "Size");
-        var thicknessIdx = InputSlitCsvParsing.HeaderIndex(headers, "Pipe Thickness", "Thickness");
-        var lengthIdx = InputSlitCsvParsing.HeaderIndex(headers, "Pipe Length", "Length");
-        var weightIdx = InputSlitCsvParsing.HeaderIndex(
-            headers,
-            "Pipe Weight Per Meter",
-            "Weight Per Meter",
-            "Pipe Weight",
-            "Pipe Wt/mtr",
-            "Pipe Wt/m");
-        var typeIdx = InputSlitCsvParsing.HeaderIndex(headers, "Pipe Type", "Type");
-
-        if (poIdx < 0)
-            return false;
-
-        var matched = false;
-        while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+        try
         {
-            if (string.IsNullOrWhiteSpace(line))
-                continue;
+            // Share ReadWrite so Excel / SAP holding the file open does not abort label/upload lookup.
+            // Read-only handle: never write/move/delete the source CSV.
+            await using var stream = CsvFolderReadOnlyIO.OpenRead(filePath);
+            using var reader = new StreamReader(stream);
+            var headerRaw = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            if (headerRaw is null)
+                return false;
 
-            var cols = InputSlitCsvParsing.SplitDataFields(line);
-            if (poIdx >= cols.Length)
-                continue;
+            var headers = InputSlitCsvParsing.SplitDataFields(InputSlitCsvParsing.StripBom(headerRaw));
+            var poIdx = InputSlitCsvParsing.HeaderIndex(headers, "PO_No", "PO Number", "PO No");
+            var millIdx = InputSlitCsvParsing.HeaderIndex(headers, "Mill Number", "Mill No", "Mill Line No");
+            var gradeIdx = InputSlitCsvParsing.HeaderIndex(headers, "Pipe Grade", "Grade");
+            var sizeIdx = InputSlitCsvParsing.HeaderIndex(headers, "Pipe Size", "Size");
+            var thicknessIdx = InputSlitCsvParsing.HeaderIndex(headers, "Pipe Thickness", "Thickness");
+            var lengthIdx = InputSlitCsvParsing.HeaderIndex(headers, "Pipe Length", "Length");
+            var weightIdx = InputSlitCsvParsing.HeaderIndex(
+                headers,
+                "Pipe Weight Per Meter",
+                "Weight Per Meter",
+                "Pipe Weight",
+                "Pipe Wt/mtr",
+                "Pipe Wt/m");
+            var typeIdx = InputSlitCsvParsing.HeaderIndex(headers, "Pipe Type", "Type");
 
-            var rowPo = cols[poIdx].Trim();
-            if (!InputSlitCsvParsing.PoEquals(rowPo, poNumber))
-                continue;
+            if (poIdx < 0)
+                return false;
 
-            if (millIdx >= 0)
+            var matched = false;
+            while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
             {
-                if (millIdx >= cols.Length)
+                if (string.IsNullOrWhiteSpace(line))
                     continue;
-                if (!InputSlitCsvParsing.TryParseMillNo(cols[millIdx], out var rowMill) || rowMill != millNo)
+
+                var cols = InputSlitCsvParsing.SplitDataFields(line);
+                if (poIdx >= cols.Length)
                     continue;
+
+                var rowPo = cols[poIdx].Trim();
+                if (!InputSlitCsvParsing.PoEquals(rowPo, poNumber))
+                    continue;
+
+                if (millIdx >= 0)
+                {
+                    if (millIdx >= cols.Length)
+                        continue;
+                    if (!InputSlitCsvParsing.TryParseMillNo(cols[millIdx], out var rowMill) || rowMill != millNo)
+                        continue;
+                }
+
+                string Cell(int idx) => idx >= 0 && idx < cols.Length ? cols[idx].Trim() : string.Empty;
+                merged.Merge(Cell(gradeIdx), Cell(sizeIdx), Cell(thicknessIdx), Cell(lengthIdx), Cell(weightIdx), Cell(typeIdx));
+                matched = true;
             }
 
-            string Cell(int idx) => idx >= 0 && idx < cols.Length ? cols[idx].Trim() : string.Empty;
-            merged.Merge(Cell(gradeIdx), Cell(sizeIdx), Cell(thicknessIdx), Cell(lengthIdx), Cell(weightIdx), Cell(typeIdx));
-            matched = true;
+            return matched;
         }
-
-        return matched;
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     private sealed class MutableWipLabelInfo

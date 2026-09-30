@@ -1,4 +1,5 @@
 using System.Linq;
+using System.Text.Json;
 using Microsoft.Data.SqlClient;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
@@ -6,6 +7,7 @@ using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Models;
 using NdtBundleService.Services;
+using NdtBundleService.Services.MillInstanceProxy;
 using NdtBundleService.Services.MillInstanceStatus;
 using NdtBundleService.Services.PlcHandshake;
 
@@ -36,8 +38,15 @@ public sealed class TestController : ControllerBase
     private readonly IPoEndWorkflowService _poEndWorkflow;
     private readonly INdtBundleRuntimeStateStore _runtimeState;
     private readonly INdtBundleRepository _bundleRepository;
+    private readonly IPlcPoEndManualConfirmService _manualPoEndConfirm;
+    private readonly IMillSettingsPlcProxy _millPlcProxy;
     private readonly ILogger<TestController> _logger;
     private readonly NdtBundleOptions _options;
+
+    private static readonly JsonSerializerOptions ProxyJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
 
     public TestController(
         IOptions<NdtBundleOptions> options,
@@ -56,6 +65,8 @@ public sealed class TestController : ControllerBase
         IPoEndWorkflowService poEndWorkflow,
         INdtBundleRuntimeStateStore runtimeState,
         INdtBundleRepository bundleRepository,
+        IPlcPoEndManualConfirmService manualPoEndConfirm,
+        IMillSettingsPlcProxy millPlcProxy,
         ICurrentPoPlanService? currentPoPlanService = null)
     {
         _bundleTagPrinter = bundleTagPrinter;
@@ -72,6 +83,8 @@ public sealed class TestController : ControllerBase
         _poEndWorkflow = poEndWorkflow;
         _runtimeState = runtimeState;
         _bundleRepository = bundleRepository;
+        _manualPoEndConfirm = manualPoEndConfirm;
+        _millPlcProxy = millPlcProxy;
         _currentPoPlanService = currentPoPlanService;
         _logger = logger;
         _options = options.Value;
@@ -295,6 +308,176 @@ public sealed class TestController : ControllerBase
             WaitingForNewWip = _wipBundleRunningPo.IsWaitingForNewWipAfterPoEnd(millNo)
         });
     }
+
+    public sealed class PlcManualPoEndConfirmRequest
+    {
+        public int MillNo { get; set; }
+    }
+
+    /// <summary>
+    /// Pending PLC PO-ends waiting for operator confirm (ManualConfirmPoEnd mills).
+    /// On Shared, forwards to mill instances via MillInstanceProxy.
+    /// </summary>
+    [HttpGet("plc-po-end-manual-confirm")]
+    public async Task<IActionResult> GetPlcManualPoEndPending(
+        [FromQuery] int? millNo,
+        CancellationToken cancellationToken)
+    {
+        if (millNo is int m)
+        {
+            if (m is < 1 or > 4)
+                return BadRequest(new { Message = "millNo must be between 1 and 4." });
+
+            if (_millPlcProxy.ShouldProxy(m))
+            {
+                return await ProxyToMillAsync(
+                        m,
+                        HttpMethod.Get,
+                        $"api/Test/plc-po-end-manual-confirm?millNo={m}",
+                        body: null,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            var one = _manualPoEndConfirm.TryGetPending(m);
+            return Ok(new
+            {
+                Items = one is null
+                    ? Array.Empty<object>()
+                    : new object[] { ToManualPendingDto(one) }
+            });
+        }
+
+        // Aggregate: Shared fans out; mill/monolith returns local store.
+        if (_millPlcProxy.ShouldProxy(1) || _millPlcProxy.ShouldProxy(2) ||
+            _millPlcProxy.ShouldProxy(3) || _millPlcProxy.ShouldProxy(4))
+        {
+            var items = new List<object>();
+            for (var mill = 1; mill <= 4; mill++)
+            {
+                if (!_millPlcProxy.ShouldProxy(mill))
+                    continue;
+                var proxied = await _millPlcProxy
+                    .ForwardAsync(
+                        mill,
+                        HttpMethod.Get,
+                        $"api/Test/plc-po-end-manual-confirm?millNo={mill}",
+                        jsonBody: null,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (proxied.StatusCode is < 200 or >= 300 || string.IsNullOrWhiteSpace(proxied.Body))
+                    continue;
+                try
+                {
+                    using var doc = JsonDocument.Parse(proxied.Body);
+                    if (doc.RootElement.TryGetProperty("items", out var arr) ||
+                        doc.RootElement.TryGetProperty("Items", out arr))
+                    {
+                        foreach (var el in arr.EnumerateArray())
+                            items.Add(JsonSerializer.Deserialize<object>(el.GetRawText())!);
+                    }
+                }
+                catch
+                {
+                    /* ignore bad mill response */
+                }
+            }
+
+            return Ok(new { Items = items });
+        }
+
+        return Ok(new
+        {
+            Items = _manualPoEndConfirm.ListPending().Select(ToManualPendingDto).ToList()
+        });
+    }
+
+    /// <summary>
+    /// Operator confirm for a pending PLC PO-end: flush remainder (live NDT merge) then MES ack.
+    /// </summary>
+    [HttpPost("plc-po-end-manual-confirm")]
+    public async Task<IActionResult> ConfirmPlcManualPoEnd(
+        [FromBody] PlcManualPoEndConfirmRequest? request,
+        CancellationToken cancellationToken)
+    {
+        if (request is null)
+            return BadRequest(new { Message = "Request body is required." });
+
+        if (request.MillNo is < 1 or > 4)
+            return BadRequest(new { Message = "MillNo must be between 1 and 4." });
+
+        if (_millPlcProxy.ShouldProxy(request.MillNo))
+        {
+            _logger.LogInformation(
+                "Manual PLC PO-end confirm for Mill {Mill} proxied to mill instance.",
+                request.MillNo);
+            return await ProxyToMillAsync(
+                    request.MillNo,
+                    HttpMethod.Post,
+                    "api/Test/plc-po-end-manual-confirm",
+                    request,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        var result = await _manualPoEndConfirm.ConfirmAsync(request.MillNo, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!result.Success)
+            return BadRequest(new
+            {
+                result.Success,
+                result.Message,
+                result.MillNo,
+                result.PoNumber,
+                result.RemainderPcs,
+                result.BundlesClosed,
+                result.LiveNdtAtConfirm,
+                result.CorrelationId
+            });
+
+        return Ok(new
+        {
+            result.Success,
+            result.Message,
+            result.MillNo,
+            result.PoNumber,
+            result.RemainderPcs,
+            result.BundlesClosed,
+            result.LiveNdtAtConfirm,
+            result.CorrelationId
+        });
+    }
+
+    private async Task<IActionResult> ProxyToMillAsync(
+        int millNo,
+        HttpMethod method,
+        string relativePath,
+        object? body,
+        CancellationToken cancellationToken)
+    {
+        var json = body is null ? null : JsonSerializer.Serialize(body, ProxyJsonOptions);
+        var proxied = await _millPlcProxy
+            .ForwardAsync(millNo, method, relativePath, json, cancellationToken)
+            .ConfigureAwait(false);
+        return new ContentResult
+        {
+            StatusCode = proxied.StatusCode,
+            Content = proxied.Body,
+            ContentType = proxied.ContentType
+        };
+    }
+
+    private static object ToManualPendingDto(PlcPoEndManualConfirmPending p) => new
+    {
+        p.MillNo,
+        p.MillName,
+        p.PoIdAtEdge,
+        p.NdtAtEdge,
+        p.CorrelationId,
+        DetectedAtUtc = p.DetectedAtUtc,
+        RunningPoAtEdge = p.RunningPoAtEdge
+    };
 
     private bool ShouldAdvancePoPlanOnPoEnd(int millNo)
     {

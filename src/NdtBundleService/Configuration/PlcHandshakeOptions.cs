@@ -47,14 +47,35 @@ public sealed class PlcHandshakeOptions
     public int SlitIdByteOffset { get; set; } = 10;
 
     /// <summary>
-    /// Optional merker byte for slit-end signal (PLC→MES). When &lt; 0 (default), slit-end is detected from
-    /// Slit ID change on DB251 (<see cref="SlitIdByteOffset"/> / DBW10 — same value shown on Mills PLC).
-    /// When ≥ 0, a rising edge on this merker bit is used instead.
+    /// When true, M40.6 rising edge does <b>not</b> auto-ack or flush. MES arms a pending
+    /// manual confirm; the operator confirms on the dashboard after the last slit finishes
+    /// (flush remainder using live PLC NDT merge, then MES ack). PLC may leave the trigger TRUE until then.
+    /// </summary>
+    public bool ManualConfirmPoEnd { get; set; }
+
+    /// <summary>
+    /// Optional DB number for slit-end bit (PLC→MES), e.g. <c>270</c> for <c>DB270.DBX13.0</c> (<c>L1_ButtEnd</c>).
+    /// When &gt; 0, rising edge is read from DataBlock at
+    /// <see cref="SlitEndTriggerByte"/>.<see cref="SlitEndTriggerBit"/> (PLC resets the bit; MES does not write).
+    /// When ≤ 0, <see cref="SlitEndTriggerByte"/> is treated as a merker (M) address if ≥ 0.
+    /// When neither DB nor merker is configured, slit-end falls back to Slit ID change on DB251.
+    /// </summary>
+    public int SlitEndTriggerDbNumber { get; set; }
+
+    /// <summary>
+    /// Byte offset for slit-end bit: DB byte when <see cref="SlitEndTriggerDbNumber"/> &gt; 0,
+    /// otherwise merker byte. When &lt; 0 and no DB is set, slit-end uses Slit ID change.
     /// </summary>
     public int SlitEndTriggerByte { get; set; } = -1;
 
-    /// <summary>Bit within <see cref="SlitEndTriggerByte"/>. Used only when <see cref="SlitEndTriggerByte"/> ≥ 0.</summary>
+    /// <summary>Bit within the slit-end trigger byte (0–7).</summary>
     public int SlitEndTriggerBit { get; set; }
+
+    /// <summary>True when a DB or merker slit-end bit is configured (not Slit-ID-only mode).</summary>
+    public bool IsSlitEndBitTriggerConfigured =>
+        SlitEndTriggerDbNumber > 0
+            ? SlitEndTriggerByte >= 0
+            : SlitEndTriggerByte >= 0;
 
     /// <summary>
     /// NDT count DB for live close (default 251). Config-driven; mirrors MillSlitLive.S7.DbNumber.

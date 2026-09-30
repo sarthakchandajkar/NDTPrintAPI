@@ -11,12 +11,118 @@ namespace NdtBundleService.Controllers;
 public sealed class ManualTagsController : ControllerBase
 {
     private readonly IManualNdtTagService _service;
+    private readonly ITraceabilityRepository _traceability;
     private readonly ILogger<ManualTagsController> _logger;
 
-    public ManualTagsController(IManualNdtTagService service, ILogger<ManualTagsController> logger)
+    public ManualTagsController(
+        IManualNdtTagService service,
+        ITraceabilityRepository traceability,
+        ILogger<ManualTagsController> logger)
     {
         _service = service;
+        _traceability = traceability;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Lists Visual / Hydro / Revisual station tag runs for the Printed Tags page.
+    /// Must be declared before <c>{station}/…</c> routes so "printed" is not parsed as a station name.
+    /// </summary>
+    [HttpGet("printed")]
+    public async Task<IActionResult> GetPrinted(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var list = await _traceability
+                .GetManualStationPrintedTagsAsync(cancellationToken)
+                .ConfigureAwait(false);
+            return Ok(list.Select(r => new
+            {
+                r.Id,
+                r.PoNumber,
+                r.NdtBatchNo,
+                r.MillNo,
+                r.NdtPcs,
+                r.OkPcs,
+                r.RejectPcs,
+                r.WorkStation,
+                r.HydrotestingType,
+                r.BundleStart,
+                r.BundleEnd,
+                r.ImportedAtUtc,
+                r.PrintStatus,
+                r.PrintError,
+                r.SourceFile
+            }).ToList());
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to list station printed tags.");
+            return StatusCode(500, new { Message = ex.Message });
+        }
+    }
+
+    /// <summary>Reprint a station tag (Visual / Hydro / Revisual) without changing recorded counts.</summary>
+    [HttpPost("printed/reprint")]
+    public async Task<IActionResult> ReprintPrinted(
+        [FromBody] ReprintStationTagRequest? request,
+        CancellationToken cancellationToken)
+    {
+        if (request is null || string.IsNullOrWhiteSpace(request.NdtBatchNo))
+            return BadRequest(new { Message = "NdtBatchNo is required." });
+        if (string.IsNullOrWhiteSpace(request.WorkStation))
+            return BadRequest(new { Message = "WorkStation is required." });
+
+        try
+        {
+            var result = await _service.ReprintStationTagAsync(
+                new ManualStationReprintRequest
+                {
+                    NdtBatchNo = request.NdtBatchNo.Trim(),
+                    WorkStation = request.WorkStation.Trim(),
+                    HydrotestingType = request.HydrotestingType,
+                    OkPcs = request.OkPcs,
+                    PoNumber = request.PoNumber,
+                    MillNo = request.MillNo
+                },
+                cancellationToken).ConfigureAwait(false);
+
+            if (result.Printed)
+            {
+                return Ok(new
+                {
+                    result.Message,
+                    result.NdtBatchNo,
+                    result.WorkStation,
+                    Station = result.Station.ToString(),
+                    result.OperatorStationNumber,
+                    result.OkPcs,
+                    result.Printed
+                });
+            }
+
+            return StatusCode(500, new
+            {
+                Message = result.Message,
+                Detail = result.PrintError,
+                result.NdtBatchNo,
+                result.WorkStation,
+                result.Printed
+            });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { Message = ex.Message });
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { Message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Station tag reprint failed for batch {Batch}.", request.NdtBatchNo);
+            return StatusCode(500, new { Message = ex.Message });
+        }
     }
 
     [HttpGet("{station}/{ndtBatchNo}/context")]
@@ -196,6 +302,16 @@ public sealed class ManualTagsController : ControllerBase
         public bool PrintTag { get; set; }
         /// <summary>For Visual and Revisual: 1 or 2. Omitted or 0 defaults to 1.</summary>
         public int OperatorStationNumber { get; set; }
+    }
+
+    public sealed class ReprintStationTagRequest
+    {
+        public string? NdtBatchNo { get; set; }
+        public string? WorkStation { get; set; }
+        public string? HydrotestingType { get; set; }
+        public int OkPcs { get; set; }
+        public string? PoNumber { get; set; }
+        public int? MillNo { get; set; }
     }
 }
 

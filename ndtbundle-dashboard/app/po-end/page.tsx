@@ -2,7 +2,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { api, type PoEndPending, type RunningPoNdtSummary } from "@/lib/api";
+import {
+  api,
+  type PoEndPending,
+  type PlcManualPoEndPending,
+  type RunningPoNdtSummary,
+} from "@/lib/api";
 
 function parseMillNo(value: number | string | undefined): number | null {
   if (typeof value === "number" && value >= 1 && value <= 4) return value;
@@ -17,7 +22,9 @@ export default function PoEndPage() {
   const [poNumber, setPoNumber] = useState("");
   const [millNo, setMillNo] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const [pending, setPending] = useState<PoEndPending | null>(null);
+  const [manualPending, setManualPending] = useState<PlcManualPoEndPending | null>(null);
   const [runningByMill, setRunningByMill] = useState<RunningPoNdtSummary[]>([]);
   const [message, setMessage] = useState<{ type: "ok" | "warn" | "err"; text: string } | null>(null);
 
@@ -46,6 +53,16 @@ export default function PoEndPage() {
     }
   }, []);
 
+  const refreshManualPending = useCallback(async (mill: number) => {
+    try {
+      const res = await api.plcManualPoEndPending(mill);
+      const items = res.items ?? [];
+      setManualPending(items.find((i) => i.millNo === mill) ?? items[0] ?? null);
+    } catch {
+      setManualPending(null);
+    }
+  }, []);
+
   useEffect(() => {
     loadRunningPo();
   }, [loadRunningPo]);
@@ -61,6 +78,12 @@ export default function PoEndPage() {
     }, 300);
     return () => clearTimeout(t);
   }, [poNumber, millNo, refreshPending]);
+
+  useEffect(() => {
+    refreshManualPending(millNo);
+    const id = setInterval(() => refreshManualPending(millNo), 2000);
+    return () => clearInterval(id);
+  }, [millNo, refreshManualPending]);
 
   const submit = async () => {
     const po = poNumber.trim();
@@ -79,6 +102,7 @@ export default function PoEndPage() {
       setMessage({ type, text: full });
       await refreshPending(po, millNo);
       await loadRunningPo();
+      await refreshManualPending(millNo);
     } catch (e) {
       setMessage({ type: "err", text: e instanceof Error ? e.message : "Request failed." });
     } finally {
@@ -104,8 +128,33 @@ export default function PoEndPage() {
     }
   };
 
+  const confirmManualPoEnd = async () => {
+    setConfirming(true);
+    setMessage(null);
+    try {
+      const result = await api.confirmPlcManualPoEnd(millNo);
+      setMessage({
+        type: result.success === false ? "err" : "ok",
+        text: result.message ?? (result.success === false ? "Confirm failed." : "PO end confirmed."),
+      });
+      await refreshManualPending(millNo);
+      await refreshPending(poNumber, millNo);
+      await loadRunningPo();
+    } catch (e) {
+      setMessage({ type: "err", text: e instanceof Error ? e.message : "Confirm failed." });
+      await refreshManualPending(millNo);
+    } finally {
+      setConfirming(false);
+    }
+  };
+
   const activeRow = runningByMill.find((r) => parseMillNo(r.millNo) === millNo);
   const pendingPcs = Math.max(pending?.pendingFromSizeCounts ?? 0, pending?.pendingRunningTotal ?? 0);
+  const manualPoHint =
+    manualPending?.runningPoAtEdge?.trim() ||
+    (typeof manualPending?.poIdAtEdge === "number" && manualPending.poIdAtEdge > 0
+      ? String(manualPending.poIdAtEdge)
+      : null);
 
   return (
     <div className="space-y-6">
@@ -127,6 +176,35 @@ export default function PoEndPage() {
           }`}
         >
           {message.text}
+        </div>
+      )}
+
+      {manualPending && (
+        <div className="rounded-md border border-amber-300 bg-amber-50 p-4 space-y-3 max-w-lg">
+          <div>
+            <p className="text-sm font-semibold text-amber-950">
+              PLC PO-end awaiting confirm — Mill {manualPending.millNo}
+              {manualPending.millName ? ` (${manualPending.millName})` : ""}
+            </p>
+            <p className="mt-1 text-sm text-amber-900">
+              M40.6 rose while a slit may still be finishing. Confirm after the last slit ends so MES flushes
+              remainder (including live PLC NDT) and sends the handshake ack.
+            </p>
+            <ul className="mt-2 text-xs text-amber-800 space-y-0.5 tabular-nums">
+              {manualPoHint && <li>PO hint: {manualPoHint}</li>}
+              {manualPending.ndtAtEdge != null && <li>NDT at edge: {manualPending.ndtAtEdge}</li>}
+              {manualPending.detectedAtUtc && (
+                <li>Detected: {new Date(manualPending.detectedAtUtc).toLocaleString()}</li>
+              )}
+            </ul>
+          </div>
+          <button
+            onClick={confirmManualPoEnd}
+            disabled={confirming || loading}
+            className="px-4 py-2 bg-amber-700 text-white text-sm font-medium rounded-md hover:bg-amber-800 disabled:opacity-50"
+          >
+            {confirming ? "Confirming…" : "Confirm PO End (flush + ack)"}
+          </button>
         </div>
       )}
 
@@ -182,7 +260,7 @@ export default function PoEndPage() {
         <div className="flex flex-wrap gap-3">
           <button
             onClick={submit}
-            disabled={loading}
+            disabled={loading || confirming}
             className="px-4 py-2 bg-primary-500 text-white text-sm font-medium rounded-md hover:bg-primary-600 disabled:opacity-50"
           >
             {loading ? "Sending…" : "Simulate PO End"}
@@ -190,7 +268,7 @@ export default function PoEndPage() {
           {pending?.waitingForNewWip && (
             <button
               onClick={resumeWip}
-              disabled={loading}
+              disabled={loading || confirming}
               className="px-4 py-2 border border-amber-300 text-amber-900 text-sm font-medium rounded-md bg-amber-50 hover:bg-amber-100 disabled:opacity-50"
             >
               Resume WIP (undo wait)

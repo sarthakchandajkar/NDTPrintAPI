@@ -343,6 +343,14 @@ public sealed class ManualInputSlitControllerTests : IDisposable
             string ndtBatchNo, string workStation, string printStatus, string? printError, CancellationToken cancellationToken) =>
             Task.CompletedTask;
 
+        public Task<IReadOnlyList<ManualStationPrintedTag>> GetManualStationPrintedTagsAsync(
+            CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<ManualStationPrintedTag>>(Array.Empty<ManualStationPrintedTag>());
+
+        public Task<IReadOnlyList<ManualStationPrintedTag>> GetManualStationRunsForBatchAsync(
+            string ndtBatchNo, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<ManualStationPrintedTag>>(Array.Empty<ManualStationPrintedTag>());
+
         public Task RecordNdtProcessConsolidatedAsync(
             string poNumber, string ndtBatchNo, int ndtPcs, int okPcs, int visualReject, int hydrotestReject,
             int revisualReject, DateTime bundleStart, DateTime bundleEnd, string outputFilePath, CancellationToken cancellationToken) =>

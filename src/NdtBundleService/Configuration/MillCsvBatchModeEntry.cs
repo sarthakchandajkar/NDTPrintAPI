@@ -16,10 +16,11 @@ public sealed class MillCsvBatchModeEntry
     public string ZeroNdtValue { get; set; } = "10001";
 
     /// <summary>
-    /// CSV batch value for hollow FG rows. Written to CSV only;
-    /// SQL <c>Output_Slit_Row.NDT_Batch_No</c> stays NULL (no <c>NDT_Bundle</c> parent).
+    /// CSV batch value for hollow FG rows (Pipe Type FG + size like 50x50).
+    /// Default empty — column left blank; SQL <c>Output_Slit_Row.NDT_Batch_No</c> stays NULL
+    /// (no <c>NDT_Bundle</c> parent). Set explicitly only if a placeholder is required.
     /// </summary>
-    public string HollowFgValue { get; set; } = "10001";
+    public string HollowFgValue { get; set; } = "";
 
     public bool IsConstant =>
         string.Equals(Mode, "Constant", StringComparison.OrdinalIgnoreCase);
@@ -63,7 +64,7 @@ public static class MillCsvBatchModeResolver
         int ndtPipes)
     {
         if (isHollowFg)
-            return (NullToDefault(entry.HollowFgValue), false);
+            return ((entry.HollowFgValue ?? string.Empty).Trim(), false);
 
         if (ndtPipes <= 0)
             return (NullToDefault(entry.ZeroNdtValue), false);

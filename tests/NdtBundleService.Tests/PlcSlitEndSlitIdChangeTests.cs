@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Models;
@@ -67,6 +67,26 @@ public sealed class PlcSlitEndSlitIdChangeTests
 
         Assert.True(sut.TryDetectSlitEnd(1, handshake, s7, 1, 5, out _, out var secondCloseCount));
         Assert.Equal(10, secondCloseCount);
+    }
+
+    [Fact]
+    public void ButtEnd_db_bit_rising_edge_detects_slit_end()
+    {
+        var sut = CreateCloser();
+        var s7 = new ControllableBitS7();
+        var handshake = new PlcHandshakeOptions
+        {
+            SlitEndTriggerDbNumber = 270,
+            SlitEndTriggerByte = 13,
+            SlitEndTriggerBit = 0
+        };
+
+        Assert.False(sut.TryDetectSlitEnd(1, handshake, s7, 5, 17, out _, out _));
+        s7.BitValue = true;
+        Assert.True(sut.TryDetectSlitEnd(1, handshake, s7, 5, 17, out var reason, out var pcs));
+        Assert.Equal(5, pcs);
+        Assert.Contains("DB270.DBX13.0", reason);
+        Assert.False(sut.TryDetectSlitEnd(1, handshake, s7, 5, 17, out _, out _));
     }
 
     [Fact]
@@ -151,7 +171,37 @@ public sealed class PlcSlitEndSlitIdChangeTests
             runtime,
             new MillBundleStateLock(),
             new NoOpPlcCloseRepo(),
+            new PoEndSlitEndFlushDeferral(),
+            new NoOpPoEndWorkflow(),
             NullLogger<PlcSlitEndBundleCloser>.Instance);
+
+    private sealed class NoOpPoEndWorkflow : IPoEndWorkflowService
+    {
+        public Task<PoEndWorkflowResult> ExecuteAsync(
+            string poNumber,
+            int millNo,
+            bool advancePoPlanFile,
+            CancellationToken cancellationToken,
+            Guid? correlationId = null) =>
+            Task.FromResult(new PoEndWorkflowResult());
+
+        public Task<PoEndWorkflowResult> ExecuteAsync(
+            string poNumber,
+            int millNo,
+            bool advancePoPlanFile,
+            CancellationToken cancellationToken,
+            Guid? correlationId,
+            int? plcNdtCountFinal) =>
+            Task.FromResult(new PoEndWorkflowResult());
+
+        public Task<(int BundlesClosed, int TotalPcs)> CompleteSlitEndDeferredFlushAsync(
+            string poNumber,
+            int millNo,
+            int? plcNdtCountFinal,
+            Guid? correlationId,
+            CancellationToken cancellationToken) =>
+            Task.FromResult((0, 0));
+    }
 
     private sealed class FakePlcCloseEngine : IBundleEngine
     {
@@ -357,6 +407,42 @@ public sealed class PlcSlitEndSlitIdChangeTests
         {
             public object? Read(DataType dataType, int db, int startByteAdr, VarType varType, int varCount, byte bitAdr = 0) =>
                 false;
+            public void Write(DataType dataType, int db, int startByteAdr, object value, int bitAdr = -1) { }
+        }
+    }
+
+    private sealed class ControllableBitS7 : IS7ConnectionProvider
+    {
+        public bool BitValue { get; set; }
+        public int MillNo => 1;
+        public string MillName => "Mill-1";
+        public bool IsConnected => true;
+        public bool IsHealthy => true;
+#pragma warning disable CS0067
+        public event Action<bool>? HealthChanged;
+#pragma warning restore CS0067
+        public Task<bool> EnsureConnectedAsync(CancellationToken cancellationToken) => Task.FromResult(true);
+        public void Disconnect() { }
+        public T Read<T>(Func<IS7PlcOperations, T> operation) => operation(new Ops(this));
+        public void Write(Action<IS7PlcOperations> operation) { }
+        public Task<T> ReadAsync<T>(Func<IS7PlcOperations, T> operation, CancellationToken cancellationToken = default) =>
+            Task.FromResult(Read(operation));
+        public Task WriteAsync(Action<IS7PlcOperations> operation, CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
+        public int TakeReconnectDelayMs() => 1000;
+        public void ResetReconnectBackoff() { }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+        private sealed class Ops(ControllableBitS7 owner) : IS7PlcOperations
+        {
+            public object? Read(DataType dataType, int db, int startByteAdr, VarType varType, int varCount, byte bitAdr = 0)
+            {
+                Assert.Equal(DataType.DataBlock, dataType);
+                Assert.Equal(270, db);
+                Assert.Equal(13, startByteAdr);
+                return owner.BitValue;
+            }
+
             public void Write(DataType dataType, int db, int startByteAdr, object value, int bitAdr = -1) { }
         }
     }

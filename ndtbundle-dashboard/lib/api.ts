@@ -160,6 +160,27 @@ export interface PoEndResponse {
   warning?: string;
 }
 
+export interface PlcManualPoEndPending {
+  millNo?: number;
+  millName?: string;
+  poIdAtEdge?: number;
+  ndtAtEdge?: number;
+  correlationId?: string;
+  detectedAtUtc?: string;
+  runningPoAtEdge?: string | null;
+}
+
+export interface PlcManualPoEndConfirmResult {
+  success?: boolean;
+  message?: string;
+  millNo?: number;
+  poNumber?: string;
+  remainderPcs?: number;
+  bundlesClosed?: number;
+  liveNdtAtConfirm?: number;
+  correlationId?: string;
+}
+
 export interface NdtSummary {
   poNumber?: string;
   millNo?: number;
@@ -588,10 +609,47 @@ export interface ManualStationContext {
   hasRecordedThisStation?: boolean;
 }
 
+/** Visual / Hydro / Revisual runs from Manual_Station_Run (Printed Tags). */
+export interface StationPrintedTag {
+  id?: number;
+  poNumber?: string;
+  ndtBatchNo?: string;
+  millNo?: number | null;
+  ndtPcs?: number;
+  okPcs?: number;
+  rejectPcs?: number;
+  workStation?: string;
+  hydrotestingType?: string | null;
+  bundleStart?: string;
+  bundleEnd?: string;
+  importedAtUtc?: string;
+  printStatus?: string | null;
+  printError?: string | null;
+  sourceFile?: string | null;
+}
+
 export interface UploadBundleGenerationResponse {
   message?: string;
   filePath?: string;
   rowCount?: number;
+  ndtBatchNo?: string;
+}
+
+export interface UploadBundleGeneratedItem {
+  ndtBatchNo: string;
+  poNo?: string;
+  millNo?: number | null;
+  slitNo?: string;
+  numOfPipes?: number;
+  fileName?: string;
+  filePath?: string;
+  generatedAtUtc?: string | null;
+  fileExistsOnDisk?: boolean;
+}
+
+export interface UploadBundleGeneratedListResponse {
+  count?: number;
+  items?: UploadBundleGeneratedItem[];
 }
 
 export const api = {
@@ -615,8 +673,47 @@ export const api = {
       `/api/Test/resume-wip/${millNo}`,
       { method: "POST" }
     ),
+  plcManualPoEndPending: (millNo?: number) =>
+    fetchApi<{ items?: PlcManualPoEndPending[] }>(
+      millNo != null
+        ? `/api/Test/plc-po-end-manual-confirm?millNo=${millNo}`
+        : `/api/Test/plc-po-end-manual-confirm`
+    ),
+  confirmPlcManualPoEnd: (millNo: number) =>
+    fetchApi<PlcManualPoEndConfirmResult>("/api/Test/plc-po-end-manual-confirm", {
+      method: "POST",
+      body: JSON.stringify({ millNo }),
+    }),
   reconcileBundles: () =>
     fetchApi<ReconcileBundle[]>("/api/Reconcile/bundles?includeForming=true"),
+  stationPrintedTags: () =>
+    fetchApi<StationPrintedTag[]>("/api/ManualTags/printed"),
+  reprintStationTag: (args: {
+    ndtBatchNo: string;
+    workStation: string;
+    hydrotestingType?: string | null;
+    okPcs: number;
+    poNumber?: string;
+    millNo?: number | null;
+  }) =>
+    fetchApi<{
+      message?: string;
+      ndtBatchNo?: string;
+      workStation?: string;
+      station?: string;
+      okPcs?: number;
+      printed?: boolean;
+    }>("/api/ManualTags/printed/reprint", {
+      method: "POST",
+      body: JSON.stringify({
+        ndtBatchNo: args.ndtBatchNo,
+        workStation: args.workStation,
+        hydrotestingType: args.hydrotestingType,
+        okPcs: args.okPcs,
+        poNumber: args.poNumber,
+        millNo: args.millNo,
+      }),
+    }),
   manualBundleReconcile: (ndtBatchNo: string, correctedTotal: number) =>
     fetchApi<{
       message?: string;
@@ -749,6 +846,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ ndtBatchNo }),
     }),
+  listGeneratedUploadBundleFiles: (take = 200) =>
+    fetchApi<UploadBundleGeneratedListResponse>(
+      `/api/UploadNdtBundle/generated?take=${encodeURIComponent(String(take))}`
+    ),
 
   settingsStatus: () => fetchApi<SettingsStatus>("/api/Settings/status"),
   settingsLogin: (password: string) =>

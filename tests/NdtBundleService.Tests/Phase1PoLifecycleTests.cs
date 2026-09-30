@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Models;
@@ -196,6 +196,7 @@ public sealed class Phase1PoLifecycleTests
             output,
             new MillBundleStateLock(),
             wip,
+            new PoEndSlitEndFlushDeferral(),
             Monitor(opts),
             TestMillOwnership.Monolith(),
             NullLogger<PoLifecycleSweepWorker>.Instance);
@@ -246,6 +247,7 @@ public sealed class Phase1PoLifecycleTests
             output,
             new MillBundleStateLock(),
             wip,
+            new PoEndSlitEndFlushDeferral(),
             Monitor(opts),
             TestMillOwnership.Monolith(),
             NullLogger<PoLifecycleSweepWorker>.Instance);
@@ -289,6 +291,7 @@ public sealed class Phase1PoLifecycleTests
             new CapturingOutputWriter(_ => { }, closed),
             new MillBundleStateLock(),
             wipFile,
+            new PoEndSlitEndFlushDeferral(),
             Monitor(opts),
             TestMillOwnership.Monolith(),
             NullLogger<PoLifecycleSweepWorker>.Instance);
@@ -320,6 +323,7 @@ public sealed class Phase1PoLifecycleTests
             new NoOpPlcCloseRepo(),
             NoOpCsvFillService.Instance,
             new PlcHandshakeStatusRegistry(),
+            new PoEndSlitEndFlushDeferral(),
             new TestOptionsMonitor<NdtBundleOptions>(opts),
             NullLogger<PoEndWorkflowService>.Instance);
     }
@@ -437,6 +441,14 @@ public sealed class Phase1PoLifecycleTests
             Guid? correlationId,
             int? plcNdtCountFinal) =>
             ExecuteAsync(poNumber, millNo, advancePoPlanFile, cancellationToken, correlationId);
+
+        public Task<(int BundlesClosed, int TotalPcs)> CompleteSlitEndDeferredFlushAsync(
+            string poNumber,
+            int millNo,
+            int? plcNdtCountFinal,
+            Guid? correlationId,
+            CancellationToken cancellationToken) =>
+            Task.FromResult((0, 0));
     }
 
     private sealed class NoOpPlcCloseRepo : INdtBundleRepository

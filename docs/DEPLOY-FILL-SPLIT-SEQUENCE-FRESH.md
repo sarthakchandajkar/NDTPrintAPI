@@ -906,6 +906,8 @@ Paste each file to `C:\Apps\NdtBundleService\instances\<role>\appsettings.Produc
       "AckWriteRetryInitialBackoffMs": 100,
       "NdtCountDb": 251,
       "NdtCountByteOffset": 6,
+      "ManualConfirmPoEnd": true,
+      "ManualConfirmPoEnd": true,
       "SlitEndTriggerByte": -1,
       "SlitEndTriggerBit": 0,
       "Mills": [

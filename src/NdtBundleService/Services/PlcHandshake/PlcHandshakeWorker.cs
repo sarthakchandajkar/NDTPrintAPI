@@ -24,6 +24,7 @@ public sealed class PlcHandshakeWorker : BackgroundService
     private readonly IS7ConnectionProviderRegistry _s7Registry;
     private readonly IPlcSlitEndBundleCloser _slitEndCloser;
     private readonly IHandshakeEventRepository _handshakeEvents;
+    private readonly IPlcPoEndManualConfirmStore _manualConfirmStore;
     private readonly IMillOwnership _millOwnership;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<PlcHandshakeWorker> _logger;
@@ -44,6 +45,7 @@ public sealed class PlcHandshakeWorker : BackgroundService
         IS7ConnectionProviderRegistry s7Registry,
         IPlcSlitEndBundleCloser slitEndCloser,
         IHandshakeEventRepository handshakeEvents,
+        IPlcPoEndManualConfirmStore manualConfirmStore,
         IMillOwnership millOwnership,
         ILoggerFactory loggerFactory,
         ILogger<PlcHandshakeWorker> logger)
@@ -60,6 +62,7 @@ public sealed class PlcHandshakeWorker : BackgroundService
         _s7Registry = s7Registry;
         _slitEndCloser = slitEndCloser;
         _handshakeEvents = handshakeEvents;
+        _manualConfirmStore = manualConfirmStore;
         _millOwnership = millOwnership;
         _loggerFactory = loggerFactory;
         _logger = logger;
@@ -150,7 +153,8 @@ public sealed class PlcHandshakeWorker : BackgroundService
                 s7,
                 _loggerFactory.CreateLogger<PlcHandshakeService>(),
                 _slitEndCloser,
-                _handshakeEvents);
+                _handshakeEvents,
+                _manualConfirmStore);
 
             var millNo = mill.ResolveMillNo();
             if (millNo is >= 1 and <= 4)

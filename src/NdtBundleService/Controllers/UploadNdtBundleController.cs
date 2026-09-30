@@ -17,6 +17,43 @@ public sealed class UploadNdtBundleController : ControllerBase
         _service = service;
     }
 
+    /// <summary>
+    /// Lists NDT batches that already have a MES PAS NDT upload CSV (SQL and/or folder).
+    /// </summary>
+    [HttpGet("generated")]
+    public async Task<IActionResult> ListGenerated(
+        [FromQuery] int take = 200,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var items = await _service.ListGeneratedAsync(take, cancellationToken).ConfigureAwait(false);
+            return Ok(new
+            {
+                Count = items.Count,
+                Items = items.Select(i => new
+                {
+                    i.NdtBatchNo,
+                    i.PoNo,
+                    i.MillNo,
+                    i.SlitNo,
+                    i.NumOfPipes,
+                    i.FileName,
+                    i.FilePath,
+                    i.GeneratedAtUtc,
+                    i.FileExistsOnDisk
+                })
+            });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { Message = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Generates (or regenerates) the upload CSV for a batch. Creates a new timestamped file; does not delete older ones.
+    /// </summary>
     [HttpPost("generate-now")]
     public async Task<IActionResult> GenerateNow(
         [FromBody] GenerateUploadNdtBundleRequest? request,

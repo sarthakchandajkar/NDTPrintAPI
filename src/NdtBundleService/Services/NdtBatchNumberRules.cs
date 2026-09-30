@@ -4,7 +4,8 @@ namespace NdtBundleService.Services;
 public static class NdtBatchNumberRules
 {
     /// <summary>
-    /// Hollow FG pipes (e.g. Pipe Type FG, Pipe Size 100x40) never produce NDT pipes and do not get a batch number.
+    /// Hollow FG pipes (e.g. Pipe Type FG, Pipe Size 50x50 / 100x40) never produce NDT pipes;
+    /// output CSV NDT Batch No is left blank (no <c>10001</c> placeholder).
     /// </summary>
     public static bool ShouldOmitNdtBatchNumber(string? pipeType, string? pipeSize)
     {

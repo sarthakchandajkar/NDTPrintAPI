@@ -40,11 +40,7 @@ public static class SlitAcceptedCsvLookup
     {
         try
         {
-            await using var stream = new FileStream(
-                path,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete);
+            await using var stream = CsvFolderReadOnlyIO.OpenRead(path);
             using var reader = new StreamReader(stream);
             var headerRaw = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
             if (headerRaw is null)

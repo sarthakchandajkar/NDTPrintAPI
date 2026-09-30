@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Models;
@@ -354,6 +354,7 @@ public sealed class PoReopenLifecycleTests
             output,
             new MillBundleStateLock(),
             new MutableWipProvider(null),
+            new PoEndSlitEndFlushDeferral(),
             Monitor(opts),
             TestMillOwnership.Monolith(),
             NullLogger<PoLifecycleSweepWorker>.Instance);
@@ -377,6 +378,7 @@ public sealed class PoReopenLifecycleTests
             output,
             new MillBundleStateLock(),
             wip,
+            new PoEndSlitEndFlushDeferral(),
             Monitor(opts),
             TestMillOwnership.Monolith(),
             NullLogger<PoLifecycleSweepWorker>.Instance);
@@ -401,6 +403,7 @@ public sealed class PoReopenLifecycleTests
             new NoOpPlcCloseRepo(),
             NoOpCsvFillService.Instance,
             new PlcHandshakeStatusRegistry(),
+            new PoEndSlitEndFlushDeferral(),
             Monitor(opts),
             NullLogger<PoEndWorkflowService>.Instance);
 

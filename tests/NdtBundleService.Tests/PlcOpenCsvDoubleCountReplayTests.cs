@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Models;
@@ -183,7 +183,22 @@ public sealed class PlcOpenCsvDoubleCountReplayTests
             runtime,
             new MillBundleStateLock(),
             new NoOpPlcCloseRepo(),
+            new PoEndSlitEndFlushDeferral(),
+            new NoOpPoEndWorkflow(),
             NullLogger<PlcSlitEndBundleCloser>.Instance);
+
+    private sealed class NoOpPoEndWorkflow : IPoEndWorkflowService
+    {
+        public Task<PoEndWorkflowResult> ExecuteAsync(
+            string poNumber, int millNo, bool advancePoPlanFile, CancellationToken cancellationToken, Guid? correlationId = null) =>
+            Task.FromResult(new PoEndWorkflowResult());
+        public Task<PoEndWorkflowResult> ExecuteAsync(
+            string poNumber, int millNo, bool advancePoPlanFile, CancellationToken cancellationToken, Guid? correlationId, int? plcNdtCountFinal) =>
+            Task.FromResult(new PoEndWorkflowResult());
+        public Task<(int BundlesClosed, int TotalPcs)> CompleteSlitEndDeferredFlushAsync(
+            string poNumber, int millNo, int? plcNdtCountFinal, Guid? correlationId, CancellationToken cancellationToken) =>
+            Task.FromResult((0, 0));
+    }
 
     private sealed class FakePlcCloseEngine : IBundleEngine
     {

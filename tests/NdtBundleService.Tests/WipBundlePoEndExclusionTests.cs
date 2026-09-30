@@ -1,4 +1,4 @@
-﻿using System.Reflection;
+using System.Reflection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
@@ -252,6 +252,8 @@ public sealed class WipBundlePoEndExclusionTests
             runtime,
             new MillBundleStateLock(),
             new NoOpPlcCloseRepo(),
+            new PoEndSlitEndFlushDeferral(),
+            new NoOpPoEndWorkflowForSlitEnd(),
             NullLogger<PlcSlitEndBundleCloser>.Instance);
 
         var mill = new MillConfig { Name = "Mill-1", MillNo = 1 };
@@ -264,6 +266,34 @@ public sealed class WipBundlePoEndExclusionTests
         Assert.Equal(stablePo, InputSlitCsvParsing.NormalizePo(stablePo));
         Assert.Equal(6, runtime.GetSizeCounts(stablePo, 1).GetValueOrDefault("Default"));
         Assert.Equal(0, runtime.GetSizeCounts("1000060363", 1).GetValueOrDefault("Default"));
+    }
+
+    private sealed class NoOpPoEndWorkflowForSlitEnd : IPoEndWorkflowService
+    {
+        public Task<PoEndWorkflowResult> ExecuteAsync(
+            string poNumber,
+            int millNo,
+            bool advancePoPlanFile,
+            CancellationToken cancellationToken,
+            Guid? correlationId = null) =>
+            Task.FromResult(new PoEndWorkflowResult());
+
+        public Task<PoEndWorkflowResult> ExecuteAsync(
+            string poNumber,
+            int millNo,
+            bool advancePoPlanFile,
+            CancellationToken cancellationToken,
+            Guid? correlationId,
+            int? plcNdtCountFinal) =>
+            Task.FromResult(new PoEndWorkflowResult());
+
+        public Task<(int BundlesClosed, int TotalPcs)> CompleteSlitEndDeferredFlushAsync(
+            string poNumber,
+            int millNo,
+            int? plcNdtCountFinal,
+            Guid? correlationId,
+            CancellationToken cancellationToken) =>
+            Task.FromResult((0, 0));
     }
 
     private sealed class FormationStub : IFormationChartProvider

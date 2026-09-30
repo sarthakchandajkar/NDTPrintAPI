@@ -40,7 +40,7 @@ public sealed class PlcHandshakeMillStatus
 
     public int? NokCount { get; set; }
 
-    /// <summary>NDT count for dashboard (zeroed after PO end until PO ID changes).</summary>
+    /// <summary>NDT count for dashboard (zeroed after PO end until handshake ack completes).</summary>
     public int? NdtCount { get; set; }
 
     public int? PoId { get; set; }

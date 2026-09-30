@@ -30,16 +30,16 @@ public sealed class FillToTargetCutoverAndConfigTests
     }
 
     [Fact]
-    public void MillCsvBatchMode_zero_ndt_and_hollow_default_to_10001_all_mills()
+    public void MillCsvBatchMode_zero_ndt_defaults_10001_hollow_defaults_empty_all_mills()
     {
         var opt = new NdtBundleOptions();
         for (var m = 1; m <= 4; m++)
         {
             var entry = MillCsvBatchModeResolver.Resolve(opt, m);
             Assert.Equal("10001", entry.ZeroNdtValue);
-            Assert.Equal("10001", entry.HollowFgValue);
+            Assert.Equal("", entry.HollowFgValue);
             var (hollowCsv, hollowLink) = MillCsvBatchModeResolver.ResolveNonFillCsvBatch(entry, isHollowFg: true, ndtPipes: 5);
-            Assert.Equal("10001", hollowCsv);
+            Assert.Equal("", hollowCsv);
             Assert.False(hollowLink);
             var (zeroCsv, zeroLink) = MillCsvBatchModeResolver.ResolveNonFillCsvBatch(entry, isHollowFg: false, ndtPipes: 0);
             Assert.Equal("10001", zeroCsv);

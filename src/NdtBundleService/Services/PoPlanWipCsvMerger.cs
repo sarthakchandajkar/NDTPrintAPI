@@ -19,7 +19,8 @@ internal static class PoPlanWipCsvMerger
         ILogger logger,
         CancellationToken cancellationToken)
     {
-        await using var stream = File.OpenRead(filePath);
+        // Read-only: replicate PO plan CSV into SQL; never modify the source file on disk.
+        await using var stream = CsvFolderReadOnlyIO.OpenRead(filePath);
         using var reader = new StreamReader(stream);
 
         var headerLine = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);

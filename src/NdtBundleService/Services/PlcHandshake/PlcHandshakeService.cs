@@ -29,17 +29,22 @@ public sealed class PlcHandshakeService
     private readonly IS7ConnectionProvider _s7;
     private readonly IPlcSlitEndBundleCloser? _slitEndCloser;
     private readonly IHandshakeEventRepository _handshakeEvents;
+    private readonly IPlcPoEndManualConfirmStore _manualConfirmStore;
     private readonly PlcHandshakeEdgeTracker _edge;
     private readonly ILogger<PlcHandshakeService> _logger;
 
     private bool _handshakeInProgress;
     private bool _ackAwaitingTriggerClear;
+    private bool _awaitingManualConfirm;
     private DateTimeOffset? _idleTriggerTrueSinceUtc;
     private System.DateTime _ackClearDeadlineUtc;
     private volatile bool _plcConnectionEnabled;
     private bool _settingsTestInProgress;
-    private bool _suppressNdtUntilPoChange;
-    private int _poIdWhenSuppressed;
+    /// <summary>
+    /// After PO end, zero dashboard NDT until the M40.6/M40.7 handshake completes.
+    /// Cleared on ack-drop success — not on DB251 PoId change (that word is often unused / stuck at 0).
+    /// </summary>
+    private bool _suppressNdtUntilHandshakeComplete;
     private HandshakeAuditSession? _audit;
     private bool _auditStartupRecovery;
 
@@ -68,7 +73,8 @@ public sealed class PlcHandshakeService
         IS7ConnectionProvider s7,
         ILogger<PlcHandshakeService> logger,
         IPlcSlitEndBundleCloser? slitEndCloser = null,
-        IHandshakeEventRepository? handshakeEvents = null)
+        IHandshakeEventRepository? handshakeEvents = null,
+        IPlcPoEndManualConfirmStore? manualConfirmStore = null)
     {
         _mill = mill;
         _options = options;
@@ -83,6 +89,7 @@ public sealed class PlcHandshakeService
         _s7 = s7;
         _slitEndCloser = slitEndCloser;
         _handshakeEvents = handshakeEvents ?? NullHandshakeEventRepository.Instance;
+        _manualConfirmStore = manualConfirmStore ?? new PlcPoEndManualConfirmStore();
         _edge = new PlcHandshakeEdgeTracker(options);
         _logger = logger;
         _plcConnectionEnabled = mill.PlcHandshakeEnabled;
@@ -121,6 +128,9 @@ public sealed class PlcHandshakeService
             DisconnectPlc();
             _edge.ResetTriggerEdgeState(reprime: true);
             _ackAwaitingTriggerClear = false;
+            _awaitingManualConfirm = false;
+            _suppressNdtUntilHandshakeComplete = false;
+            _manualConfirmStore.Clear(millNo);
             _s7.ResetReconnectBackoff();
             UpdateStatus(millNo, s =>
             {
@@ -252,6 +262,8 @@ public sealed class PlcHandshakeService
                 DisconnectPlc();
                 _edge.ResetTriggerEdgeState(reprime: true);
                 _ackAwaitingTriggerClear = false;
+                _awaitingManualConfirm = false;
+                _manualConfirmStore.Clear(millNo);
                 _audit = null;
                 _auditStartupRecovery = false;
                 await DelayReconnectAsync(stoppingToken).ConfigureAwait(false);
@@ -418,7 +430,9 @@ public sealed class PlcHandshakeService
         }
         else if (!_handshakeInProgress && !_settingsTestInProgress)
         {
-            if (_ackAwaitingTriggerClear)
+            if (_awaitingManualConfirm)
+                SetState(millNo, "AwaitingManualConfirm");
+            else if (_ackAwaitingTriggerClear)
                 SetState(millNo, "WaitingTriggerClear");
             else if (trigger && _edge.PoChangePulseHandled)
                 SetState(millNo, "Idle (pulse handled, waiting for trigger clear)");
@@ -515,7 +529,7 @@ public sealed class PlcHandshakeService
         UpdateStatus(millNo, s => s.AckActive = false);
     }
 
-    private Task RunHandshakeCoreAsync(int millNo, CancellationToken stoppingToken, bool startupRecovery = false)
+    private async Task RunHandshakeCoreAsync(int millNo, CancellationToken stoppingToken, bool startupRecovery = false)
     {
         SetState(millNo, startupRecovery ? "StartupRecovery" : "ProcessingPoChange");
 
@@ -555,44 +569,135 @@ public sealed class PlcHandshakeService
                 _logger.LogDebug(ex, "{MillName}: could not read PO/NDT from DB{Db} at PO change start.", _mill.Name, _options.CountsDbNumber);
             }
 
-            _suppressNdtUntilPoChange = true;
-            _poIdWhenSuppressed = poIdVal;
-            UpdateStatus(millNo, s =>
+            // Manual confirm: keep live NDT visible until operator confirms (merge uses it).
+            // Auto path: hold dashboard NDT at 0 until ack drop.
+            if (!_options.ManualConfirmPoEnd)
             {
-                s.LastPoEnd = new PlcHandshakeLastPoEnd
+                _suppressNdtUntilHandshakeComplete = true;
+                UpdateStatus(millNo, s =>
                 {
-                    PoId = poIdVal,
-                    NdtCountFinal = ndtFinal,
-                    TimestampUtc = detectedAt
-                };
-                s.NdtCount = 0;
-                s.AckWriteFailedAlarm = false;
-                s.StuckTriggerAlarm = false;
-            });
+                    s.LastPoEnd = new PlcHandshakeLastPoEnd
+                    {
+                        PoId = poIdVal,
+                        NdtCountFinal = ndtFinal,
+                        TimestampUtc = detectedAt
+                    };
+                    s.NdtCount = 0;
+                    s.AckWriteFailedAlarm = false;
+                    s.StuckTriggerAlarm = false;
+                });
+            }
+            else
+            {
+                UpdateStatus(millNo, s =>
+                {
+                    s.LastPoEnd = new PlcHandshakeLastPoEnd
+                    {
+                        PoId = poIdVal,
+                        NdtCountFinal = ndtFinal,
+                        TimestampUtc = detectedAt
+                    };
+                    s.AckWriteFailedAlarm = false;
+                    s.StuckTriggerAlarm = false;
+                });
+            }
 
             BeginHandshakeAudit(millNo, correlationId, detectedAt, poIdVal, ndtFinal, startupRecovery);
 
-            PlcPoEndEdgeProcessor.ProcessDecoupledEdge(
-                new PlcPoEndEdgeProcessor.EdgeProcessInput(
-                    millNo,
-                    _mill.Name,
-                    poIdVal,
-                    ndtFinal,
-                    correlationId,
-                    detectedAt,
-                    startupRecovery,
-                    _mill.TriggerAddress),
-                beginAckTrue: () => BeginMesAckSequence(millNo),
-                tryEnqueue: _plcPoEndQueue.TryEnqueue,
-                _logger);
+            if (_options.ManualConfirmPoEnd)
+            {
+                await ArmManualConfirmPendingAsync(millNo, poIdVal, ndtFinal, correlationId, detectedAt)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                PlcPoEndEdgeProcessor.ProcessDecoupledEdge(
+                    new PlcPoEndEdgeProcessor.EdgeProcessInput(
+                        millNo,
+                        _mill.Name,
+                        poIdVal,
+                        ndtFinal,
+                        correlationId,
+                        detectedAt,
+                        startupRecovery,
+                        _mill.TriggerAddress),
+                    beginAckTrue: () => BeginMesAckSequence(millNo),
+                    tryEnqueue: _plcPoEndQueue.TryEnqueue,
+                    _logger);
+            }
         }
         else
         {
             BeginHandshakeAudit(millNo, correlationId, detectedAt, poIdVal: 0, ndtFinal: 0, startupRecovery);
             BeginMesAckSequence(millNo);
         }
+    }
 
-        return Task.CompletedTask;
+    private async Task ArmManualConfirmPendingAsync(
+        int millNo,
+        int poIdVal,
+        int ndtFinal,
+        Guid correlationId,
+        DateTimeOffset detectedAt)
+    {
+        string? runningPo = null;
+        try
+        {
+            runningPo = await _wipRunningPo.TryGetRunningPoForMillAsync(millNo, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "{MillName}: could not resolve running PO at manual-confirm arm.", _mill.Name);
+        }
+
+        if (string.IsNullOrWhiteSpace(runningPo))
+        {
+            try
+            {
+                var byMill = await _activePoPerMill.GetLatestPoByMillAsync(CancellationToken.None)
+                    .ConfigureAwait(false);
+                if (byMill.TryGetValue(millNo, out var slitPo) && !string.IsNullOrWhiteSpace(slitPo))
+                    runningPo = slitPo;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "{MillName}: could not resolve slit PO at manual-confirm arm.", _mill.Name);
+            }
+        }
+
+        _manualConfirmStore.Arm(new PlcPoEndManualConfirmPending(
+            millNo,
+            _mill.Name,
+            poIdVal,
+            ndtFinal,
+            correlationId,
+            detectedAt,
+            runningPo));
+
+        _awaitingManualConfirm = true;
+        SetState(millNo, "AwaitingManualConfirm");
+        _logger.LogInformation(
+            "{MillName}: PO change edge held for manual confirm — Mill {MillNo}, PO_Id {PoId}, NDT {Ndt}, RunningPo {RunningPo}, CorrelationId {CorrelationId}. Confirm on dashboard /po-end.",
+            _mill.Name,
+            millNo,
+            poIdVal,
+            ndtFinal,
+            runningPo ?? "(unknown)",
+            correlationId);
+    }
+
+    /// <summary>
+    /// Called after operator dashboard confirm (remainder flush already done). Starts MES ack TRUE.
+    /// </summary>
+    public void BeginManualConfirmAck(int millNo)
+    {
+        _manualConfirmStore.Clear(millNo);
+        _awaitingManualConfirm = false;
+        // Hold NDT at 0 for the brief ack window (same as auto path after edge).
+        _suppressNdtUntilHandshakeComplete = true;
+        UpdateStatus(millNo, s => s.NdtCount = 0);
+        BeginMesAckSequence(millNo);
     }
 
     private void BeginMesAckSequence(int millNo)
@@ -693,6 +798,10 @@ public sealed class PlcHandshakeService
             "{MillName}: wrote ack {Ack}=FALSE — handshake complete.",
             _mill.Name,
             _mill.AckAddress);
+
+        // Resume live DB251 NDT on the dashboard. Do not wait for PoId (DB251.DBW8) to change —
+        // that word is often unused/stuck at 0 on plant PLCs while PO change uses DB50 Slit PO_IDs.
+        _suppressNdtUntilHandshakeComplete = false;
 
         var outcome = forceDrop
             ? HandshakeOutcome.TriggerTimeoutForceAckDrop
@@ -797,7 +906,8 @@ public sealed class PlcHandshakeService
 
     private void TryRaiseStuckTriggerAlarm(int millNo, bool trigger)
     {
-        if (_audit is null || !trigger)
+        // Manual confirm intentionally leaves M40.6 TRUE until the operator confirms.
+        if (_awaitingManualConfirm || _audit is null || !trigger)
             return;
 
         var limit = Math.Max(0, _options.StuckTriggerAlarmSeconds);
@@ -828,6 +938,7 @@ public sealed class PlcHandshakeService
             || _handshakeInProgress
             || _settingsTestInProgress
             || _ackAwaitingTriggerClear
+            || _awaitingManualConfirm
             || _audit is not null
             || IsS7PoEndHandshakeDisabled())
         {
@@ -896,14 +1007,10 @@ public sealed class PlcHandshakeService
             var poId = ReadDbInt(_options.PoIdByteOffset);
             var slitId = ReadDbInt(_options.SlitIdByteOffset);
 
-            var ndtDisplay = ndtRaw;
-            if (!IsS7PoEndHandshakeDisabled() && _suppressNdtUntilPoChange)
-            {
-                if (poId != _poIdWhenSuppressed)
-                    _suppressNdtUntilPoChange = false;
-                else
-                    ndtDisplay = 0;
-            }
+            // Hold NDT at 0 only while the PO-end handshake is in progress (edge → ack drop).
+            var ndtDisplay = !IsS7PoEndHandshakeDisabled() && _suppressNdtUntilHandshakeComplete
+                ? 0
+                : ndtRaw;
 
             UpdateStatus(millNo, s =>
             {

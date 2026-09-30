@@ -9,7 +9,8 @@ namespace NdtBundleService.Services.PlcHandshake;
 /// <summary>
 /// Detects slit-end and accumulates live PLC NDT into the toward-next-bundle remainder (sizeCounts / MW56).
 /// Closes and prints when the accumulated remainder meets the formation-chart threshold.
-/// Default detection: Slit ID change (DB251.DBW10). Optional merker override via config.
+/// Detection order: optional DB/merker rising edge (<c>L1_ButtEnd</c> / M-bit), else Slit ID change (DB251.DBW10).
+/// When Immediate PO-end deferred a remainder flush (slit in progress), completes that flush after slit-end accumulate.
 /// </summary>
 public interface IPlcSlitEndBundleCloser
 {
@@ -35,6 +36,8 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
     private readonly INdtBundleRuntimeStateStore _runtimeState;
     private readonly IMillBundleStateLock _millLock;
     private readonly INdtBundleRepository _bundleRepository;
+    private readonly IPoEndSlitEndFlushDeferral _poEndDeferral;
+    private readonly IPoEndWorkflowService _poEndWorkflow;
     private readonly ILogger<PlcSlitEndBundleCloser> _logger;
 
     private readonly Dictionary<int, int> _prevNdtByMill = new();
@@ -53,6 +56,8 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
         INdtBundleRuntimeStateStore runtimeState,
         IMillBundleStateLock millLock,
         INdtBundleRepository bundleRepository,
+        IPoEndSlitEndFlushDeferral poEndDeferral,
+        IPoEndWorkflowService poEndWorkflow,
         ILogger<PlcSlitEndBundleCloser> logger)
     {
         _options = options;
@@ -64,6 +69,8 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
         _runtimeState = runtimeState;
         _millLock = millLock;
         _bundleRepository = bundleRepository;
+        _poEndDeferral = poEndDeferral;
+        _poEndWorkflow = poEndWorkflow;
         _logger = logger;
     }
 
@@ -104,8 +111,13 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
         if (string.IsNullOrEmpty(sizeKey))
             sizeKey = "Default";
 
+        PoEndSlitEndFlushPending? completeDeferral = null;
+
         using (await _millLock.AcquireAsync(millNo, cancellationToken).ConfigureAwait(false))
         {
+            if (poNorm is null && _poEndDeferral.TryGet(millNo, out var armed))
+                poNorm = armed.PoNumber;
+
             if (poNorm is not null)
             {
                 await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
@@ -123,7 +135,9 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
                             cancellationToken)
                         .ConfigureAwait(false);
                     _closedThisSlitByMill.Add(millNo);
-                    return;
+                    if (_poEndDeferral.TryTake(millNo, out var pendingAfterLeftover))
+                        completeDeferral = pendingAfterLeftover;
+                    goto AfterLock;
                 }
             }
 
@@ -133,10 +147,31 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
             if (_closedThisSlitByMill.Contains(millNo))
                 return;
 
+            if (poNorm is null && _poEndDeferral.TryGet(millNo, out var pendingPo))
+                poNorm = pendingPo.PoNumber;
+
             if (poNorm is null)
             {
                 _logger.LogDebug("{MillName}: slit-end detected ({Reason}) but no active PO; skip PLC accumulate/close.", mill.Name, edgeReason);
                 return;
+            }
+
+            // Refresh pipe size / threshold if PO came from deferral after lookup.
+            if (string.IsNullOrWhiteSpace(pipeSize))
+            {
+                try
+                {
+                    pipeSize = await _pipeSizeProvider.TryGetPipeSizeForPoAsync(poNorm, cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    /* default */
+                }
+
+                threshold = FormationChartLookup.ResolveThreshold(formation, pipeSize);
+                sizeKey = FormationChartLookup.NormalizePipeSizeKey(pipeSize);
+                if (string.IsNullOrEmpty(sizeKey))
+                    sizeKey = "Default";
             }
 
             await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
@@ -160,23 +195,37 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
                     prevAccumulated);
             }
 
-            if (accumulated < threshold || accumulated <= 0)
+            if (accumulated >= threshold && accumulated > 0)
             {
-                _closedThisSlitByMill.Add(millNo);
-                return;
+                await CloseAccumulatedAsync(
+                        millNo,
+                        mill,
+                        poNorm,
+                        pipeSize,
+                        accumulated,
+                        edgeReason,
+                        cancellationToken)
+                    .ConfigureAwait(false);
             }
 
-            await CloseAccumulatedAsync(
-                    millNo,
-                    mill,
-                    poNorm,
-                    pipeSize,
-                    accumulated,
-                    edgeReason,
+            _closedThisSlitByMill.Add(millNo);
+
+            // After this slit ends, complete any Immediate PO-end flush that waited for ButtEnd / slit-end bit.
+            if (_poEndDeferral.TryTake(millNo, out var pending))
+                completeDeferral = pending;
+        }
+
+        AfterLock:
+        if (completeDeferral is { } deferred)
+        {
+            await _poEndWorkflow
+                .CompleteSlitEndDeferredFlushAsync(
+                    deferred.PoNumber,
+                    deferred.MillNo,
+                    deferred.PlcNdtAtArm,
+                    deferred.CorrelationId,
                     cancellationToken)
                 .ConfigureAwait(false);
-
-            _closedThisSlitByMill.Add(millNo);
         }
     }
 
@@ -215,8 +264,9 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
     }
 
     /// <summary>
-    /// Detects slit end. Prefer optional merker rising edge when configured;
-    /// otherwise Slit ID (DB251.DBW10) change means the previous slit finished.
+    /// Detects slit end. Prefer optional DB/merker rising edge when configured
+    /// (e.g. <c>DB270.DBX13.0</c> L1_ButtEnd); otherwise Slit ID (DB251.DBW10) change
+    /// means the previous slit finished.
     /// </summary>
     internal bool TryDetectSlitEnd(
         int millNo,
@@ -230,12 +280,16 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
         reason = "";
         plcCountForClose = liveNdtCount;
 
-        if (handshake.SlitEndTriggerByte >= 0)
+        if (handshake.IsSlitEndBitTriggerConfigured)
         {
             var bit = Math.Clamp(handshake.SlitEndTriggerBit, 0, 7);
+            var byteOffset = handshake.SlitEndTriggerByte;
+            var dbNumber = handshake.SlitEndTriggerDbNumber;
             var active = s7.Read(ops =>
             {
-                var value = ops.Read(DataType.Memory, 0, handshake.SlitEndTriggerByte, VarType.Bit, 1, (byte)bit);
+                object? value = dbNumber > 0
+                    ? ops.Read(DataType.DataBlock, dbNumber, byteOffset, VarType.Bit, 1, (byte)bit)
+                    : ops.Read(DataType.Memory, 0, byteOffset, VarType.Bit, 1, (byte)bit);
                 return value is true;
             });
 
@@ -244,7 +298,9 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
             if (active && !prev)
             {
                 _closedThisSlitByMill.Remove(millNo);
-                reason = $"M{handshake.SlitEndTriggerByte}.{bit} rising edge";
+                reason = dbNumber > 0
+                    ? $"DB{dbNumber}.DBX{byteOffset}.{bit} rising edge"
+                    : $"M{byteOffset}.{bit} rising edge";
                 plcCountForClose = liveNdtCount;
                 return true;
             }

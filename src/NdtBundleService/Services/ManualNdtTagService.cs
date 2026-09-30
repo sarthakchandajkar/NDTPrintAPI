@@ -26,6 +26,35 @@ public interface IManualNdtTagService
     Task<ManualStationRecordResult> RecordAsync(ManualStationRecordRequest request, CancellationToken cancellationToken);
     /// <summary>Adjust OK/Rejected for a station that was already recorded; may cascade clearing downstream steps and replaces the prior CSV.</summary>
     Task<ManualStationRecordResult> ReconcileAsync(ManualStationRecordRequest request, CancellationToken cancellationToken);
+    /// <summary>
+    /// Reprint only (no count change). Uses <c>Manual_Station_Run</c> work-station / hydro type
+    /// to pick the printer and ZPL station text.
+    /// </summary>
+    Task<ManualStationReprintResult> ReprintStationTagAsync(
+        ManualStationReprintRequest request,
+        CancellationToken cancellationToken);
+}
+
+public sealed class ManualStationReprintRequest
+{
+    public string NdtBatchNo { get; init; } = string.Empty;
+    public string WorkStation { get; init; } = string.Empty;
+    public string? HydrotestingType { get; init; }
+    public int OkPcs { get; init; }
+    public string? PoNumber { get; init; }
+    public int? MillNo { get; init; }
+}
+
+public sealed class ManualStationReprintResult
+{
+    public string NdtBatchNo { get; init; } = string.Empty;
+    public string WorkStation { get; init; } = string.Empty;
+    public ManualTagStation Station { get; init; }
+    public int OperatorStationNumber { get; init; }
+    public int OkPcs { get; init; }
+    public bool Printed { get; init; }
+    public string? PrintError { get; init; }
+    public string Message { get; init; } = string.Empty;
 }
 
 public sealed class ManualStationContext
@@ -343,6 +372,118 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             Printed = printed,
             PrintError = printError
         };
+    }
+
+    public async Task<ManualStationReprintResult> ReprintStationTagAsync(
+        ManualStationReprintRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request is null)
+            throw new ArgumentNullException(nameof(request));
+        if (string.IsNullOrWhiteSpace(request.NdtBatchNo))
+            throw new ArgumentException("NdtBatchNo is required.", nameof(request));
+        if (request.OkPcs < 0)
+            throw new ArgumentException("OkPcs must be non-negative.", nameof(request));
+        if (!TryParseWorkStation(request.WorkStation, request.HydrotestingType, out var station, out var opStation))
+            throw new ArgumentException(
+                "Unrecognized WorkStation / HydrotestingType. Expected Visual/Revisual Station 1|2 or Hydrotesting with Four Head / Big type.");
+
+        var batch = request.NdtBatchNo.Trim();
+        var workStation = WorkStationColumnValue(station, opStation);
+        var pcs = request.OkPcs;
+
+        string po;
+        int millNo;
+        if (!string.IsNullOrWhiteSpace(request.PoNumber) && request.MillNo is >= 1 and <= 4)
+        {
+            po = request.PoNumber.Trim();
+            millNo = request.MillNo.Value;
+        }
+        else
+        {
+            var state = await LoadOrCreateStateAsync(batch, cancellationToken).ConfigureAwait(false);
+            po = !string.IsNullOrWhiteSpace(request.PoNumber) ? request.PoNumber.Trim() : state.PoNumber;
+            millNo = request.MillNo is >= 1 and <= 4 ? request.MillNo.Value : state.MillNo;
+        }
+
+        if (string.IsNullOrWhiteSpace(po) || millNo is < 1 or > 4)
+            throw new InvalidOperationException(
+                $"Cannot reprint station tag for {batch}: PO / mill could not be resolved.");
+
+        var (printed, printError) = await TryPrintTagAsync(
+                po,
+                millNo,
+                batch,
+                pcs,
+                DateTime.Now,
+                station,
+                opStation,
+                isReprint: true,
+                cancellationToken)
+            .ConfigureAwait(false);
+        await RecordStationPrintAsync(batch, workStation, printed, printError, cancellationToken).ConfigureAwait(false);
+
+        return new ManualStationReprintResult
+        {
+            NdtBatchNo = batch,
+            WorkStation = workStation,
+            Station = station,
+            OperatorStationNumber = opStation,
+            OkPcs = pcs,
+            Printed = printed,
+            PrintError = printError,
+            Message = printed
+                ? $"Station tag (Reprint) sent for {batch} ({workStation}, {pcs} pcs)."
+                : printError ?? $"Station tag reprint failed for {batch}."
+        };
+    }
+
+    /// <summary>Maps Manual_Station_Run Work_Station (+ hydro type) back to the station enum used for printers / ZPL.</summary>
+    internal static bool TryParseWorkStation(
+        string? workStation,
+        string? hydrotestingType,
+        out ManualTagStation station,
+        out int operatorStationNumber)
+    {
+        station = ManualTagStation.Visual;
+        operatorStationNumber = 1;
+        var ws = (workStation ?? string.Empty).Trim();
+        if (ws.Length == 0)
+            return false;
+
+        var visual = System.Text.RegularExpressions.Regex.Match(
+            ws,
+            @"^(Visual|Revisual)\s+Station\s+([12])\b",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (visual.Success)
+        {
+            station = visual.Groups[1].Value.Equals("Revisual", StringComparison.OrdinalIgnoreCase)
+                ? ManualTagStation.Revisual
+                : ManualTagStation.Visual;
+            operatorStationNumber = visual.Groups[2].Value == "2" ? 2 : 1;
+            return true;
+        }
+
+        if (!ws.Equals("Hydrotesting", StringComparison.OrdinalIgnoreCase) &&
+            !ws.Contains("hydro", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var hydro = (hydrotestingType ?? string.Empty).Trim();
+        if (hydro.Contains("four", StringComparison.OrdinalIgnoreCase) &&
+            hydro.Contains("head", StringComparison.OrdinalIgnoreCase))
+        {
+            station = ManualTagStation.FourHeadHydrotesting;
+            return true;
+        }
+
+        if (hydro.Contains("big", StringComparison.OrdinalIgnoreCase))
+        {
+            station = ManualTagStation.BigHydrotesting;
+            return true;
+        }
+
+        station = ManualTagStation.Hydrotesting;
+        return true;
     }
 
     private static int NormalizeOperatorStationNumber(ManualTagStation station, int value)
@@ -673,7 +814,10 @@ public sealed class ManualNdtTagService : IManualNdtTagService
     private async Task<FlowState> LoadOrCreateStateAsync(string ndtBatchNo, CancellationToken cancellationToken)
     {
         if (!Options.EnableManualStationStateFiles && InMemoryState.TryGetValue(ndtBatchNo, out var memoryState))
+        {
+            await TryHydrateDurableAsync(memoryState, cancellationToken).ConfigureAwait(false);
             return memoryState;
+        }
 
         if (Options.EnableManualStationStateFiles)
         {
@@ -687,9 +831,15 @@ public sealed class ManualNdtTagService : IManualNdtTagService
                     if (loaded != null)
                     {
                         InMemoryState[ndtBatchNo] = loaded;
-                        return loaded;
+                        // Fall through to hydrate if file has skeleton only.
                     }
                 }
+            }
+
+            if (InMemoryState.TryGetValue(ndtBatchNo, out var fromFile))
+            {
+                await TryHydrateDurableAsync(fromFile, cancellationToken).ConfigureAwait(false);
+                return fromFile;
             }
         }
 
@@ -705,8 +855,120 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             MillNo = bundle.MillNo,
             InitialPcs = bundle.TotalNdtPcs
         };
+        await TryHydrateDurableAsync(state, cancellationToken).ConfigureAwait(false);
         await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
         return state;
+    }
+
+    /// <summary>
+    /// When in-memory/file state has no station records, restore Visual/Hydro/Revisual from
+    /// <c>Manual_Station_Run</c> (preferred) or the latest NDT process CSV.
+    /// </summary>
+    private async Task TryHydrateDurableAsync(FlowState state, CancellationToken cancellationToken)
+    {
+        if (state.Visual is not null || state.Hydrotesting is not null || state.Revisual is not null)
+            return;
+
+        ManualStationFlowHydrator.HydrateResult? hydrated = null;
+        try
+        {
+            var runs = await _traceability
+                .GetManualStationRunsForBatchAsync(state.NdtBatchNo, cancellationToken)
+                .ConfigureAwait(false);
+            hydrated = ManualStationFlowHydrator.TryFromManualStationRuns(runs);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not load Manual_Station_Run to restore station flow for batch {BatchNo}.", state.NdtBatchNo);
+        }
+
+        if (hydrated is null)
+        {
+            try
+            {
+                var metrics = NdtProcessCsvReconcileHelper.TryReadMetricsForBatch(Options, state.NdtBatchNo);
+                if (metrics is not null)
+                {
+                    hydrated = ManualStationFlowHydrator.TryFromNdtProcessMetrics(
+                        metrics.Value.NdtPcs,
+                        metrics.Value.Ok,
+                        metrics.Value.VisualReject,
+                        metrics.Value.HydroReject,
+                        metrics.Value.RevisualReject,
+                        bundleStart: null,
+                        bundleEnd: null);
+                    if (hydrated is not null &&
+                        !string.IsNullOrWhiteSpace(metrics.Value.Po) &&
+                        string.IsNullOrWhiteSpace(state.PoNumber))
+                    {
+                        state.PoNumber = metrics.Value.Po.Trim();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "NDT process CSV hydrate skipped for batch {BatchNo}.", state.NdtBatchNo);
+            }
+        }
+
+        if (hydrated is null)
+            return;
+
+        if (hydrated.Visual is not null)
+        {
+            state.Visual = new StationRecord
+            {
+                OkPcs = hydrated.Visual.OkPcs,
+                RejectedPcs = hydrated.Visual.RejectedPcs,
+                StartTime = hydrated.Visual.StartTime,
+                EndTime = hydrated.Visual.EndTime
+            };
+        }
+
+        if (hydrated.Hydrotesting is not null)
+        {
+            state.Hydrotesting = new StationRecord
+            {
+                OkPcs = hydrated.Hydrotesting.OkPcs,
+                RejectedPcs = hydrated.Hydrotesting.RejectedPcs,
+                StartTime = hydrated.Hydrotesting.StartTime,
+                EndTime = hydrated.Hydrotesting.EndTime
+            };
+        }
+
+        if (hydrated.Revisual is not null)
+        {
+            state.Revisual = new StationRecord
+            {
+                OkPcs = hydrated.Revisual.OkPcs,
+                RejectedPcs = hydrated.Revisual.RejectedPcs,
+                StartTime = hydrated.Revisual.StartTime,
+                EndTime = hydrated.Revisual.EndTime
+            };
+        }
+
+        state.HydroInvalidatedByVisualReconcile = hydrated.HydroInvalidatedByVisualReconcile;
+        state.RevisualInvalidatedByUpstreamReconcile = hydrated.RevisualInvalidatedByUpstreamReconcile;
+
+        if (string.IsNullOrWhiteSpace(state.LastNdtProcessCsvPath))
+        {
+            var folder = (Options.NdtProcessOutputFolder ?? string.Empty).Trim();
+            if (!string.IsNullOrWhiteSpace(folder) && Directory.Exists(folder))
+            {
+                state.LastNdtProcessCsvPath =
+                    NdtProcessCsvReconcileHelper.FindLatestNdtProcessFileForBatch(folder, state.NdtBatchNo);
+            }
+        }
+
+        _logger.LogInformation(
+            "Restored station flow for batch {BatchNo} from {Source} (Visual={HasVisual}, Hydro={HasHydro}, Revisual={HasRevisual}).",
+            state.NdtBatchNo,
+            hydrated.Source ?? "unknown",
+            state.Visual is not null,
+            state.Hydrotesting is not null,
+            state.Revisual is not null);
+
+        await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
     }
 
     private Task SaveStateAsync(FlowState state, CancellationToken cancellationToken)

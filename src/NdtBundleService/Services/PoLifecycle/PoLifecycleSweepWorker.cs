@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
+using NdtBundleService.Services.PlcHandshake;
 using NdtBundleService.Services.PoLifecycle;
 using Serilog.Context;
 
@@ -20,6 +21,7 @@ public sealed class PoLifecycleSweepWorker : BackgroundService
     private readonly IBundleOutputWriter _outputWriter;
     private readonly IMillBundleStateLock _millLock;
     private readonly IWipBundleRunningPoProvider _wipRunningPo;
+    private readonly IPoEndSlitEndFlushDeferral _slitEndFlushDeferral;
     private readonly IOptionsMonitor<NdtBundleOptions> _options;
     private readonly IMillOwnership _millOwnership;
     private readonly ILogger<PoLifecycleSweepWorker> _logger;
@@ -33,6 +35,7 @@ public sealed class PoLifecycleSweepWorker : BackgroundService
         IBundleOutputWriter outputWriter,
         IMillBundleStateLock millLock,
         IWipBundleRunningPoProvider wipRunningPo,
+        IPoEndSlitEndFlushDeferral slitEndFlushDeferral,
         IOptionsMonitor<NdtBundleOptions> options,
         IMillOwnership millOwnership,
         ILogger<PoLifecycleSweepWorker> logger)
@@ -45,6 +48,7 @@ public sealed class PoLifecycleSweepWorker : BackgroundService
         _outputWriter = outputWriter;
         _millLock = millLock;
         _wipRunningPo = wipRunningPo;
+        _slitEndFlushDeferral = slitEndFlushDeferral;
         _options = options;
         _millOwnership = millOwnership;
         _logger = logger;
@@ -90,6 +94,8 @@ public sealed class PoLifecycleSweepWorker : BackgroundService
             await CompleteDrainAsync(entry, cancellationToken).ConfigureAwait(false);
         }
 
+        await CompleteExpiredSlitEndDeferredFlushesAsync(now, opts, cancellationToken).ConfigureAwait(false);
+
         if (!opts.AutoCloseOrphanBundles)
             return;
 
@@ -101,6 +107,37 @@ public sealed class PoLifecycleSweepWorker : BackgroundService
                 continue;
 
             await CloseOrphanIfNeededAsync(entry, now, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task CompleteExpiredSlitEndDeferredFlushesAsync(
+        DateTime utcNow,
+        NdtBundleOptions opts,
+        CancellationToken cancellationToken)
+    {
+        var maxWait = TimeSpan.FromMinutes(Math.Max(1, opts.PoEndAwaitSlitEndMinutes));
+        foreach (var pending in _slitEndFlushDeferral.SnapshotExpired(utcNow, maxWait))
+        {
+            if (!_millOwnership.Owns(pending.MillNo))
+                continue;
+            if (!_slitEndFlushDeferral.TryTake(pending.MillNo, out var taken))
+                continue;
+
+            _logger.LogWarning(
+                "PO end Immediate slit-end wait expired ({Minutes} min) — flushing remainder for PO {PO} Mill {Mill}. CorrelationId {CorrelationId}",
+                Math.Max(1, opts.PoEndAwaitSlitEndMinutes),
+                taken.PoNumber,
+                taken.MillNo,
+                taken.CorrelationId);
+
+            await _poEndWorkflow
+                .CompleteSlitEndDeferredFlushAsync(
+                    taken.PoNumber,
+                    taken.MillNo,
+                    taken.PlcNdtAtArm,
+                    taken.CorrelationId,
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
     }
 

@@ -177,6 +177,7 @@ public sealed class MillOwnershipIsolationTests : IDisposable
             new NoOpOutput(),
             new MillBundleStateLock(),
             new StubWip(new Dictionary<int, string>()),
+            new PoEndSlitEndFlushDeferral(),
             new TestOptionsMonitor<NdtBundleOptions>(opts),
             TestMillOwnership.Mill(1),
             NullLogger<PoLifecycleSweepWorker>.Instance);
@@ -341,6 +342,14 @@ public sealed class MillOwnershipIsolationTests : IDisposable
             Guid? correlationId,
             int? plcNdtCountFinal) =>
             ExecuteAsync(poNumber, millNo, advancePoPlanFile, cancellationToken, correlationId);
+
+        public Task<(int BundlesClosed, int TotalPcs)> CompleteSlitEndDeferredFlushAsync(
+            string poNumber,
+            int millNo,
+            int? plcNdtCountFinal,
+            Guid? correlationId,
+            CancellationToken cancellationToken) =>
+            Task.FromResult((0, 0));
     }
 
     private sealed class StubWip(IReadOnlyDictionary<int, string> map) : IWipBundleRunningPoProvider

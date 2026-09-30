@@ -62,6 +62,10 @@ public static class NdtBundleServiceCollectionExtensions
         services.AddSingleton<IPoPlanProvider, PoPlanCsvProvider>();
         services.AddSingleton<IPoPlanWipRepository, PoPlanWipRepository>();
         services.AddSingleton<IPoPlanWipImporter, PoPlanWipImporter>();
+        services.AddSingleton<ISlitAcceptedRepository, SlitAcceptedRepository>();
+        services.AddSingleton<ISlitAcceptedImporter, SlitAcceptedImporter>();
+        services.AddSingleton<IFgBundleRepository, FgBundleRepository>();
+        services.AddSingleton<IFgBundleImporter, FgBundleImporter>();
         services.AddSingleton<IFormationChartProvider, FormationChartCsvProvider>();
         services.AddSingleton<IPipeSizeProvider, PipeSizeCsvProvider>();
         services.AddSingleton<IPoPlanWipEnrichmentProvider, PoPlanWipEnrichmentProvider>();
@@ -133,6 +137,7 @@ public static class NdtBundleServiceCollectionExtensions
         services.AddSingleton<IWipBundleReconciliationService, WipBundleReconciliationService>();
         services.AddSingleton<PlcPoEndQueue>();
         services.AddSingleton<IS7ConnectionProviderRegistry, S7ConnectionProviderRegistry>();
+        services.AddSingleton<IPoEndSlitEndFlushDeferral, PoEndSlitEndFlushDeferral>();
         services.AddSingleton<IPlcSlitEndBundleCloser, PlcSlitEndBundleCloser>();
         services.AddSingleton<IHandshakeEventRepository, HandshakeEventRepository>();
         services.AddSingleton<IMillNdtCountReader, S7MillNdtCountReader>();
@@ -149,6 +154,8 @@ public static class NdtBundleServiceCollectionExtensions
         services.AddSingleton<PlcHandshakeStatusRegistry>();
         services.AddSingleton<IPlcLiveSnapshotService, PlcLiveSnapshotService>();
         services.AddSingleton<PlcHandshakeCoordinator>();
+        services.AddSingleton<IPlcPoEndManualConfirmStore, PlcPoEndManualConfirmStore>();
+        services.AddSingleton<IPlcPoEndManualConfirmService, PlcPoEndManualConfirmService>();
         services.AddSingleton<IPoChangeHandler, PoChangeHandler>();
         services.AddSingleton<IMillHooterPlcValuesService, MillHooterPlcValuesService>();
         services.AddSingleton<OpenAccumulationOverrideService>();
@@ -221,10 +228,14 @@ public static class NdtBundleServiceCollectionExtensions
         if (role.IsMonolith || role.IsShared)
             services.AddHostedService<NdtInputSlitSapStatusWorker>();
 
-        if (role.IsMonolith || role.EnablePoPlanWipImport)
+        // Folder → SQL importers (PO_Plan_WIP, Slit_Accepted_Row, Fg_Bundle_Row): Shared only.
+        // Mills set EnablePoPlanWipImport=false; Shared requires it true.
+        if (role.EnablePoPlanWipImport)
         {
             if (PoPlanWipImportSettings.IsEnabled(bundleOptions))
                 services.AddHostedService<PoPlanWipImportHostedService>();
+            if (UploadLookupCsvImportHostedService.IsEnabled(bundleOptions))
+                services.AddHostedService<UploadLookupCsvImportHostedService>();
         }
     }
 }

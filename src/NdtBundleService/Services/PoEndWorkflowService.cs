@@ -23,6 +23,7 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
     private readonly INdtBundleRepository _bundleRepository;
     private readonly ICsvFillService _csvFill;
     private readonly PlcHandshakeStatusRegistry _handshakeStatus;
+    private readonly IPoEndSlitEndFlushDeferral _slitEndFlushDeferral;
     private readonly IOptionsMonitor<NdtBundleOptions> _options;
     private readonly ILogger<PoEndWorkflowService> _logger;
 
@@ -39,6 +40,7 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
         INdtBundleRepository bundleRepository,
         ICsvFillService csvFill,
         PlcHandshakeStatusRegistry handshakeStatus,
+        IPoEndSlitEndFlushDeferral slitEndFlushDeferral,
         IOptionsMonitor<NdtBundleOptions> options,
         ILogger<PoEndWorkflowService> logger,
         ICurrentPoPlanService? currentPoPlanService = null)
@@ -55,6 +57,7 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
         _bundleRepository = bundleRepository;
         _csvFill = csvFill;
         _handshakeStatus = handshakeStatus;
+        _slitEndFlushDeferral = slitEndFlushDeferral;
         _options = options;
         _logger = logger;
         _currentPoPlanService = currentPoPlanService;
@@ -132,19 +135,47 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
             }
             else if (poEndSource == MillPoEndSource.Plc && flushMode == PoEndFlushMode.Immediate)
             {
-                var (closed, pcs) = await FlushPlcImmediateRemainderAsync(
+                var handshake = opts.PlcHandshake ?? new PlcHandshakeOptions();
+                // Manual confirm mode holds flush until the operator button; do not also defer on slit-end bit.
+                var slitInProgress = !handshake.ManualConfirmPoEnd &&
+                                     handshake.IsSlitEndBitTriggerConfigured &&
+                                     plcNdtCountFinal is int liveNdt &&
+                                     liveNdt > 0;
+
+                if (slitInProgress)
+                {
+                    flushDeferred = true;
+                    _slitEndFlushDeferral.Arm(new PoEndSlitEndFlushPending(
+                        millNo,
+                        po,
+                        plcNdtCountFinal,
+                        correlationId,
+                        DateTime.UtcNow));
+                    _poLifecycle.TryMarkDraining(millNo, po, DateTime.UtcNow);
+                    _logger.LogInformation(
+                        "PO end Immediate deferred until slit-end bit: PO {PO} Mill {Mill} liveNdt={LiveNdt} (await up to {Minutes} min). CorrelationId {CorrelationId}",
                         po,
                         millNo,
                         plcNdtCountFinal,
-                        correlationId,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-                bundlesClosed = closed;
-                totalNdtPcsClosed = pcs;
+                        Math.Max(1, opts.PoEndAwaitSlitEndMinutes),
+                        correlationId);
+                }
+                else
+                {
+                    var (closed, pcs) = await FlushPlcImmediateRemainderAsync(
+                            po,
+                            millNo,
+                            plcNdtCountFinal,
+                            correlationId,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    bundlesClosed = closed;
+                    totalNdtPcsClosed = pcs;
 
-                await _batchState.IncrementBatchOnPoEndAsync(po, millNo, cancellationToken).ConfigureAwait(false);
-                await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
-                _poLifecycle.TryMarkDraining(millNo, po, DateTime.UtcNow);
+                    await _batchState.IncrementBatchOnPoEndAsync(po, millNo, cancellationToken).ConfigureAwait(false);
+                    await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
+                    _poLifecycle.TryMarkDraining(millNo, po, DateTime.UtcNow);
+                }
             }
             else
             {
@@ -271,6 +302,45 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
             allowPartial: true).ConfigureAwait(false);
 
         return (bundlesClosed, totalPcs);
+    }
+
+    /// <inheritdoc />
+    public async Task<(int BundlesClosed, int TotalPcs)> CompleteSlitEndDeferredFlushAsync(
+        string poNumber,
+        int millNo,
+        int? plcNdtCountFinal,
+        Guid? correlationId,
+        CancellationToken cancellationToken)
+    {
+        var po = InputSlitCsvParsing.NormalizePo(poNumber);
+        using (correlationId is { } id ? LogContext.PushProperty("CorrelationId", id) : null)
+        {
+            var bundleLock = await _millBundleStateLock.AcquireAsync(millNo, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                _logger.LogInformation(
+                    "PO end Immediate completing after slit-end: PO {PO} Mill {Mill}. CorrelationId {CorrelationId}",
+                    po,
+                    millNo,
+                    correlationId);
+
+                var (closed, pcs) = await FlushPlcImmediateRemainderAsync(
+                        po,
+                        millNo,
+                        plcNdtCountFinal,
+                        correlationId,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
+                await _batchState.IncrementBatchOnPoEndAsync(po, millNo, cancellationToken).ConfigureAwait(false);
+                await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
+                return (closed, pcs);
+            }
+            finally
+            {
+                bundleLock.Dispose();
+            }
+        }
     }
 
     /// <summary>

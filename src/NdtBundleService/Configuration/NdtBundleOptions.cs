@@ -211,10 +211,10 @@ public class NdtBundleOptions
     /// </summary>
     public Dictionary<string, MillCsvBatchModeEntry> MillCsvBatchMode { get; set; } = new(StringComparer.OrdinalIgnoreCase)
     {
-        ["1"] = new MillCsvBatchModeEntry { Mode = "FillToTarget", ZeroNdtValue = "10001", HollowFgValue = "10001" },
-        ["2"] = new MillCsvBatchModeEntry { Mode = "Constant", Value = "10001", ZeroNdtValue = "10001", HollowFgValue = "10001" },
-        ["3"] = new MillCsvBatchModeEntry { Mode = "Constant", Value = "10001", ZeroNdtValue = "10001", HollowFgValue = "10001" },
-        ["4"] = new MillCsvBatchModeEntry { Mode = "Constant", Value = "10001", ZeroNdtValue = "10001", HollowFgValue = "10001" },
+        ["1"] = new MillCsvBatchModeEntry { Mode = "FillToTarget", ZeroNdtValue = "10001", HollowFgValue = "" },
+        ["2"] = new MillCsvBatchModeEntry { Mode = "Constant", Value = "10001", ZeroNdtValue = "10001", HollowFgValue = "" },
+        ["3"] = new MillCsvBatchModeEntry { Mode = "Constant", Value = "10001", ZeroNdtValue = "10001", HollowFgValue = "" },
+        ["4"] = new MillCsvBatchModeEntry { Mode = "Constant", Value = "10001", ZeroNdtValue = "10001", HollowFgValue = "" },
     };
 
     /// <summary>
@@ -233,10 +233,19 @@ public class NdtBundleOptions
 
     /// <summary>
     /// Partial-bundle flush at PO end for <c>PoEndSource=Plc</c> mills: <c>Immediate</c> (default) or <c>AfterDrain</c>.
-    /// Immediate prints the live remainder on M40.6 without waiting for Input Slit CSVs.
+    /// Immediate prints the live remainder on M40.6 without waiting for Input Slit CSVs,
+    /// except when a slit-end bit is configured and live PLC NDT &gt; 0 (slit in progress) —
+    /// then the print waits for the next slit-end rising edge (see <see cref="PoEndAwaitSlitEndMinutes"/>).
     /// File mills always flush immediately (unchanged).
     /// </summary>
     public string PoEndFlushMode { get; set; } = "Immediate";
+
+    /// <summary>
+    /// When Immediate PO-end defers because a slit is in progress (live NDT &gt; 0 and slit-end bit configured),
+    /// maximum minutes to wait for the slit-end bit before forcing the remainder flush.
+    /// Default 45. Ignored when not deferring.
+    /// </summary>
+    public int PoEndAwaitSlitEndMinutes { get; set; } = 45;
 
     /// <summary>
     /// Minutes to accept late slit rows for a Plc mill PO after PO end before the deferred flush / reopen sweep.
@@ -362,6 +371,35 @@ public class NdtBundleOptions
     /// When empty, falls back to <see cref="MinSourceFileLastWriteUtc"/> (no rolling window for import).
     /// </summary>
     public string? PoPlanImportMinLastWriteUtc { get; set; } = "2026-06-01T00:00:00Z";
+
+    /// <summary>
+    /// When true and SQL is configured, import Slitting Slit Accepted CSVs into <c>dbo.Slit_Accepted_Row</c>
+    /// on the Shared instance (folder import hosted service).
+    /// </summary>
+    public bool ImportSlitAcceptedFromFolder { get; set; } = true;
+
+    /// <summary>
+    /// When true and SQL is configured, import <c>FG_*.csv</c> from Bundle / Bundle Accepted into <c>dbo.Fg_Bundle_Row</c>
+    /// on the Shared instance.
+    /// </summary>
+    public bool ImportFgBundleFromFolder { get; set; } = true;
+
+    /// <summary>
+    /// Minutes between Slit Accepted / FG folder scans. 0 = startup import only.
+    /// </summary>
+    public int ImportUploadLookupCsvPollMinutes { get; set; } = 5;
+
+    /// <summary>UTC cutoff for Slit Accepted import (falls back to <see cref="MinSourceFileLastWriteUtc"/>).</summary>
+    public string? SlitAcceptedImportMinLastWriteUtc { get; set; } = "2026-06-01T00:00:00Z";
+
+    /// <summary>UTC cutoff for FG bundle import (falls back to <see cref="MinSourceFileLastWriteUtc"/>).</summary>
+    public string? FgBundleImportMinLastWriteUtc { get; set; } = "2026-06-01T00:00:00Z";
+
+    /// <summary>
+    /// When true, upload CSV generation prefers <c>Slit_Accepted_Row</c> / <c>Fg_Bundle_Row</c> over live folder scans
+    /// (CSV fallback when SQL misses).
+    /// </summary>
+    public bool PreferSqlForUploadLookups { get; set; } = true;
 
     /// <summary>
     /// When false and SQL bundle list fails, returns an empty list instead of scanning all output CSV files (prevents long hangs / timeouts on the dashboard).
