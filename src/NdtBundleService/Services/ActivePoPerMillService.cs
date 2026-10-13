@@ -116,7 +116,9 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
 
     /// <summary>
     /// Shared dashboard: prefer each mill's published <c>Running_Po</c> / waiting flag from
-    /// <c>Mill_Instance_Status</c> (fresh telemetry only) over slit CSV / SQL.
+    /// <c>Mill_Instance_Status</c> over slit CSV / SQL.
+    /// Uses a long freshness window so Summary still shows last-known PO when mill publishers are briefly down
+    /// (avoids falling through to UNC Input Slit / Bundle Accepted scans).
     /// Returns mill numbers currently WaitingForNewWip so callers do not refill them from slit files.
     /// </summary>
     private HashSet<int> OverlayMillPublishedRunningPo(Dictionary<int, string> result)
@@ -125,6 +127,9 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
         if (!UseDatabaseForSummary)
             return waiting;
 
+        // SoftStaleAfter (30s) is for live PLC badges; Running_Po for Summary can be older.
+        var runningPoFreshFor = TimeSpan.FromHours(12);
+
         try
         {
             var now = DateTimeOffset.UtcNow;
@@ -132,7 +137,7 @@ public sealed class ActivePoPerMillService : IActivePoPerMillService
             {
                 if (row.MillNo is < 1 or > 4)
                     continue;
-                if (row.LastUpdateUtc + MillInstanceStatusFreshness.StaleAfter < now)
+                if (row.LastUpdateUtc + runningPoFreshFor < now)
                     continue;
 
                 if (row.WaitingForNewWip)

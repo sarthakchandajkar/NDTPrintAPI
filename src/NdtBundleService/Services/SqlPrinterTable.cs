@@ -6,21 +6,27 @@ using NdtBundleService.Configuration;
 namespace NdtBundleService.Services;
 
 /// <summary>
-/// Shared SQL access for mill and station ZPL printers in <c>dbo.Printer</c>.
-/// Keys: <c>MILL_1</c>…<c>MILL_4</c>, <c>VISUAL_REVISUAL</c>, <c>BIG_HYDRO</c>, <c>FOUR_HEAD_HYDRO</c>.
+/// Shared SQL access for mill, station, and PAS-room ZPL printers in <c>dbo.Printer</c>.
+/// Keys: <c>MILL_1</c>…<c>MILL_4</c>, <c>MILL_1_WIP</c>, <c>MILL_1_FG</c>, <c>PAS_ROOM</c>,
+/// <c>VISUAL_REVISUAL</c>, <c>BIG_HYDRO</c>, <c>FOUR_HEAD_HYDRO</c>.
 /// </summary>
 internal static class SqlPrinterTable
 {
     internal const string KindMill = "Mill";
     internal const string KindStation = "Station";
+    internal const string KindPasRoom = "PasRoom";
+
+    internal const string KeyMill1Wip = "MILL_1_WIP";
+    internal const string KeyMill1Fg = "MILL_1_FG";
+    internal const string KeyPasRoom = "PAS_ROOM";
 
     internal static string MillKey(int millNo) => $"MILL_{millNo}";
 
     internal static bool TryParseMillKey(string? printerKey, out int millNo)
     {
         millNo = 0;
-        var key = (printerKey ?? string.Empty).Trim();
-        if (key.Length < 6 || !key.StartsWith("MILL_", StringComparison.OrdinalIgnoreCase))
+        var key = (printerKey ?? string.Empty).Trim().ToUpperInvariant();
+        if (key.Length != 6 || !key.StartsWith("MILL_", StringComparison.Ordinal))
             return false;
 
         return int.TryParse(
@@ -60,6 +66,33 @@ internal static class SqlPrinterTable
         }
 
         return list;
+    }
+
+    internal static (string Address, int Port)? TryLoadKey(
+        IOptionsMonitor<NdtBundleOptions> options,
+        ILogger logger,
+        string printerKey)
+    {
+        try
+        {
+            using var conn = SqlTraceabilityConnection.Create(options.CurrentValue);
+            conn.Open();
+            using var cmd = new SqlCommand(
+                "SELECT Address, Port FROM dbo.Printer WHERE Printer_Key = @Key;",
+                conn);
+            cmd.Parameters.AddWithValue("@Key", printerKey);
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read())
+                return null;
+            return (
+                reader.IsDBNull(0) ? string.Empty : reader.GetString(0),
+                reader.GetInt32(1));
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to load Printer key {Key}.", printerKey);
+            return null;
+        }
     }
 
     internal static void Upsert(

@@ -47,9 +47,13 @@ public sealed class PlcHandshakeOptions
     public int SlitIdByteOffset { get; set; } = 10;
 
     /// <summary>
-    /// When true, M40.6 rising edge does <b>not</b> auto-ack or flush. MES arms a pending
-    /// manual confirm; the operator confirms on the dashboard after the last slit finishes
-    /// (flush remainder using live PLC NDT merge, then MES ack). PLC may leave the trigger TRUE until then.
+    /// When false (default / production preferred), M40.6 rising edge auto-runs PO-end flush
+    /// and MES ack. When true, the edge arms a pending confirm on the dashboard
+    /// (<c>/po-end</c>) until the operator confirms (flush + ack). Keep false for normal
+    /// operation; use true only as a temporary hold when auto flush must wait for the floor.
+    /// Missed PLC triggers for linked POs are handled automatically when
+    /// <c>NdtBundle:EnableLinkedPoCutover</c> is true; the dashboard &quot;Run PO change workflow&quot;
+    /// remains a manual backup.
     /// </summary>
     public bool ManualConfirmPoEnd { get; set; }
 
@@ -125,6 +129,11 @@ public sealed class PlcHandshakeOptions
 
     /// <summary>Initial backoff (ms) between ack write retries; doubles each attempt. Default 100.</summary>
     public int AckWriteRetryInitialBackoffMs { get; set; } = 100;
+
+    /// <summary>
+    /// Read-only PO-change ladder observation (Mill-1 observation period). No PLC writes; no handshake behaviour change.
+    /// </summary>
+    public PoChangeLadderDiagnosticsOptions PoChangeLadderDiagnostics { get; set; } = new();
 
     public List<MillConfig> Mills { get; set; } = new();
 }

@@ -5,6 +5,7 @@ using NdtBundleService.Configuration;
 using NdtBundleService.Models;
 using NdtBundleService.Services;
 using NdtBundleService.Services.FileBasedPoChange;
+using NdtBundleService.Services.LinkedPo;
 using NdtBundleService.Services.PlcHandshake;
 using NdtBundleService.Services.PlcHandshake.S7;
 using NdtBundleService.Services.PoLifecycle;
@@ -32,10 +33,11 @@ public sealed class WipBundlePoEndExclusionTests
     }
 
     [Fact]
-    public void TryApplyRunningPoUpdateUnsafe_plc_mill_updates_running_po_without_enqueue()
+    public void TryApplyRunningPoUpdateUnsafe_plc_mill_updates_running_po_without_file_enqueue()
     {
         var queue = new FileBasedPoChangeQueue();
-        var provider = CreateProvider(queue, plcMillNo: 2);
+        var linked = new LinkedPoCutoverQueue();
+        var provider = CreateProvider(queue, plcMillNo: 2, linkedQueue: linked);
         var stamp = DateTime.UtcNow;
 
         Assert.True(provider.TrySetRunningPoFromWipFile(2, "1000057001", stamp, "WIP_02_1000057001_1.csv"));
@@ -48,7 +50,11 @@ public sealed class WipBundlePoEndExclusionTests
             wipFileName: "WIP_02_1000057002_1.csv");
 
         Assert.True(result);
+        // File-based queue stays free (Plc mills do not use it).
         Assert.True(queue.TryEnqueue(new FileBasedPoChangeRequest { MillNo = 2, NewPo = "probe" }));
+        // Linked-PO cutover probe is queued for evidence check / optional PoEnd.
+        Assert.False(linked.TryEnqueue(new LinkedPoCutoverRequest { MillNo = 2, EndedPo = "x", NewPo = "y" }));
+        linked.MarkCompleted(2);
     }
 
     [Fact]
@@ -77,7 +83,8 @@ public sealed class WipBundlePoEndExclusionTests
         int? plcMillNo = null,
         int? plcMillNo2 = null,
         int? fileMillNo = null,
-        string? wipFolder = null)
+        string? wipFolder = null,
+        LinkedPoCutoverQueue? linkedQueue = null)
     {
         var mills = new List<MillConfig>();
         if (plcMillNo is { } plc)
@@ -91,6 +98,7 @@ public sealed class WipBundlePoEndExclusionTests
         var options = Options.Create(new NdtBundleOptions
         {
             WaitForWipBundleAfterPoEnd = true,
+            EnableLinkedPoCutover = true,
             MillSlitLive = new MillSlitLiveOptions
             {
                 WipBundleFolder = folder,
@@ -106,7 +114,8 @@ public sealed class WipBundlePoEndExclusionTests
             NullLogger<WipBundleRunningPoProvider>.Instance,
             NullWipConfirmedRunningPoNotifier.Instance,
             TestMillOwnership.Monolith(),
-            queue);
+            queue,
+            linkedQueue);
     }
 
     private sealed class NullWipConfirmedRunningPoNotifier : IWipConfirmedRunningPoNotifier
@@ -197,7 +206,16 @@ public sealed class WipBundlePoEndExclusionTests
             WriteWipFile(wipFolder, "WIP_01_1000060288_2601020437_260726_131201.csv", endedStamp);
 
             var provider = CreateProvider(new FileBasedPoChangeQueue(), plcMillNo: 1, wipFolder: wipFolder);
-            Assert.Equal("1000060288", await provider.TryGetRunningPoForMillAsync(1, CancellationToken.None));
+            // Seed runs on a background Task — poll briefly for the first WIP file.
+            string? seeded = null;
+            for (var i = 0; i < 40; i++)
+            {
+                seeded = await provider.TryGetRunningPoForMillAsync(1, CancellationToken.None);
+                if (seeded is not null)
+                    break;
+                await Task.Delay(50);
+            }
+            Assert.Equal("1000060288", seeded);
 
             provider.NotifyPoEndForMill(1, "1000060288");
             Assert.True(provider.IsWaitingForNewWipAfterPoEnd(1));

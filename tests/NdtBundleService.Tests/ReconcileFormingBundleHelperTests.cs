@@ -94,6 +94,41 @@ public sealed class ReconcileFormingBundleHelperTests
     }
 
     [Fact]
+    public void Forming_csv_advance_provisional_target_does_not_inflate_display_total()
+    {
+        // CsvAdvance stamps set Total/Target to formation-chart provisional (e.g. 65) before slits arrive.
+        // Operators must see live slit sum (3), not the provisional 65.
+        var bundle = new NdtBundleRecord
+        {
+            BundleNo = "1226100027",
+            PrintStatus = BundlePrintStatus.Pending,
+            TotalNdtPcs = 65,
+            TargetNdtPcs = 65,
+            CsvFilled = 3,
+            CsvFillState = CsvFillState.CsvFilling,
+            CloseSource = BundleCloseSource.CsvAdvance
+        };
+
+        Assert.True(ReconcileFormingBundleHelper.IsForming(bundle, slitSum: 3, slitOnlyInDatabase: false));
+        Assert.Equal(3, ReconcileFormingBundleHelper.ResolveDisplayTotal(bundle, 3, isForming: true));
+    }
+
+    [Fact]
+    public void Forming_with_no_slits_yet_uses_csv_filled_not_provisional_total()
+    {
+        var bundle = new NdtBundleRecord
+        {
+            BundleNo = "1226100027",
+            PrintStatus = BundlePrintStatus.Pending,
+            TotalNdtPcs = 65,
+            CsvFilled = 0,
+            CloseSource = BundleCloseSource.CsvAdvance
+        };
+
+        Assert.Equal(0, ReconcileFormingBundleHelper.ResolveDisplayTotal(bundle, 0, isForming: true));
+    }
+
+    [Fact]
     public void Manual_recon_pending_bundle_uses_locked_total_not_slit_sum()
     {
         // After manual bundle reconcile, Print_Status may still be Pending (reprint disabled/failed).

@@ -20,7 +20,11 @@ public interface IReconcileSyncService
         int newNdtPipes,
         CancellationToken cancellationToken);
 
-    /// <summary>After Visual/Hydro/Revisual manual reconcile: SQL station row, consolidated SQL, bundle total on Revisual.</summary>
+    /// <summary>
+    /// After Visual/Hydro/Revisual manual reconcile: process CSV / consolidated SQL.
+    /// Does not overwrite <c>NDT_Bundle.Total_NDT_Pcs</c> — that stays as stamped bundle NDT pcs;
+    /// final OK is in station runs / <c>NDT_Process_Consolidated</c> / MES upload.
+    /// </summary>
     Task SyncAfterManualStationReconcileAsync(
         ManualTagStation station,
         ManualStationReconcileSnapshot snapshot,
@@ -144,8 +148,28 @@ public sealed class ReconcileSyncService : IReconcileSyncService
 
         if (station == ManualTagStation.Revisual && snapshot.HasRevisual)
         {
-            await _bundleRepository.UpdateBundlePipesAsync(batch, snapshot.RevisualOk, cancellationToken).ConfigureAwait(false);
-            await _bundleRepository.UpdateBundleSummaryCsvAsync(batch, snapshot.RevisualOk, cancellationToken).ConfigureAwait(false);
+            // Never rewrite NDT_Bundle.Total_NDT_Pcs to Revisual OK — that would erase the
+            // original stamped NDT pcs (e.g. 11 → 5) and break Visual→Hydro→Revisual reject traceability.
+            // Final good pipes are already written by CompleteRevisualExport into
+            // NDT_Process_Consolidated.OK_Pcs and MES upload NumOfPipes.
+            okPcs = snapshot.RevisualOk;
+            await _traceability.UpdateNdtProcessConsolidatedFromStationsAsync(
+                po,
+                batch,
+                snapshot.InitialPcs,
+                okPcs,
+                visualRej,
+                hydroRej,
+                revisualRej,
+                snapshot.VisualStart,
+                snapshot.RevisualEnd,
+                ndtProcessCsvPath,
+                cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation(
+                "Revisual reconcile for batch {BatchNo}: preserved NDT_Bundle.Total_NDT_Pcs; consolidated OK={OkPcs} (initial NDT pcs={InitialPcs}).",
+                batch,
+                okPcs,
+                snapshot.InitialPcs);
             return;
         }
 

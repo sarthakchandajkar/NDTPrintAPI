@@ -99,7 +99,7 @@ public sealed class CsvBundleOutputWriter : IBundleOutputWriter
             await _bundleRepository.RecordBundlePendingPrintAsync(record, cancellationToken).ConfigureAwait(false);
         }
 
-        // Claimed CSV-advance rows already have Target/Total/fill state updated (Csv_Filled preserved).
+        // Claimed open fill parents already have Target/Total/fill state updated (Csv_Filled preserved).
         // Fresh allocates still need fill-target init.
         if (!claimedCsvAdvance)
         {

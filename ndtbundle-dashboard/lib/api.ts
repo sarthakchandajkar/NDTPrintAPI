@@ -136,6 +136,8 @@ export interface WipByMillsResponse {
   mills?: WipByMillRow[];
   sourcePath?: string;
   liveMillNdt?: LiveMillNdtPayload;
+  /** Full NDT Bundle Formation Chart (same CSV Settings edits). */
+  formationChart?: FormationChartEntryRow[];
 }
 
 export interface PoEndPending {
@@ -168,6 +170,25 @@ export interface PlcManualPoEndPending {
   correlationId?: string;
   detectedAtUtc?: string;
   runningPoAtEdge?: string | null;
+  /** Ended SAP PO captured at arm when mill was waiting for new WIP after PO end. */
+  endedPoAtEdge?: string | null;
+  waitingForNewWipAtEdge?: boolean;
+  /** Resolved SAP PO that will be closed / own the forming batch. */
+  poNumber?: string | null;
+  /** NDT batch that will be completed/printed on confirm (claimable open fill or next sequence). */
+  expectedNdtBatchNumber?: string | null;
+  /** NDT pipe count that will land on that batch after confirm. */
+  expectedNdtPipeCount?: number;
+  willFormBundle?: boolean;
+  /** PO plan Pipe_Type (WIP / FG) used for printer routing. */
+  pipeType?: string | null;
+  expectedPrinterTarget?: string | null;
+  expectedPrinterDisplayName?: string | null;
+  /** Mill is waiting for a new WIP file after a prior PO end. */
+  waitingForNewWip?: boolean;
+  /** Ended PO from WIP-wait context (shown when running PO is unknown). */
+  endedPo?: string | null;
+  poResolveSource?: string | null;
 }
 
 export interface PlcManualPoEndConfirmResult {
@@ -230,11 +251,36 @@ export interface ReconcileBundle {
   targetNdtPcs?: number | null;
 }
 
-/** True when CSV stamped pipes exceed / disagree with the tag total (overshoot or discrepancy). */
+/** True when CSV fill state is overshoot (stamped pipes exceeded the tag target). */
 export function isBundleOvershoot(b: ReconcileBundle | null | undefined): boolean {
   if (!b) return false;
-  if (b.countDiscrepancy) return true;
   return (b.csvFillState ?? "").toLowerCase() === "csvovershoot";
+}
+
+/**
+ * Live / post-recon slit-row sum used to compare against the printed (or locked) bundle total.
+ * Prefers Post_Recon_Csv_Sum when present (Manual_Recon lock visibility).
+ */
+export function getBundleSlitSumForCompare(b: ReconcileBundle | null | undefined): number | null {
+  if (!b) return null;
+  if (typeof b.postReconCsvSum === "number" && Number.isFinite(b.postReconCsvSum))
+    return b.postReconCsvSum;
+  if (typeof b.slitSum === "number" && Number.isFinite(b.slitSum)) return b.slitSum;
+  return null;
+}
+
+/**
+ * Formed bundle whose tag/locked total does not match Output_Slit_Row sum.
+ * Requires at least one slit pipe so empty late-CSV bundles are not flagged as mismatch.
+ */
+export function isBundleSlitCountMismatch(b: ReconcileBundle | null | undefined): boolean {
+  if (!b || b.isForming) return false;
+  if (b.countDiscrepancy) return true;
+  const total = b.totalNdtPcs;
+  const slitSum = getBundleSlitSumForCompare(b);
+  if (total == null || slitSum == null) return false;
+  if (slitSum <= 0) return false;
+  return total !== slitSum;
 }
 
 export interface ReconcileSlitSourceFile {
@@ -245,6 +291,11 @@ export interface ReconcileSlitSourceFile {
 export interface ReconcileSlitItem {
   slitNo?: string;
   ndtPipes?: number;
+  rejectedPipes?: number;
+  slitStartTime?: string | null;
+  slitFinishTime?: string | null;
+  ndtShortLengthPipe?: string | null;
+  rejectedShortLengthPipe?: string | null;
   /** SAP lifecycle of the contributing input-slit output file(s): "Pending" | "Accepted" | "Rejected"; null/absent when untracked. */
   sapStatus?: string | null;
   sapStatusAtUtc?: string | null;
@@ -507,6 +558,29 @@ export interface SettingsPlcDiagnostics {
   mills?: SettingsPlcMill[];
 }
 
+export interface SettingsHooterTestResult {
+  success?: boolean;
+  message?: string;
+  millNo?: number;
+  millName?: string;
+  plcConnected?: boolean;
+  hooterEnabled?: boolean;
+  poNumber?: string | null;
+  pipeSize?: string | null;
+  accumulated?: number;
+  threshold?: number;
+  aboveThreshold?: boolean;
+  requireThreshold?: boolean;
+  pasEnable?: boolean;
+  qBefore?: boolean;
+  pulsed?: boolean;
+  durationMs?: number;
+  outputAddress?: string;
+  pasEnableAddress?: string;
+  steps?: string[];
+  logHint?: string;
+}
+
 export interface SettingsPoChangeTestResult {
   success?: boolean;
   message?: string;
@@ -531,8 +605,35 @@ export interface SettingsMillPlcConnectionResult {
   connected?: boolean;
 }
 
+export type ReprintPrinterTarget = "wip" | "fg" | "pas" | "mill";
+
+export interface ReprintPrinterOption {
+  printerTarget?: ReprintPrinterTarget | string;
+  displayName?: string;
+  address?: string;
+  port?: number;
+  configured?: boolean;
+  reachable?: boolean;
+  status?: string;
+}
+
 export interface SettingsPrinterMill {
   millNo?: number;
+  role?: string | null;
+  displayName?: string;
+  address?: string;
+  port?: number;
+  effectiveAddress?: string;
+  effectivePort?: number;
+  configured?: boolean;
+  reachable?: boolean;
+  status?: string;
+}
+
+export interface SettingsPrinterNamed {
+  key?: string;
+  role?: string;
+  displayName?: string;
   address?: string;
   port?: number;
   effectiveAddress?: string;
@@ -552,6 +653,119 @@ export interface SettingsPrinterStation {
   configured?: boolean;
   reachable?: boolean;
   status?: string;
+}
+
+export interface PoChangeRemediationSlitRow {
+  slitNo: string;
+  ndtPipes: number;
+  rejectedPipes: number;
+  slitStartTime: string;
+  slitFinishTime: string;
+  ndtShortLengthPipe?: string;
+  rejectedShortLengthPipe?: string;
+  /** Existing NDT output CSV basename when loaded from mill scan. */
+  sourceFileName?: string;
+}
+
+export interface PoChangeRemediationFinishedBatch {
+  bundleNo: string;
+  poNumber: string;
+  totalNdtPcs: number;
+  reprint?: boolean;
+  slits: PoChangeRemediationSlitRow[];
+}
+
+export interface PoChangeRemediationFormingBatch {
+  bundleNo: string;
+  poNumber: string;
+  targetNdtPcs?: number | null;
+  slits: PoChangeRemediationSlitRow[];
+}
+
+export interface PoChangeRemediationRequest {
+  millNo: number;
+  reason: string;
+  reconciledBy?: string;
+  finishedBatches: PoChangeRemediationFinishedBatch[];
+  forming?: PoChangeRemediationFormingBatch | null;
+  confirmCommit?: boolean;
+}
+
+export interface PoChangeRemediationBundlePlan {
+  bundleNo?: string;
+  poNumber?: string;
+  action?: string;
+  totalOrFilled?: number;
+  targetNdtPcs?: number | null;
+  slitCount?: number;
+  reprint?: boolean;
+  exists?: boolean;
+  currentlyVoided?: boolean;
+}
+
+export interface PoChangeRemediationOrphanPlan {
+  bundleNo?: string;
+  poNumber?: string;
+  csvFillState?: string | null;
+  printStatus?: string | null;
+  closeSource?: string | null;
+  csvFilled?: number;
+  slitCount?: number;
+  slitSum?: number;
+  slitNos?: string[];
+}
+
+export interface PoChangeRemediationFormingCandidate {
+  bundleNo?: string;
+  poNumber?: string;
+  csvFillState?: string | null;
+  printStatus?: string | null;
+  closeSource?: string | null;
+  targetNdtPcs?: number;
+  csvFilled?: number;
+  slitSum?: number;
+  slits?: PoChangeRemediationSlitRow[];
+}
+
+export interface PoChangeRemediationMillStatusResult {
+  ok?: boolean;
+  errors?: string[];
+  warnings?: string[];
+  millNo?: number;
+  currentMillSequence?: number;
+  formingCandidates?: PoChangeRemediationFormingCandidate[];
+  suggestedKeepBundleNo?: string | null;
+}
+
+export interface PoChangeRemediationPreviewResult {
+  ok?: boolean;
+  errors?: string[];
+  warnings?: string[];
+  millNo?: number;
+  currentMillSequence?: number;
+  proposedMillSequence?: number;
+  finishedPlans?: PoChangeRemediationBundlePlan[];
+  formingPlan?: PoChangeRemediationBundlePlan | null;
+  orphansToVoid?: PoChangeRemediationOrphanPlan[];
+  csvFiles?: string[];
+}
+
+export interface PoChangeRemediationReprintResult {
+  bundleNo?: string;
+  success?: boolean;
+  message?: string | null;
+}
+
+export interface PoChangeRemediationCommitResult {
+  ok?: boolean;
+  errors?: string[];
+  warnings?: string[];
+  millNo?: number;
+  millSequence?: number;
+  voidedBundleNos?: string[];
+  csvFilesWritten?: string[];
+  reprints?: PoChangeRemediationReprintResult[];
+  message?: string;
 }
 
 async function fetchSettingsApi<T>(
@@ -581,6 +795,8 @@ export interface ManualTagPrintResponse {
   printError?: string;
   csvPath?: string;
   uploadFilePath?: string;
+  /** True when NDT process CSV is already under Bundle Accepted — mail SAP; no new Bundle file. */
+  processFileAlreadySentToSap?: boolean;
 }
 
 /** Save still succeeded; print failure must be shown separately. */
@@ -679,10 +895,10 @@ export const api = {
         ? `/api/Test/plc-po-end-manual-confirm?millNo=${millNo}`
         : `/api/Test/plc-po-end-manual-confirm`
     ),
-  confirmPlcManualPoEnd: (millNo: number) =>
+  confirmPlcManualPoEnd: (millNo: number, ackOnly = false) =>
     fetchApi<PlcManualPoEndConfirmResult>("/api/Test/plc-po-end-manual-confirm", {
       method: "POST",
-      body: JSON.stringify({ millNo }),
+      body: JSON.stringify({ millNo, ackOnly }),
     }),
   reconcileBundles: () =>
     fetchApi<ReconcileBundle[]>("/api/Reconcile/bundles?includeForming=true"),
@@ -714,9 +930,14 @@ export const api = {
         millNo: args.millNo,
       }),
     }),
-  manualBundleReconcile: (ndtBatchNo: string, correctedTotal: number) =>
+  manualBundleReconcile: (
+    ndtBatchNo: string,
+    correctedTotal: number,
+    options?: { reprint?: boolean; printerTarget?: ReprintPrinterTarget }
+  ) =>
     fetchApi<{
       message?: string;
+      printRequested?: boolean;
       printSuccess?: boolean;
       printMessage?: string;
       correctedTotal?: number;
@@ -725,7 +946,12 @@ export const api = {
       countDiscrepancyLogged?: boolean;
     }>("/api/Reconcile/manual-bundle-reconcile", {
       method: "POST",
-      body: JSON.stringify({ ndtBatchNo, correctedTotal }),
+      body: JSON.stringify({
+        ndtBatchNo,
+        correctedTotal,
+        reprint: options?.reprint !== false,
+        printerTarget: options?.printerTarget,
+      }),
     }),
   reconcile: (ndtBatchNo: string, newNdtPipes: number) =>
     fetchApi<{ message?: string; csvFilesUpdated?: number }>("/api/Reconcile/reconcile", {
@@ -780,11 +1006,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ clearedBy, note }),
     }),
-  printReconciledBundle: (ndtBatchNo: string) =>
-    fetchApi<{ message?: string; ndtBatchNo?: string; ndtPcs?: number }>("/api/Reconcile/print-bundle", {
-      method: "POST",
-      body: JSON.stringify({ ndtBatchNo }),
-    }),
+  reprintPrinters: (millNo: number) =>
+    fetchApi<{ millNo?: number; printers?: ReprintPrinterOption[] }>(
+      `/api/Reconcile/reprint-printers?millNo=${encodeURIComponent(String(millNo))}`
+    ),
+  printReconciledBundle: (ndtBatchNo: string, printerTarget?: ReprintPrinterTarget) =>
+    fetchApi<{ message?: string; ndtBatchNo?: string; ndtPcs?: number; printerTarget?: string }>(
+      "/api/Reconcile/print-bundle",
+      {
+        method: "POST",
+        body: JSON.stringify({ ndtBatchNo, printerTarget }),
+      }
+    ),
   inputSlitFiles: () => fetchApi<InputSlitFile[]>("/api/InputSlits/files"),
   inputSlitContent: (fileName: string) => fetchApi<InputSlitContent>(`/api/InputSlits/files/${encodeURIComponent(fileName)}/content`),
   createManualInputSlit: (body: ManualInputSlitRequest) =>
@@ -915,26 +1148,49 @@ export const api = {
         sizeKey: options?.sizeKey,
       }),
     }),
-  settingsPrinters: (token: string) =>
-    fetchSettingsApi<{ mills?: SettingsPrinterMill[]; stations?: SettingsPrinterStation[] }>(
-      "/api/Settings/printers",
-      token
+  settingsTestHooter: (token: string, millNo: number, requireThreshold = true) =>
+    fetchSettingsApi<SettingsHooterTestResult>(
+      `/api/Settings/plc/mill/${millNo}/test-hooter`,
+      token,
+      {
+        method: "POST",
+        body: JSON.stringify({ requireThreshold }),
+      }
     ),
+  settingsPrinters: (token: string) =>
+    fetchSettingsApi<{
+      mills?: SettingsPrinterMill[];
+      mill1Wip?: SettingsPrinterNamed;
+      mill1Fg?: SettingsPrinterNamed;
+      pasRoom?: SettingsPrinterNamed;
+      stations?: SettingsPrinterStation[];
+    }>("/api/Settings/printers", token),
   settingsSavePrinters: (
     token: string,
-    mills: { millNo: number; address: string; port: number }[],
-    stations?: { stationCode: string; address: string; port: number }[]
+    body: {
+      mills: { millNo: number; address: string; port: number }[];
+      stations?: { stationCode: string; address: string; port: number }[];
+      mill1Wip?: { address: string; port: number };
+      mill1Fg?: { address: string; port: number };
+      pasRoom?: { address: string; port: number };
+    }
   ) =>
     fetchSettingsApi<{ message?: string }>("/api/Settings/printers", token, {
       method: "PUT",
-      body: JSON.stringify({ mills, stations }),
+      body: JSON.stringify(body),
     }),
-  settingsTestPrinter: (token: string, millNo: number) =>
-    fetchSettingsApi<{ status?: string; reachable?: boolean; address?: string; port?: number }>(
-      "/api/Settings/printers/test",
-      token,
-      { method: "POST", body: JSON.stringify({ millNo }) }
-    ),
+  settingsTestPrinter: (token: string, millNo: number, printerTarget?: ReprintPrinterTarget) =>
+    fetchSettingsApi<{
+      status?: string;
+      reachable?: boolean;
+      address?: string;
+      port?: number;
+      displayName?: string;
+      printerTarget?: string;
+    }>("/api/Settings/printers/test", token, {
+      method: "POST",
+      body: JSON.stringify({ millNo, printerTarget }),
+    }),
   settingsTestStationPrinter: (token: string, stationCode: string) =>
     fetchSettingsApi<{
       status?: string;
@@ -948,7 +1204,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ stationCode }),
     }),
-  settingsTestPrintPrinter: (token: string, millNo: number) =>
+  settingsTestPrintPrinter: (token: string, millNo: number, printerTarget?: ReprintPrinterTarget) =>
     fetchSettingsApi<{
       success?: boolean;
       status?: string;
@@ -956,9 +1212,10 @@ export const api = {
       address?: string;
       port?: number;
       millNo?: number;
+      printerTarget?: string;
     }>("/api/Settings/printers/test-print", token, {
       method: "POST",
-      body: JSON.stringify({ millNo }),
+      body: JSON.stringify({ millNo, printerTarget }),
     }),
   settingsTestPrintStationPrinter: (token: string, stationCode: string) =>
     fetchSettingsApi<{
@@ -988,5 +1245,22 @@ export const api = {
     fetchSettingsApi<MillSequenceSetResult>("/api/Settings/mill-sequence", token, {
       method: "POST",
       body: JSON.stringify(body),
+    }),
+
+  poChangeRemediationMillStatus: (millNo: number) =>
+    fetchApi<PoChangeRemediationMillStatusResult>(
+      `/api/PoChangeRemediation/mill-status?millNo=${encodeURIComponent(String(millNo))}`
+    ),
+
+  poChangeRemediationPreview: (body: PoChangeRemediationRequest) =>
+    fetchApi<PoChangeRemediationPreviewResult>("/api/PoChangeRemediation/preview", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  poChangeRemediationCommit: (token: string, body: PoChangeRemediationRequest) =>
+    fetchSettingsApi<PoChangeRemediationCommitResult>("/api/PoChangeRemediation/commit", token, {
+      method: "POST",
+      body: JSON.stringify({ ...body, confirmCommit: true }),
     }),
 };

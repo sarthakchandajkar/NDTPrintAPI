@@ -19,12 +19,13 @@ public static class FgBundleCsvLookup
         string poNumber,
         int? millNo,
         ILogger logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool includeAcceptedFolders = true)
     {
         if (string.IsNullOrWhiteSpace(poNumber))
             return string.Empty;
 
-        foreach (var folder in EnumerateFgBundleFolders(options))
+        foreach (var folder in EnumerateFgBundleFolders(options, includeAcceptedFolders))
         {
             if (!Directory.Exists(folder))
                 continue;
@@ -57,17 +58,26 @@ public static class FgBundleCsvLookup
         return string.Empty;
     }
 
-    private static IEnumerable<string> EnumerateFgBundleFolders(NdtBundleOptions options)
+    private static IEnumerable<string> EnumerateFgBundleFolders(
+        NdtBundleOptions options,
+        bool includeAcceptedFolders)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var live = options.MillSlitLive ?? new MillSlitLiveOptions();
-        foreach (var path in new[]
-                 {
-                     options.FgBundleFolder,
-                     options.FgBundleAcceptedFolder,
-                     live.WipBundleFolder,
-                     live.WipBundleAcceptedFolder,
-                 })
+        var paths = includeAcceptedFolders
+            ? new[]
+            {
+                options.FgBundleFolder,
+                options.FgBundleAcceptedFolder,
+                live.WipBundleFolder,
+                live.WipBundleAcceptedFolder,
+            }
+            : new[]
+            {
+                options.FgBundleFolder,
+                live.WipBundleFolder,
+            };
+        foreach (var path in paths)
         {
             var p = (path ?? string.Empty).Trim();
             if (p.Length > 0 && seen.Add(p))

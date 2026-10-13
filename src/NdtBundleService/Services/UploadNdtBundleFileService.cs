@@ -9,10 +9,15 @@ namespace NdtBundleService.Services;
 public interface IUploadNdtBundleFileService
 {
     /// <summary>
-    /// Writes one <c>UploadNdtBundle__PO__…</c> CSV for a single NDT batch after Visual, Hydrotesting,
-    /// and Revisual have produced an <c>NDT_process_</c> file (OK pcs = Revisual OK).
+    /// Writes/updates one <c>ndt-{ddMMyy}1607000.csv</c> for a batch after Revisual.
+    /// When <paramref name="okPcsOverride"/> is set (e.g. process CSV already in Bundle Accepted),
+    /// uses that OK count instead of reading the on-disk process file.
     /// </summary>
-    Task<UploadNdtBundleGenerationResult> GenerateForBatchAsync(string ndtBatchNo, CancellationToken cancellationToken);
+    Task<UploadNdtBundleGenerationResult> GenerateForBatchAsync(
+        string ndtBatchNo,
+        CancellationToken cancellationToken,
+        int? okPcsOverride = null,
+        string? poNumberOverride = null);
 
     /// <summary>
     /// Lists NDT batches that already have an upload CSV (SQL <c>Upload_Bundle_Row</c> and/or files on disk
@@ -54,14 +59,22 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
     /// </summary>
     private static readonly Encoding ExcelCsvUtf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: true);
 
-    private static readonly Regex UploadFileName = new(
+    /// <summary>Legacy MES PAS upload name (still scanned for dashboard history).</summary>
+    private static readonly Regex LegacyUploadFileName = new(
         @"^UploadNdtBundle__PO__(?<po>.+?)__(?<batch>.+?)-(?<mill>\d)__TS-(?<ts>.+)\.csv$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    /// <summary>SAP pickup stem prefix; trailing digits start at <see cref="UploadFileSequenceStart"/>.</summary>
+    internal const string UploadFileNamePrefix = "ndt-";
+
+    /// <summary>Fixed SAP sequence seed in <c>ndt-ddmmyy1607000</c>; increments when that name already exists.</summary>
+    internal const int UploadFileSequenceStart = 1_607_000;
 
     private readonly NdtBundleOptions _options;
     private readonly INdtBundleRepository _bundleRepository;
     private readonly ITraceabilityRepository _traceability;
     private readonly IWipLabelProvider _wipLabelProvider;
+    private readonly IPoPlanWipRepository _poPlanWipRepository;
     private readonly ISlitAcceptedRepository _slitAcceptedRepository;
     private readonly IFgBundleRepository _fgBundleRepository;
     private readonly ILogger<UploadNdtBundleFileService> _logger;
@@ -71,6 +84,7 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
         INdtBundleRepository bundleRepository,
         ITraceabilityRepository traceability,
         IWipLabelProvider wipLabelProvider,
+        IPoPlanWipRepository poPlanWipRepository,
         ISlitAcceptedRepository slitAcceptedRepository,
         IFgBundleRepository fgBundleRepository,
         ILogger<UploadNdtBundleFileService> logger)
@@ -79,6 +93,7 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
         _bundleRepository = bundleRepository;
         _traceability = traceability;
         _wipLabelProvider = wipLabelProvider;
+        _poPlanWipRepository = poPlanWipRepository;
         _slitAcceptedRepository = slitAcceptedRepository;
         _fgBundleRepository = fgBundleRepository;
         _logger = logger;
@@ -128,11 +143,13 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
         {
             try
             {
+                // Legacy names only — current ndt-ddmmyy#######.csv files have no batch in the name;
+                // SQL Upload_Bundle_Row (SourceFile) is the source of truth for those.
                 foreach (var path in Directory.EnumerateFiles(folder, "UploadNdtBundle__*.csv"))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     var name = Path.GetFileName(path);
-                    var parsed = TryParseUploadFileName(name);
+                    var parsed = TryParseLegacyUploadFileName(name);
                     if (parsed is null)
                         continue;
 
@@ -211,7 +228,9 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
 
     public async Task<UploadNdtBundleGenerationResult> GenerateForBatchAsync(
         string ndtBatchNo,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int? okPcsOverride = null,
+        string? poNumberOverride = null)
     {
         var batch = (ndtBatchNo ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(batch))
@@ -219,21 +238,42 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
 
         var ndtProcessFolder = (_options.NdtProcessOutputFolder ?? string.Empty).Trim();
         var uploadFolder = (_options.UploadNdtBundleFilesFolder ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(ndtProcessFolder) || !Directory.Exists(ndtProcessFolder))
-            throw new InvalidOperationException("NdtProcessOutputFolder is not configured or does not exist.");
         if (string.IsNullOrWhiteSpace(uploadFolder))
             throw new InvalidOperationException("UploadNdtBundleFilesFolder is not configured.");
 
-        var processPath = NdtProcessCsvReconcileHelper.FindLatestNdtProcessFileForBatch(ndtProcessFolder, batch);
-        if (processPath is null)
-            throw new InvalidOperationException(RevisualRequiredMessage);
+        string poNo;
+        int okPcs;
+        if (okPcsOverride.HasValue)
+        {
+            // Corrected Revisual OK when process CSV is already under Bundle Accepted (disk values are stale).
+            okPcs = okPcsOverride.Value;
+            poNo = (poNumberOverride ?? string.Empty).Trim();
+        }
+        else
+        {
+            if (string.IsNullOrWhiteSpace(ndtProcessFolder) || !Directory.Exists(ndtProcessFolder))
+                throw new InvalidOperationException("NdtProcessOutputFolder is not configured or does not exist.");
 
-        var metrics = NdtProcessCsvReconcileHelper.TryReadMetricsForBatch(_options, batch);
-        if (metrics is null)
-            throw new InvalidOperationException(RevisualRequiredMessage);
+            var processPath = NdtProcessCsvReconcileHelper.FindLatestNdtProcessFileForBatch(ndtProcessFolder, batch);
+            if (processPath is null)
+            {
+                var acceptedFolder = (_options.NdtProcessAcceptedFolder ?? string.Empty).Trim();
+                if (!string.IsNullOrWhiteSpace(acceptedFolder) && Directory.Exists(acceptedFolder))
+                    processPath = NdtProcessCsvReconcileHelper.FindLatestNdtProcessFileForBatch(acceptedFolder, batch);
+            }
 
-        var poNo = (metrics.Value.Po ?? string.Empty).Trim();
-        var okPcs = metrics.Value.Ok;
+            if (processPath is null)
+                throw new InvalidOperationException(RevisualRequiredMessage);
+
+            var metrics = NdtProcessCsvReconcileHelper.TryReadMetricsFromPath(processPath, batch)
+                ?? NdtProcessCsvReconcileHelper.TryReadMetricsForBatch(_options, batch);
+            if (metrics is null)
+                throw new InvalidOperationException(RevisualRequiredMessage);
+
+            poNo = (metrics.Value.Po ?? string.Empty).Trim();
+            okPcs = metrics.Value.Ok;
+        }
+
         var bundle = await _bundleRepository.GetByBatchNoAsync(batch, cancellationToken).ConfigureAwait(false);
         var millNo = bundle?.MillNo ?? 0;
         if (string.IsNullOrWhiteSpace(poNo))
@@ -242,11 +282,31 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
         var sourceSlitNo = await ResolveUploadSlitNoAsync(batch, bundle?.SlitNo, cancellationToken)
             .ConfigureAwait(false);
 
+        var priorUpload = await _traceability
+            .TryGetLatestUploadBundleRowForBatchAsync(batch, cancellationToken)
+            .ConfigureAwait(false);
+        var priorPath = (priorUpload?.SourceFile ?? string.Empty).Trim();
+        var acceptedUploadFolder = (_options.UploadNdtBundleAcceptedFolder ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(priorPath) && File.Exists(priorPath))
+        {
+            if (IsPathUnderFolder(priorPath, acceptedUploadFolder))
+            {
+                throw new InvalidOperationException(
+                    $"Upload CSV for batch {batch} is already under Bundle Accepted ({priorPath}). " +
+                    $"Mail the receiving team with NumOfPipes={okPcs} instead of regenerating a duplicate file.");
+            }
+        }
+
         var hrcNumber = ExtractHrcNumber(sourceSlitNo);
         var wip = await ReadWipByPoAndMillAsync(poNo, millNo is >= 1 and <= 4 ? millNo : null, cancellationToken)
             .ConfigureAwait(false);
         var slitWidth = await TryResolveSlitWidthAsync(sourceSlitNo, cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(slitWidth) && !string.IsNullOrWhiteSpace(priorUpload?.SlitWidth))
+            slitWidth = priorUpload!.SlitWidth.Trim();
+
         var slitGrade = wip.PipeGrade;
+        if (string.IsNullOrWhiteSpace(slitGrade) && !string.IsNullOrWhiteSpace(priorUpload?.SlitGrade))
+            slitGrade = priorUpload!.SlitGrade.Trim();
         if (string.IsNullOrWhiteSpace(slitGrade))
         {
             slitGrade = await TryResolveFgGradeAsync(
@@ -256,12 +316,24 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
                 .ConfigureAwait(false);
         }
 
-        var slitThick = wip.PipeThickness;
-        var lenPerPipe = wip.PipeLength;
+        var slitThick = string.IsNullOrWhiteSpace(wip.PipeThickness)
+            ? (priorUpload?.SlitThick ?? string.Empty).Trim()
+            : wip.PipeThickness;
+        var lenPerPipe = string.IsNullOrWhiteSpace(wip.PipeLength)
+            ? (priorUpload?.LenPerPipe ?? string.Empty).Trim()
+            : wip.PipeLength;
+        var weightPerMeter = wip.PipeWeightPerMeter;
         var totalBundleWt = NdtBundleWeightCalculator.FormatBundleWeight(
-            wip.PipeWeightPerMeter,
+            weightPerMeter,
             lenPerPipe,
             okPcs);
+        if (string.IsNullOrWhiteSpace(totalBundleWt) &&
+            !string.IsNullOrWhiteSpace(priorUpload?.TotalBundleWt) &&
+            priorUpload!.NumOfPipes > 0 &&
+            priorUpload.NumOfPipes == okPcs)
+        {
+            totalBundleWt = priorUpload.TotalBundleWt.Trim();
+        }
 
         var header = "PO_NO,Slit_No,HRC Number,Slit Width,Slit Thick,NSS,Slit Grade,Bundle Number,NumOfPipes,TotalBundleWt,LenPerPipe,IsFullBundle";
         var outputLine = string.Join(",",
@@ -279,12 +351,26 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
             "");
 
         Directory.CreateDirectory(uploadFolder);
-        var ts = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
-        var safePo = CsvOutputFileNaming.SanitizeToken(string.IsNullOrWhiteSpace(poNo) ? "NA" : poNo);
-        var safeBatch = CsvOutputFileNaming.SanitizeToken(batch);
-        // Explicit .csv extension — SAP pickup rejects Excel Worksheet (.xlsx) files.
-        var fileName = $"UploadNdtBundle__PO__{safePo}__{safeBatch}-{millNo}__TS-{ts}.csv";
-        var fullPath = Path.Combine(uploadFolder, fileName);
+        // Prefer rewriting the prior MES PAS file for this batch while it is still in Bundle
+        // (avoids a second ndt-* file for the same bundle). Allocate a new name only on first write.
+        string fullPath;
+        if (!string.IsNullOrWhiteSpace(priorPath) &&
+            File.Exists(priorPath) &&
+            IsPathUnderFolder(priorPath, uploadFolder))
+        {
+            fullPath = priorPath;
+            _logger.LogInformation(
+                "Updating existing upload NDT bundle CSV in place for batch {BatchNo}: {Path}",
+                batch,
+                fullPath);
+        }
+        else
+        {
+            // SAP expects ndt-ddmmyy1607000.csv (date + fixed sequence seed). Explicit .csv — not .xlsx.
+            var fileName = AllocateUploadFileName(uploadFolder, DateTime.Now);
+            fullPath = Path.Combine(uploadFolder, fileName);
+        }
+
         await File.WriteAllLinesAsync(
                 fullPath,
                 new[] { header, outputLine },
@@ -384,12 +470,38 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
         int? millNo,
         CancellationToken cancellationToken)
     {
-        if (!millNo.HasValue || millNo.Value is < 1 or > 4 || string.IsNullOrWhiteSpace(poNo))
+        if (string.IsNullOrWhiteSpace(poNo))
+            return ("", "", "", "");
+
+        // Upload generation must not scan WIP/PO Accepted CSV folders on the request path.
+        if (_options.PreferSqlForUploadLookups || PoPlanWipSql.IsEnabled(_options))
+        {
+            try
+            {
+                var row = await _poPlanWipRepository
+                    .TryGetLatestByPoAsync(poNo, cancellationToken)
+                    .ConfigureAwait(false);
+                if (row is null)
+                    return ("", "", "", "");
+
+                var wip = PoPlanWipRowMapper.ToWipLabel(row);
+                return (wip.PipeGrade, wip.PipeThickness, wip.PipeLength, wip.PipeWeightPerMeter);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "PO_Plan_WIP lookup failed for PO {PoNumber}; upload columns may be empty.",
+                    poNo);
+                return ("", "", "", "");
+            }
+        }
+
+        if (!millNo.HasValue || millNo.Value is < 1 or > 4)
             return ("", "", "", "");
 
         try
         {
-            // Prefers dbo.PO_Plan_WIP when PreferSqlForPoPlanWip is on, then CSV with shared read.
             var wip = await _wipLabelProvider
                 .GetWipLabelAsync(poNo, millNo.Value, cancellationToken)
                 .ConfigureAwait(false);
@@ -421,12 +533,12 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
                 var fromSql = await _slitAcceptedRepository
                     .TryGetLatestSlitWidthAsync(sourceSlitNo, cancellationToken)
                     .ConfigureAwait(false);
-                if (!string.IsNullOrWhiteSpace(fromSql))
-                    return fromSql.Trim();
+                return string.IsNullOrWhiteSpace(fromSql) ? string.Empty : fromSql.Trim();
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Slit_Accepted_Row width lookup failed for slit {SlitNo}.", sourceSlitNo);
+                return string.Empty;
             }
         }
 
@@ -455,25 +567,51 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
                 var fromSql = await _fgBundleRepository
                     .TryGetLatestPipeGradeAsync(poNo, millNo, cancellationToken)
                     .ConfigureAwait(false);
-                if (!string.IsNullOrWhiteSpace(fromSql))
-                    return fromSql.Trim();
+                return string.IsNullOrWhiteSpace(fromSql) ? string.Empty : fromSql.Trim();
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Fg_Bundle_Row grade lookup failed for PO {PoNumber} mill {MillNo}.", poNo, millNo);
+                return string.Empty;
             }
         }
 
         try
         {
             return await FgBundleCsvLookup
-                .ResolvePipeGradeAsync(_options, poNo, millNo, _logger, cancellationToken)
+                .ResolvePipeGradeAsync(
+                    _options,
+                    poNo,
+                    millNo,
+                    _logger,
+                    cancellationToken,
+                    includeAcceptedFolders: false)
                 .ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "FG bundle grade lookup failed for PO {PoNumber} mill {MillNo}.", poNo, millNo);
             return string.Empty;
+        }
+    }
+
+    internal static bool IsPathUnderFolder(string filePath, string? folder)
+    {
+        if (string.IsNullOrWhiteSpace(filePath) || string.IsNullOrWhiteSpace(folder))
+            return false;
+        try
+        {
+            var fullFile = Path.GetFullPath(filePath);
+            var fullFolder = Path.GetFullPath(folder.TrimEnd(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar));
+            if (!fullFolder.EndsWith(Path.DirectorySeparatorChar))
+                fullFolder += Path.DirectorySeparatorChar;
+            return fullFile.StartsWith(fullFolder, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -492,17 +630,36 @@ public sealed class UploadNdtBundleFileService : IUploadNdtBundleFileService
         return value;
     }
 
+    /// <summary>
+    /// Builds <c>ndt-{ddMMyy}{seq}.csv</c> starting at <see cref="UploadFileSequenceStart"/>.
+    /// If that file already exists in <paramref name="folder"/>, increments seq until free.
+    /// </summary>
+    internal static string AllocateUploadFileName(string folder, DateTime localNow)
+    {
+        var datePart = localNow.ToString("ddMMyy", CultureInfo.InvariantCulture);
+        for (var seq = UploadFileSequenceStart; seq <= UploadFileSequenceStart + 999_999; seq++)
+        {
+            var fileName = $"{UploadFileNamePrefix}{datePart}{seq.ToString(CultureInfo.InvariantCulture)}.csv";
+            var fullPath = Path.Combine(folder, fileName);
+            if (!File.Exists(fullPath))
+                return fileName;
+        }
+
+        throw new InvalidOperationException(
+            $"Could not allocate an unused upload file name under {folder} for {datePart}.");
+    }
+
     private static int? TryParseMillFromFileName(string? fileName)
     {
-        var parsed = TryParseUploadFileName(fileName);
+        var parsed = TryParseLegacyUploadFileName(fileName);
         return parsed?.Mill;
     }
 
-    private static ParsedUploadFileName? TryParseUploadFileName(string? fileName)
+    private static ParsedUploadFileName? TryParseLegacyUploadFileName(string? fileName)
     {
         if (string.IsNullOrWhiteSpace(fileName))
             return null;
-        var m = UploadFileName.Match(fileName.Trim());
+        var m = LegacyUploadFileName.Match(fileName.Trim());
         if (!m.Success)
             return null;
         var po = m.Groups["po"].Value.Trim();

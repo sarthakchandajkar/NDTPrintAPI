@@ -21,7 +21,7 @@ public sealed class PoReopenWipConfirmationBridge : IHostedService
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        _registration.SetHandler((millNo, po) =>
+        _registration.AddHandler((millNo, po) =>
             _reopen.TryReopenIfClosed(millNo, po, po));
         return Task.CompletedTask;
     }

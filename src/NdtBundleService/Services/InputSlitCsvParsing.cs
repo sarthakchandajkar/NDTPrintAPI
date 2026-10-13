@@ -165,6 +165,43 @@ public static class InputSlitCsvParsing
         return false;
     }
 
+    /// <summary>
+    /// TM Input Slit Rejected P must be a present non-negative integer (0 is valid).
+    /// Blank / missing cells mean the source file is incomplete and will be regenerated.
+    /// </summary>
+    public static bool TryParseRejectedPipes(string? raw, out int value)
+    {
+        value = 0;
+        if (string.IsNullOrWhiteSpace(raw))
+            return false;
+        if (!TryParseIntFlexible(raw, out var parsed) || parsed < 0)
+            return false;
+        value = parsed;
+        return true;
+    }
+
+    /// <summary>
+    /// Canonical NDT output header uses <c>Rejected Pipes</c>.
+    /// TM Accepted may use <c>Rejected P</c>; both are accepted on read.
+    /// </summary>
+    public static string NormalizeRejectedPipesHeader(string headerLine)
+    {
+        if (string.IsNullOrEmpty(headerLine))
+            return headerLine;
+        var fields = SplitCsvFields(StripBom(headerLine));
+        var changed = false;
+        for (var i = 0; i < fields.Length; i++)
+        {
+            if (string.Equals(fields[i].Trim(), "Rejected P", StringComparison.OrdinalIgnoreCase))
+            {
+                fields[i] = "Rejected Pipes";
+                changed = true;
+            }
+        }
+
+        return changed ? JoinCsvLine(fields) : headerLine;
+    }
+
     /// <summary>Replaces one field (0-based) and re-encodes the line as CSV.</summary>
     public static string ReplaceFieldAtIndex(string line, int fieldIndex, string newCellValue)
     {

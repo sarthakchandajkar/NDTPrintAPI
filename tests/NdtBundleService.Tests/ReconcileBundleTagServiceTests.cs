@@ -80,7 +80,7 @@ public sealed class ReconcileBundleTagServiceTests
         var result = await sut.ReprintAsync(SampleBundle(), CancellationToken.None);
 
         Assert.False(result.Success);
-        Assert.Contains("Printer not configured", result.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("not configured", result.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Empty(sender.Sends);
     }
 
@@ -176,6 +176,30 @@ public sealed class ReconcileBundleTagServiceTests
 
         public (string Address, int Port, bool Configured) ResolveForMill(int millNo) =>
             _configured ? ("192.168.0.125", 9100, true) : ("", 9100, false);
+
+        public Task<NamedPrinterEndpoint> GetMill1WipAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new NamedPrinterEndpoint("MILL_1_WIP", _configured ? "192.168.0.125" : "", 9100));
+
+        public Task<NamedPrinterEndpoint> GetMill1FgAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new NamedPrinterEndpoint("MILL_1_FG", "", 9100));
+
+        public Task<NamedPrinterEndpoint> GetPasRoomAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new NamedPrinterEndpoint("PAS_ROOM", "", 9100));
+
+        public Task SaveReprintPrintersAsync(
+            NamedPrinterEndpoint? mill1Wip,
+            NamedPrinterEndpoint? mill1Fg,
+            NamedPrinterEndpoint? pasRoom,
+            CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
+        public (string Address, int Port, bool Configured, string DisplayName) ResolveReprintTarget(
+            int millNo,
+            string? printerTarget)
+        {
+            var r = ResolveForMill(millNo);
+            return (r.Address, r.Port, r.Configured, "Mill printer");
+        }
     }
 
     private sealed class StubZplToggle : IZplGenerationToggle

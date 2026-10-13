@@ -15,7 +15,7 @@ BEGIN
         Printer_Key    NVARCHAR(32)   NOT NULL
             CONSTRAINT PK_Printer PRIMARY KEY,
         Kind           NVARCHAR(16)   NOT NULL
-            CONSTRAINT CK_Printer_Kind CHECK (Kind IN (N'Mill', N'Station')),
+            CONSTRAINT CK_Printer_Kind CHECK (Kind IN (N'Mill', N'Station', N'PasRoom')),
         Address        NVARCHAR(128)  NOT NULL,
         Port           INT            NOT NULL
             CONSTRAINT CK_Printer_Port CHECK (Port BETWEEN 1 AND 65535),
@@ -23,10 +23,14 @@ BEGIN
             CONSTRAINT DF_Printer_Updated DEFAULT (SYSUTCDATETIME()),
         Updated_By     NVARCHAR(128)  NULL,
         CONSTRAINT CK_Printer_Key CHECK (
-            (Kind = N'Mill' AND Printer_Key IN (N'MILL_1', N'MILL_2', N'MILL_3', N'MILL_4'))
+            (Kind = N'Mill' AND Printer_Key IN (
+                N'MILL_1', N'MILL_2', N'MILL_3', N'MILL_4',
+                N'MILL_1_WIP', N'MILL_1_FG'))
             OR
             (Kind = N'Station' AND Printer_Key IN (
-                N'VISUAL_REVISUAL', N'BIG_HYDRO', N'FOUR_HEAD_HYDRO')))
+                N'VISUAL_REVISUAL', N'BIG_HYDRO', N'FOUR_HEAD_HYDRO'))
+            OR
+            (Kind = N'PasRoom' AND Printer_Key = N'PAS_ROOM'))
     );
 END
 GO
@@ -72,16 +76,19 @@ END
 GO
 
 INSERT INTO dbo.Printer (Printer_Key, Kind, Address, Port, Updated_By)
-SELECT s.Printer_Key, s.Kind, N'192.168.0.125', 9100, N'Seed'
+SELECT s.Printer_Key, s.Kind, s.Address, 9100, N'Seed'
 FROM (VALUES
-    (N'MILL_1', N'Mill'),
-    (N'MILL_2', N'Mill'),
-    (N'MILL_3', N'Mill'),
-    (N'MILL_4', N'Mill'),
-    (N'VISUAL_REVISUAL', N'Station'),
-    (N'BIG_HYDRO', N'Station'),
-    (N'FOUR_HEAD_HYDRO', N'Station')
-) AS s(Printer_Key, Kind)
+    (N'MILL_1', N'Mill', N'192.168.0.54'),
+    (N'MILL_2', N'Mill', N'192.168.0.125'),
+    (N'MILL_3', N'Mill', N'192.168.0.125'),
+    (N'MILL_4', N'Mill', N'192.168.0.125'),
+    (N'MILL_1_WIP', N'Mill', N'192.168.0.54'),
+    (N'MILL_1_FG', N'Mill', N'192.168.0.55'),
+    (N'PAS_ROOM', N'PasRoom', N'192.168.0.124'),
+    (N'VISUAL_REVISUAL', N'Station', N'192.168.0.125'),
+    (N'BIG_HYDRO', N'Station', N'192.168.0.125'),
+    (N'FOUR_HEAD_HYDRO', N'Station', N'192.168.0.125')
+) AS s(Printer_Key, Kind, Address)
 WHERE NOT EXISTS (SELECT 1 FROM dbo.Printer p WHERE p.Printer_Key = s.Printer_Key);
 GO
 

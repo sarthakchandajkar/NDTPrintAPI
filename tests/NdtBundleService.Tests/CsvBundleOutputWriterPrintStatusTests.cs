@@ -250,6 +250,18 @@ public sealed class CsvBundleOutputWriterPrintStatusTests
             CancellationToken cancellationToken) =>
             Task.FromResult<(int Sequence, string Formatted)?>(null);
 
+        public Task<int> TryVoidEmptyOrphanCsvAdvanceStampsExceptPoAsync(
+            int millNo,
+            string keepPoNumber,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(0);
+
+        public Task<string?> TryPeekClaimableOpenFillBundleNoAsync(
+            string poNumber,
+            int millNo,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<string?>(null);
+
         public Task SeedMissingRowsAsync(CancellationToken cancellationToken) => Task.CompletedTask;
         public Task<IReadOnlyList<MillSequenceSnapshot>> GetSnapshotsAsync(CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<MillSequenceSnapshot>>(Array.Empty<MillSequenceSnapshot>());

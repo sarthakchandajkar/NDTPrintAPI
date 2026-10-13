@@ -33,10 +33,22 @@ public static class ReconcileFormingBundleHelper
     }
 
     /// <summary>
-    /// Forming bundles show live slit accumulation; formed bundles show the printed tag total.
+    /// Forming bundles show live slit accumulation only (never the provisional CsvAdvance
+    /// Target/Total, which confuses operators — e.g. target 65 with slit sum 3).
+    /// Formed / manual-recon bundles show the printed or locked tag total.
     /// </summary>
-    public static int ResolveDisplayTotal(NdtBundleRecord bundle, int slitSum, bool isForming) =>
-        bundle.ManualRecon || !isForming
-            ? bundle.TotalNdtPcs
-            : Math.Max(bundle.TotalNdtPcs, slitSum);
+    public static int ResolveDisplayTotal(NdtBundleRecord bundle, int slitSum, bool isForming)
+    {
+        if (bundle.ManualRecon || !isForming)
+            return bundle.TotalNdtPcs;
+
+        if (slitSum > 0)
+            return slitSum;
+
+        // No slits yet: prefer stamped Csv_Filled over provisional Total/Target.
+        if (bundle.CsvFilled > 0)
+            return bundle.CsvFilled;
+
+        return 0;
+    }
 }

@@ -27,22 +27,19 @@ public sealed class PoPlanWipImportHostedService : IHostedService
         _logger = logger;
     }
 
-    public async Task StartAsync(CancellationToken cancellationToken)
+    public Task StartAsync(CancellationToken cancellationToken)
     {
         if (!PoPlanWipImportSettings.IsEnabled(_options))
-            return;
+            return Task.CompletedTask;
 
         _logger.LogInformation(
-            "PO_Plan_WIP folder import starting (folder {Folder}; eligible files use PO plan date filter).",
+            "PO_Plan_WIP folder import scheduled in background (folder {Folder}). API stays available during folder scans.",
             _options.PoPlanFolder);
 
-        await _importer.ImportEligibleFilesAsync(cancellationToken).ConfigureAwait(false);
-
-        if (_options.ImportPoPlanWipPollMinutes <= 0)
-            return;
-
+        // Do not await ImportEligibleFilesAsync here — large PO Accepted folders delay Kestrel bind.
         _stoppingCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        _backgroundTask = RunPeriodicImportAsync(_stoppingCts.Token);
+        _backgroundTask = RunImportLoopAsync(_stoppingCts.Token);
+        return Task.CompletedTask;
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
@@ -66,8 +63,27 @@ public sealed class PoPlanWipImportHostedService : IHostedService
         _stoppingCts.Dispose();
     }
 
-    private async Task RunPeriodicImportAsync(CancellationToken stoppingToken)
+    private async Task RunImportLoopAsync(CancellationToken stoppingToken)
     {
+        try
+        {
+            await _importer.ImportEligibleFilesAsync(stoppingToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Background PO_Plan_WIP folder import failed; will retry after {Minutes} minute(s).",
+                Math.Max(1, _options.ImportPoPlanWipPollMinutes));
+        }
+
+        if (_options.ImportPoPlanWipPollMinutes <= 0)
+            return;
+
         var interval = TimeSpan.FromMinutes(_options.ImportPoPlanWipPollMinutes);
         while (!stoppingToken.IsCancellationRequested)
         {

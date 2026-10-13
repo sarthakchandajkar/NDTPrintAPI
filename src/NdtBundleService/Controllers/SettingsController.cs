@@ -453,6 +453,153 @@ public sealed class SettingsController : ControllerBase
     }
 
     /// <summary>
+    /// MES-computed hooter values (formation threshold + open accumulation / sizeCounts) for one mill.
+    /// Mill instances serve the authoritative sizeCounts; Shared Settings proxies here so the UI
+    /// does not show stale Shared-local accumulation.
+    /// </summary>
+    [HttpGet("plc/mill/{millNo:int}/mes-hooter")]
+    public async Task<IActionResult> GetMesHooter(int millNo, CancellationToken cancellationToken)
+    {
+        if (!TryAuthorize(out var denied))
+            return denied!;
+
+        if (millNo is < 1 or > 4)
+            return BadRequest(new { Message = "millNo must be 1–4." });
+
+        if (_millPlcProxy.ShouldProxy(millNo))
+        {
+            return await ProxyToMillAsync(
+                    millNo,
+                    HttpMethod.Get,
+                    $"api/Settings/plc/mill/{millNo}/mes-hooter",
+                    body: null,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        try
+        {
+            var resolved = await _hooterValues.ResolveAsync(millNo, cancellationToken).ConfigureAwait(false);
+            return Ok(new
+            {
+                poNumber = resolved.PoNumber,
+                pipeSize = resolved.PipeSize,
+                threshold = resolved.Threshold,
+                accumulated = resolved.Accumulated,
+                bundleNear = resolved.Threshold > 0 && resolved.Accumulated > resolved.Threshold
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "MES hooter resolve failed for mill {Mill}.", millNo);
+            return StatusCode(500, new { Message = "Failed to resolve MES hooter values.", Error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Test-pulse the NDT bundle hooter on the mill's live S7 connection using the same PAS / Q /
+    /// WriteOutputBit / DurationMs path as production. When <c>requireThreshold</c> is true (default),
+    /// also requires MW56 &gt; MW58. On Shared, forwards to the mill instance.
+    /// </summary>
+    [HttpPost("plc/mill/{millNo:int}/test-hooter")]
+    public async Task<IActionResult> TestHooter(
+        int millNo,
+        [FromBody] TestHooterRequest? request,
+        CancellationToken cancellationToken)
+    {
+        if (!TryAuthorize(out var denied))
+            return denied!;
+
+        if (millNo is < 1 or > 4)
+            return BadRequest(new { Message = "millNo must be 1–4." });
+
+        var requireThreshold = request?.RequireThreshold ?? true;
+
+        if (_millPlcProxy.ShouldProxy(millNo))
+        {
+            _logger.LogInformation(
+                "Settings hooter test for Mill {Mill} proxied to mill instance (requireThreshold={RequireThreshold}).",
+                millNo,
+                requireThreshold);
+            return await ProxyToMillAsync(
+                    millNo,
+                    HttpMethod.Post,
+                    $"api/Settings/plc/mill/{millNo}/test-hooter",
+                    new TestHooterRequest { RequireThreshold = requireThreshold },
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        var handshakeCfg = _options.PlcHandshake ?? new PlcHandshakeOptions();
+        if (!handshakeCfg.Enabled)
+        {
+            return BadRequest(new
+            {
+                Message = "PlcHandshake is disabled on this instance; hooter pulse requires the mill handshake loop."
+            });
+        }
+
+        _logger.LogInformation(
+            "Settings hooter test requested for Mill {Mill} (requireThreshold={RequireThreshold}).",
+            millNo,
+            requireThreshold);
+
+        var result = await _handshakeCoordinator
+            .RunSettingsHooterTestAsync(millNo, requireThreshold, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!result.Success)
+        {
+            return BadRequest(new
+            {
+                result.Success,
+                result.Message,
+                result.MillNo,
+                result.MillName,
+                result.PlcConnected,
+                result.HooterEnabled,
+                result.PoNumber,
+                result.PipeSize,
+                result.Accumulated,
+                result.Threshold,
+                result.AboveThreshold,
+                result.RequireThreshold,
+                result.PasEnable,
+                result.QBefore,
+                result.Pulsed,
+                result.DurationMs,
+                result.OutputAddress,
+                result.PasEnableAddress,
+                steps = result.Steps
+            });
+        }
+
+        return Ok(new
+        {
+            result.Success,
+            result.Message,
+            result.MillNo,
+            result.MillName,
+            result.PlcConnected,
+            result.HooterEnabled,
+            result.PoNumber,
+            result.PipeSize,
+            result.Accumulated,
+            result.Threshold,
+            result.AboveThreshold,
+            result.RequireThreshold,
+            result.PasEnable,
+            result.QBefore,
+            result.Pulsed,
+            result.DurationMs,
+            result.OutputAddress,
+            result.PasEnableAddress,
+            steps = result.Steps,
+            logHint = "Filter logs for [Settings test] and NDT bundle hooter."
+        });
+    }
+
+    /// <summary>
     /// Operator override for open-bundle PLC accumulation (MES <c>sizeCounts</c> / MW56 toward next close).
     /// Use after restart when slit-edge state was lost and MES count no longer matches actual production.
     /// On Shared, forwards to the mill instance HTTP API so MW56 sync hits the live S7 connection.
@@ -610,6 +757,86 @@ public sealed class SettingsController : ControllerBase
     }
 
     /// <summary>
+    /// Authoritative MES hooter for Shared Settings: mill proxy first, then PLC MW56/MW58 telemetry
+    /// fallback (never Shared-local sizeCounts, which go stale after mill-side overrides).
+    /// </summary>
+    private async Task<object?> TryGetSharedMesHooterAsync(
+        int millNo,
+        PlcHandshakeMillStatus? live,
+        CancellationToken cancellationToken)
+    {
+        if (_millPlcProxy.ShouldProxy(millNo))
+        {
+            try
+            {
+                var proxied = await _millPlcProxy
+                    .ForwardAsync(
+                        millNo,
+                        HttpMethod.Get,
+                        $"api/Settings/plc/mill/{millNo}/mes-hooter",
+                        jsonBody: null,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (proxied.StatusCode is >= 200 and < 300 &&
+                    !string.IsNullOrWhiteSpace(proxied.Body))
+                {
+                    using var doc = JsonDocument.Parse(proxied.Body);
+                    var root = doc.RootElement;
+                    int? accumulated = root.TryGetProperty("accumulated", out var accEl) && accEl.TryGetInt32(out var acc)
+                        ? acc
+                        : null;
+                    int? threshold = root.TryGetProperty("threshold", out var thrEl) && thrEl.TryGetInt32(out var thr)
+                        ? thr
+                        : null;
+                    if (accumulated is not null && threshold is not null)
+                    {
+                        string? poNumber = root.TryGetProperty("poNumber", out var poEl) && poEl.ValueKind == JsonValueKind.String
+                            ? poEl.GetString()
+                            : null;
+                        string? pipeSize = root.TryGetProperty("pipeSize", out var psEl) && psEl.ValueKind == JsonValueKind.String
+                            ? psEl.GetString()
+                            : null;
+                        return new
+                        {
+                            poNumber,
+                            pipeSize,
+                            threshold = threshold.Value,
+                            accumulated = accumulated.Value,
+                            bundleNear = threshold.Value > 0 && accumulated.Value > threshold.Value
+                        };
+                    }
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Shared MES hooter proxy for Mill {Mill} returned HTTP {Status}.",
+                        millNo,
+                        proxied.StatusCode);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Shared MES hooter proxy failed for Mill {Mill}.", millNo);
+            }
+        }
+
+        // Fallback: mill-written MW56/MW58 from Mill_Instance_Status (still better than Shared sizeCounts).
+        if (live?.AccumulatedValue is int plcAcc && live.ThresholdValue is int plcThr)
+        {
+            return new
+            {
+                poNumber = live.RunningPoNumber,
+                pipeSize = (string?)null,
+                threshold = plcThr,
+                accumulated = plcAcc,
+                bundleNear = plcThr > 0 && plcAcc > plcThr
+            };
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Shared Settings PLC tab: live OK/NOK/NDT and connection state from mill telemetry;
     /// mill host / hooter addresses from <c>PlcHandshake:Mills</c> (S7 stays on each mill process).
     /// </summary>
@@ -650,26 +877,13 @@ public sealed class SettingsController : ControllerBase
                             await TcpProbeCachedAsync(host, 102, cancellationToken).ConfigureAwait(false);
             }
 
+            // Never resolve sizeCounts on Shared — that state lives on the mill process.
+            // Proxy MES hooter from the mill (same path as open-accumulation writes).
             object? mesHooter = null;
-            if (!liveOnly && cfg.Hooter?.Enabled == true)
+            if (!liveOnly && cfg.Hooter?.Enabled == true && millNo is >= 1 and <= 4)
             {
-                try
-                {
-                    var resolved = await _hooterValues.ResolveAsync(millNo, cancellationToken).ConfigureAwait(false);
-                    mesHooter = new
-                    {
-                        poNumber = resolved.PoNumber,
-                        pipeSize = resolved.PipeSize,
-                        threshold = resolved.Threshold,
-                        accumulated = resolved.Accumulated,
-                        bundleNear = resolved.Threshold > 0 &&
-                                     resolved.Accumulated > resolved.Threshold
-                    };
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "MES hooter values resolve failed for mill {Mill} during Shared PLC diagnostics.", millNo);
-                }
+                mesHooter = await TryGetSharedMesHooterAsync(millNo, live, cancellationToken)
+                    .ConfigureAwait(false);
             }
 
             var poEndSource = cfg.ResolvePoEndSource(_options);
@@ -768,7 +982,8 @@ public sealed class SettingsController : ControllerBase
                 m => m.ToString(),
                 m => liveByMill.TryGetValue(m, out var row) && row.TriggerActive),
             mills,
-            message = "Shared Settings PLC view uses mill telemetry + MillInstanceProxy for writes. S7 stays on each mill process."
+            message =
+                "Shared Settings PLC view uses mill telemetry for PLC bits, MillInstanceProxy for MES hooter / writes. S7 stays on each mill process."
         });
     }
 
@@ -946,6 +1161,9 @@ public sealed class SettingsController : ControllerBase
             results.Add(new
             {
                 millNo = p.MillNo,
+                // Mill-1 row is the WIP printer (auto-print + Settings Mill-1 WIP).
+                role = p.MillNo == 1 ? ReprintPrinterTarget.Wip : null,
+                displayName = p.MillNo == 1 ? "Mill-1 WIP printer" : $"Mill-{p.MillNo}",
                 address = p.Address,
                 port = p.Port,
                 effectiveAddress = resolved.Address,
@@ -955,6 +1173,40 @@ public sealed class SettingsController : ControllerBase
                 status = !resolved.Configured ? "NotConfigured" : reachable ? "Ready" : "Unreachable"
             });
         }
+
+        async Task<object> ProbeNamedAsync(NamedPrinterEndpoint endpoint, string displayName, string role)
+        {
+            var addr = (endpoint.Address ?? string.Empty).Trim();
+            var port = endpoint.Port > 0 ? endpoint.Port : 9100;
+            var configuredOk = !string.IsNullOrWhiteSpace(addr) &&
+                               !addr.Equals("0.0.0.0", StringComparison.OrdinalIgnoreCase);
+            var reachable = configuredOk &&
+                            await TcpProbeAsync(addr, port, cancellationToken).ConfigureAwait(false);
+            return new
+            {
+                key = endpoint.Key,
+                role,
+                displayName,
+                address = addr,
+                port,
+                effectiveAddress = addr,
+                effectivePort = port,
+                configured = configuredOk,
+                reachable,
+                status = !configuredOk ? "NotConfigured" : reachable ? "Ready" : "Unreachable"
+            };
+        }
+
+        var mill1Wip = await _millPrinters.GetMill1WipAsync(cancellationToken).ConfigureAwait(false);
+        var mill1Fg = await _millPrinters.GetMill1FgAsync(cancellationToken).ConfigureAwait(false);
+        var pasRoom = await _millPrinters.GetPasRoomAsync(cancellationToken).ConfigureAwait(false);
+        var mill1FgStatus = await ProbeNamedAsync(mill1Fg, "Mill-1 FG printer", ReprintPrinterTarget.Fg)
+            .ConfigureAwait(false);
+        var pasRoomStatus = await ProbeNamedAsync(pasRoom, "PAS Room printer", ReprintPrinterTarget.Pas)
+            .ConfigureAwait(false);
+        // mill1Wip is already reflected in mills[0]; keep a dedicated object for UI convenience.
+        var mill1WipStatus = await ProbeNamedAsync(mill1Wip, "Mill-1 WIP printer", ReprintPrinterTarget.Wip)
+            .ConfigureAwait(false);
 
         var stationResults = new List<object>();
         if (_stationPrinters is not null)
@@ -980,7 +1232,14 @@ public sealed class SettingsController : ControllerBase
             }
         }
 
-        return Ok(new { Mills = results, Stations = stationResults });
+        return Ok(new
+        {
+            Mills = results,
+            Mill1Wip = mill1WipStatus,
+            Mill1Fg = mill1FgStatus,
+            PasRoom = pasRoomStatus,
+            Stations = stationResults
+        });
     }
 
     [HttpPut("printers")]
@@ -1007,7 +1266,49 @@ public sealed class SettingsController : ControllerBase
                 m.Port > 0 ? m.Port : 9100))
             .ToList();
 
+        // Prefer explicit Mill1Wip when provided; otherwise Mill-1 row is treated as WIP.
+        if (request.Mill1Wip is not null)
+        {
+            var existing = endpoints.FirstOrDefault(m => m.MillNo == 1);
+            var wip = new MillPrinterEndpoint(
+                1,
+                (request.Mill1Wip.Address ?? string.Empty).Trim(),
+                request.Mill1Wip.Port > 0 ? request.Mill1Wip.Port : 9100);
+            if (existing is null)
+                endpoints.Add(wip);
+            else
+            {
+                endpoints.Remove(existing);
+                endpoints.Add(wip);
+            }
+        }
+
         await _millPrinters.SaveAllAsync(endpoints, cancellationToken).ConfigureAwait(false);
+
+        NamedPrinterEndpoint? mill1Fg = null;
+        NamedPrinterEndpoint? pasRoom = null;
+        if (request.Mill1Fg is not null)
+        {
+            mill1Fg = new NamedPrinterEndpoint(
+                "MILL_1_FG",
+                (request.Mill1Fg.Address ?? string.Empty).Trim(),
+                request.Mill1Fg.Port > 0 ? request.Mill1Fg.Port : 9100);
+        }
+
+        if (request.PasRoom is not null)
+        {
+            pasRoom = new NamedPrinterEndpoint(
+                "PAS_ROOM",
+                (request.PasRoom.Address ?? string.Empty).Trim(),
+                request.PasRoom.Port > 0 ? request.PasRoom.Port : 9100);
+        }
+
+        if (mill1Fg is not null || pasRoom is not null)
+        {
+            await _millPrinters
+                .SaveReprintPrintersAsync(mill1Wip: null, mill1Fg, pasRoom, cancellationToken)
+                .ConfigureAwait(false);
+        }
 
         var stationCount = 0;
         if (_stationPrinters is not null && request.Stations is { Count: > 0 })
@@ -1022,7 +1323,14 @@ public sealed class SettingsController : ControllerBase
             stationCount = stationEndpoints.Count;
         }
 
-        return Ok(new { Message = "Printer settings saved.", Count = endpoints.Count, StationCount = stationCount });
+        return Ok(new
+        {
+            Message = "Printer settings saved.",
+            Count = endpoints.Count,
+            StationCount = stationCount,
+            Mill1FgSaved = mill1Fg is not null,
+            PasRoomSaved = pasRoom is not null
+        });
     }
 
     [HttpPost("printers/test")]
@@ -1040,8 +1348,47 @@ public sealed class SettingsController : ControllerBase
             return await TestStationPrinterAsync(stationCode!, cancellationToken).ConfigureAwait(false);
         }
 
+        if (!string.IsNullOrWhiteSpace(request?.PrinterTarget))
+        {
+            var target = ReprintPrinterTarget.Normalize(request.PrinterTarget);
+            if (!ReprintPrinterTarget.IsKnown(request.PrinterTarget))
+                return BadRequest(new { Message = $"Unknown printerTarget '{request.PrinterTarget}'." });
+
+            var millNo = target is ReprintPrinterTarget.Wip or ReprintPrinterTarget.Fg
+                ? 1
+                : request.MillNo is >= 1 and <= 4 ? request.MillNo : 1;
+            var resolvedTarget = _millPrinters.ResolveReprintTarget(millNo, target);
+            if (!resolvedTarget.Configured)
+            {
+                return Ok(new
+                {
+                    millNo,
+                    printerTarget = target,
+                    displayName = resolvedTarget.DisplayName,
+                    status = "NotConfigured",
+                    reachable = false
+                });
+            }
+
+            var targetReachable = await TcpProbeAsync(
+                    resolvedTarget.Address,
+                    resolvedTarget.Port,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return Ok(new
+            {
+                millNo,
+                printerTarget = target,
+                displayName = resolvedTarget.DisplayName,
+                address = resolvedTarget.Address,
+                port = resolvedTarget.Port,
+                status = targetReachable ? "Ready" : "Unreachable",
+                reachable = targetReachable
+            });
+        }
+
         if (request?.MillNo is < 1 or > 4)
-            return BadRequest(new { Message = "millNo must be 1–4, or provide stationCode." });
+            return BadRequest(new { Message = "millNo must be 1–4, or provide stationCode / printerTarget." });
 
         var resolved = _millPrinters.ResolveForMill(request.MillNo);
         if (!resolved.Configured)
@@ -1077,9 +1424,6 @@ public sealed class SettingsController : ControllerBase
             return await TestPrintStationPrinterAsync(stationCode!, cancellationToken).ConfigureAwait(false);
         }
 
-        if (request?.MillNo is < 1 or > 4)
-            return BadRequest(new { Message = "millNo must be 1–4, or provide stationCode." });
-
         if (!_zplToggle.IsEnabled)
         {
             return BadRequest(new
@@ -1090,25 +1434,68 @@ public sealed class SettingsController : ControllerBase
             });
         }
 
-        var resolved = _millPrinters.ResolveForMill(request.MillNo);
-        if (!resolved.Configured)
+        string address;
+        int port;
+        int millNo;
+        string displayLabel;
+
+        if (!string.IsNullOrWhiteSpace(request?.PrinterTarget))
         {
-            return BadRequest(new
+            var target = ReprintPrinterTarget.Normalize(request.PrinterTarget);
+            if (!ReprintPrinterTarget.IsKnown(request.PrinterTarget))
+                return BadRequest(new { Message = $"Unknown printerTarget '{request.PrinterTarget}'." });
+
+            millNo = target is ReprintPrinterTarget.Wip or ReprintPrinterTarget.Fg
+                ? 1
+                : request.MillNo is >= 1 and <= 4 ? request.MillNo : 1;
+            var resolvedTarget = _millPrinters.ResolveReprintTarget(millNo, target);
+            if (!resolvedTarget.Configured)
             {
-                Message =
-                    $"Mill {request.MillNo} has no printer IP configured. Enter an address, click Save printers, then try Print test tag.",
-                millNo = request.MillNo,
-                status = "NotConfigured",
-                success = false
-            });
+                return BadRequest(new
+                {
+                    Message =
+                        $"{resolvedTarget.DisplayName} has no printer IP configured. Enter an address, click Save printers, then try Print test tag.",
+                    millNo,
+                    printerTarget = target,
+                    status = "NotConfigured",
+                    success = false
+                });
+            }
+
+            address = resolvedTarget.Address;
+            port = resolvedTarget.Port;
+            displayLabel = resolvedTarget.DisplayName;
+        }
+        else
+        {
+            if (request?.MillNo is < 1 or > 4)
+                return BadRequest(new { Message = "millNo must be 1–4, or provide stationCode / printerTarget." });
+
+            millNo = request.MillNo;
+            var resolved = _millPrinters.ResolveForMill(millNo);
+            if (!resolved.Configured)
+            {
+                return BadRequest(new
+                {
+                    Message =
+                        $"Mill {millNo} has no printer IP configured. Enter an address, click Save printers, then try Print test tag.",
+                    millNo,
+                    status = "NotConfigured",
+                    success = false
+                });
+            }
+
+            address = resolved.Address;
+            port = resolved.Port;
+            displayLabel = $"Mill {millNo} printer";
         }
 
-        var bundleNo = $"TEST-M{request.MillNo}";
+        var bundleNo = $"TEST-M{millNo}";
         _logger.LogInformation(
-            "Settings test-print: sending dummy ZPL to Mill {Mill} printer {Address}:{Port}.",
-            request.MillNo,
-            resolved.Address,
-            resolved.Port);
+            "Settings test-print: sending dummy ZPL to {Label} {Address}:{Port}.",
+            displayLabel,
+            address,
+            port);
 
         try
         {
@@ -1119,12 +1506,12 @@ public sealed class SettingsController : ControllerBase
                 pipeSize: "1.5",
                 pipeLen: "6",
                 pcsPerBundle: 1,
-                slitNo: $"M{request.MillNo}",
+                slitNo: $"M{millNo}",
                 labelWidthMm: _options.NdtTagLabelWidthMm,
-                labelLengthMm: ResolveDummyLabelLengthMm(request.MillNo));
+                labelLengthMm: ResolveDummyLabelLengthMm(millNo));
 
             var sendResult = await _networkPrinterSender
-                .SendAsync(resolved.Address, resolved.Port, zplBytes, cancellationToken)
+                .SendAsync(address, port, zplBytes, cancellationToken)
                 .ConfigureAwait(false);
 
             if (sendResult.Success)
@@ -1132,12 +1519,13 @@ public sealed class SettingsController : ControllerBase
                 return Ok(new
                 {
                     success = true,
-                    millNo = request.MillNo,
-                    address = resolved.Address,
-                    port = resolved.Port,
+                    millNo,
+                    printerTarget = request?.PrinterTarget,
+                    address,
+                    port,
                     status = "Printed",
                     message =
-                        $"Dummy ZPL tag sent to Mill {request.MillNo} printer {resolved.Address}:{resolved.Port}. " +
+                        $"Dummy ZPL tag sent to {displayLabel} {address}:{port}. " +
                         "The physical label should print now."
                 });
             }
@@ -1145,23 +1533,24 @@ public sealed class SettingsController : ControllerBase
             return StatusCode(500, new
             {
                 success = false,
-                millNo = request.MillNo,
-                address = resolved.Address,
-                port = resolved.Port,
+                millNo,
+                printerTarget = request?.PrinterTarget,
+                address,
+                port,
                 status = "SendFailed",
                 message =
-                    $"Failed to send ZPL to {resolved.Address}:{resolved.Port}. " +
+                    $"Failed to send ZPL to {address}:{port}. " +
                     "Check printer power, network, firewall, and that the device accepts ZPL on port 9100.",
                 detail = sendResult.ErrorDetail ?? string.Empty
             });
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Settings test-print failed for Mill {Mill}.", request.MillNo);
+            _logger.LogError(ex, "Settings test-print failed for {Label}.", displayLabel);
             return StatusCode(500, new
             {
                 success = false,
-                millNo = request.MillNo,
+                millNo,
                 message = "Print failed: " + ex.Message
             });
         }
@@ -1467,11 +1856,26 @@ public sealed class SettingsController : ControllerBase
     {
         public List<MillPrinterRowDto>? Mills { get; set; }
         public List<StationPrinterRowDto>? Stations { get; set; }
+
+        /// <summary>Mill-1 WIP printer (optional; Mill-1 row in <see cref="Mills"/> is also treated as WIP).</summary>
+        public PrinterEndpointDto? Mill1Wip { get; set; }
+
+        /// <summary>Mill-1 FG printer IP (toggled plant-side with WIP).</summary>
+        public PrinterEndpointDto? Mill1Fg { get; set; }
+
+        /// <summary>PAS Room printer used for operator-desk reprints.</summary>
+        public PrinterEndpointDto? PasRoom { get; set; }
     }
 
     public sealed class MillPrinterRowDto
     {
         public int MillNo { get; set; }
+        public string? Address { get; set; }
+        public int Port { get; set; } = 9100;
+    }
+
+    public sealed class PrinterEndpointDto
+    {
         public string? Address { get; set; }
         public int Port { get; set; } = 9100;
     }
@@ -1487,11 +1891,23 @@ public sealed class SettingsController : ControllerBase
     {
         public int MillNo { get; set; }
         public string? StationCode { get; set; }
+
+        /// <summary>Optional: <c>wip</c>, <c>fg</c>, or <c>pas</c>.</summary>
+        public string? PrinterTarget { get; set; }
     }
 
     public sealed class TestPoChangeRequest
     {
         public int MillNo { get; set; }
+    }
+
+    public sealed class TestHooterRequest
+    {
+        /// <summary>
+        /// When true (default), require MW56 &gt; MW58 like production.
+        /// When false, still apply PAS enable + Q-already-on gates and WriteOutputBit.
+        /// </summary>
+        public bool RequireThreshold { get; set; } = true;
     }
 
     public sealed class OpenAccumulationOverrideRequest

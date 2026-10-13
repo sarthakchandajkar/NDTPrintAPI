@@ -30,8 +30,10 @@ public sealed class FillToTargetCutoverAndConfigTests
     }
 
     [Fact]
-    public void MillCsvBatchMode_zero_ndt_defaults_10001_hollow_defaults_empty_all_mills()
+    public void MillCsvBatchMode_ResolveNonFill_zero_ndt_and_hollow_helpers()
     {
+        // ResolveNonFillCsvBatch still documents Constant/hollow helpers.
+        // FillToTarget workers no longer use ZeroNdtValue for zero-NDT rows — they assign a real batch.
         var opt = new NdtBundleOptions();
         for (var m = 1; m <= 4; m++)
         {
@@ -50,6 +52,8 @@ public sealed class FillToTargetCutoverAndConfigTests
         var (constCsv, constLink) = MillCsvBatchModeResolver.ResolveNonFillCsvBatch(constant, isHollowFg: false, ndtPipes: 10);
         Assert.Equal("10001", constCsv);
         Assert.False(constLink);
+
+        Assert.True(MillCsvBatchModeResolver.Resolve(opt, 1).IsFillToTarget);
     }
 
     [Fact]

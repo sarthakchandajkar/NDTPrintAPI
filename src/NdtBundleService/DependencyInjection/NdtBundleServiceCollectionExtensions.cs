@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Services;
 using NdtBundleService.Services.FileBasedPoChange;
+using NdtBundleService.Services.LinkedPo;
 using NdtBundleService.Services.InstanceLease;
 using NdtBundleService.Services.MillInstanceProxy;
 using NdtBundleService.Services.MillInstanceStatus;
@@ -12,6 +13,7 @@ using NdtBundleService.Services.PlcHandshake;
 using NdtBundleService.Services.PlcHandshake.PlcPoEnd;
 using NdtBundleService.Services.PlcHandshake.S7;
 using NdtBundleService.Services.PoLifecycle;
+using NdtBundleService.Services.PoChangeRemediation;
 using NdtBundleService.Services.TcpOpenComm;
 
 namespace NdtBundleService.DependencyInjection;
@@ -115,6 +117,7 @@ public static class NdtBundleServiceCollectionExtensions
             services.AddSingleton<IManualNdtTagService, ManualNdtTagService>();
             services.AddSingleton<IReconcileBundleTagService, ReconcileBundleTagService>();
             services.AddSingleton<IBundleMergeService, BundleMergeService>();
+            services.AddSingleton<IPoChangeRemediationService, PoChangeRemediationService>();
         }
 
         services.AddHostedService<SqlTraceabilityStartupCheck>();
@@ -131,9 +134,12 @@ public static class NdtBundleServiceCollectionExtensions
         services.AddSingleton<WipConfirmedRunningPoNotifier>();
         services.AddSingleton<IWipConfirmedRunningPoNotifier>(sp => sp.GetRequiredService<WipConfirmedRunningPoNotifier>());
         services.AddSingleton<IWipConfirmedRunningPoNotifierRegistration>(sp => sp.GetRequiredService<WipConfirmedRunningPoNotifier>());
+        services.AddSingleton<IPoCsvAdvanceOnNewRunningPoService, PoCsvAdvanceOnNewRunningPoService>();
         services.AddSingleton<IActivePoPerMillService, ActivePoPerMillService>();
         services.AddSingleton<IWipBundleRunningPoProvider, WipBundleRunningPoProvider>();
         services.AddSingleton<FileBasedPoChangeQueue>();
+        services.AddSingleton<LinkedPoCutoverQueue>();
+        services.AddSingleton<LinkedPoCutoverEvidence>();
         services.AddSingleton<IWipBundleReconciliationService, WipBundleReconciliationService>();
         services.AddSingleton<PlcPoEndQueue>();
         services.AddSingleton<IS7ConnectionProviderRegistry, S7ConnectionProviderRegistry>();
@@ -214,10 +220,12 @@ public static class NdtBundleServiceCollectionExtensions
         if (role.IsMonolith || role.EnableMillWorkers)
         {
             services.AddHostedService<PoReopenWipConfirmationBridge>();
+            services.AddHostedService<PoCsvAdvanceOnWipConfirmationBridge>();
             services.AddHostedService<PlcHandshakeWorker>();
             services.AddHostedService<PlcPoEndQueueWorker>();
             services.AddHostedService<MillTcpOpenCommWorker>();
             services.AddHostedService<FileBasedPoChangeWorker>();
+            services.AddHostedService<LinkedPoCutoverWorker>();
             services.AddHostedService<WipBundleFileReconciliationWorker>();
             services.AddHostedService<PoLifecycleSweepWorker>();
             services.AddHostedService<SlitMonitoringWorker>();

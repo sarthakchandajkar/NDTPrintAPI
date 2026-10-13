@@ -172,6 +172,11 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
                     bundlesClosed = closed;
                     totalNdtPcsClosed = pcs;
 
+                    // Release open-fill on the ended PO so late Input Slit CSVs cannot block the next PO stamp.
+                    await _bundleRepository
+                        .TryReleaseFormingAfterPlcPoEndAsync(po, millNo, cancellationToken)
+                        .ConfigureAwait(false);
+
                     await _batchState.IncrementBatchOnPoEndAsync(po, millNo, cancellationToken).ConfigureAwait(false);
                     await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
                     _poLifecycle.TryMarkDraining(millNo, po, DateTime.UtcNow);
@@ -330,6 +335,10 @@ public sealed class PoEndWorkflowService : IPoEndWorkflowService
                         plcNdtCountFinal,
                         correlationId,
                         cancellationToken)
+                    .ConfigureAwait(false);
+
+                await _bundleRepository
+                    .TryReleaseFormingAfterPlcPoEndAsync(po, millNo, cancellationToken)
                     .ConfigureAwait(false);
 
                 await _batchState.IncrementBatchOnPoEndAsync(po, millNo, cancellationToken).ConfigureAwait(false);

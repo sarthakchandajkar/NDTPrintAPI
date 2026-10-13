@@ -18,11 +18,13 @@ export function RevisualStationScreen({ stationNumber }: { stationNumber: Statio
   const [generatingUpload, setGeneratingUpload] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [sapMailNotice, setSapMailNotice] = useState(false);
 
   const loadContext = async (batch: string) => {
     setLoadingContext(true);
     setError(null);
     setSuccess(null);
+    setSapMailNotice(false);
     try {
       const ctx = await api.manualStationContext("Revisual", batch, stationNumber);
       setPoNumber(ctx.poNumber ?? null);
@@ -62,6 +64,7 @@ export function RevisualStationScreen({ stationNumber }: { stationNumber: Statio
     }
 
     setSubmitting(true);
+    setSapMailNotice(false);
     try {
       const res = await api.manualStationRecord("Revisual", {
         ndtBatchNo: batch,
@@ -71,10 +74,15 @@ export function RevisualStationScreen({ stationNumber }: { stationNumber: Statio
         operatorStationNumber: stationNumber,
       });
       const follow = stationPrintFollowUp(printTag, res);
+      const sentToSap = Boolean(res.processFileAlreadySentToSap);
+      setSapMailNotice(sentToSap);
       setSuccess(
-        `${res.message ?? "Saved."} Batch: ${res.ndtBatchNo ?? "—"} | Final NDT: ${res.outgoingPcs ?? okPcs}${
-          res.csvPath ? ` | Process CSV: ${res.csvPath}` : ""
-        }${res.uploadFilePath ? ` | Upload CSV: ${res.uploadFilePath}` : ""}${follow.extraSuccess}`
+        sentToSap
+          ? res.message ??
+              "NDT process file already pushed to SAP. Corrected counts saved in MES SQL — mail SAP with the corrected values."
+          : `${res.message ?? "Saved."} Batch: ${res.ndtBatchNo ?? "—"} | Final NDT: ${res.outgoingPcs ?? okPcs}${
+              res.csvPath ? ` | Process CSV: ${res.csvPath}` : ""
+            }${res.uploadFilePath ? ` | Upload CSV: ${res.uploadFilePath}` : ""}${follow.extraSuccess}`
       );
       if (follow.printError) setError(follow.printError);
     } catch (e) {
@@ -118,7 +126,15 @@ export function RevisualStationScreen({ stationNumber }: { stationNumber: Statio
 
       {error && <div className="rounded-md bg-red-50 border border-red-200 p-4 text-red-700 text-sm">{error}</div>}
       {success && (
-        <div className="rounded-md bg-green-50 border border-green-200 p-4 text-green-800 text-sm">{success}</div>
+        <div
+          className={`rounded-md border p-4 text-sm ${
+            sapMailNotice
+              ? "bg-amber-50 border-amber-300 text-amber-950"
+              : "bg-green-50 border-green-200 text-green-800"
+          }`}
+        >
+          {success}
+        </div>
       )}
 
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-6 md:p-8 w-full max-w-6xl mx-auto space-y-4">

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   type FormationChartEntryRow,
@@ -9,10 +9,14 @@ import {
   type SettingsPlcMill,
   type SettingsPoChangeTestResult,
   type SettingsPrinterMill,
+  type SettingsPrinterNamed,
   type SettingsPrinterStation,
   type MillSequenceSnapshot,
+  type ReprintPrinterTarget,
 } from "@/lib/api";
 import { LineRunningLamp } from "@/components/LineRunningLamp";
+import { HooterOutputBadge } from "@/components/HooterOutputBadge";
+import { BundleProgressBar } from "@/components/BundleProgressBar";
 import {
   clearSettingsToken,
   getSettingsToken,
@@ -100,55 +104,6 @@ function formatUtc(iso?: string | null): string {
   }
 }
 
-function HooterOutputBadge({ active }: { active?: boolean }) {
-  return (
-    <span
-      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-semibold ${
-        active
-          ? "bg-amber-100 text-amber-900 ring-2 ring-amber-400 animate-pulse"
-          : "bg-gray-100 text-gray-600"
-      }`}
-      title="Q6.7 hooter output"
-    >
-      <span
-        className={`h-2 w-2 rounded-full ${active ? "bg-amber-500" : "bg-gray-400"}`}
-      />
-      {active ? "HOOTER ON" : "Off"}
-    </span>
-  );
-}
-
-function BundleProgressBar({
-  accumulated,
-  threshold,
-}: {
-  accumulated: number;
-  threshold: number;
-}) {
-  if (threshold <= 0) {
-    return <span className="text-gray-400 text-xs">—</span>;
-  }
-  const pct = Math.min(100, Math.round((accumulated / threshold) * 100));
-  const near = accumulated > threshold;
-  return (
-    <div className="min-w-[8rem]">
-      <div className="flex justify-between text-[10px] text-gray-500 mb-0.5 tabular-nums">
-        <span>{accumulated}</span>
-        <span>/ {threshold}</span>
-      </div>
-      <div className="h-2 rounded-full bg-gray-200 overflow-hidden">
-        <div
-          className={`h-full transition-all ${near ? "bg-amber-500" : "bg-primary-500"}`}
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-      {near && (
-        <p className="text-[10px] text-amber-700 font-medium mt-0.5">MW56 &gt; MW58 — hooter may pulse</p>
-      )}
-    </div>
-  );
-}
-
 function MillHooterVerificationPanel({
   mill,
   onApplied,
@@ -169,6 +124,10 @@ function MillHooterVerificationPanel({
   const [applying, setApplying] = useState(false);
   const [overrideError, setOverrideError] = useState<string | null>(null);
   const [overrideSuccess, setOverrideSuccess] = useState<string | null>(null);
+  const [requireThreshold, setRequireThreshold] = useState(true);
+  const [testingHooter, setTestingHooter] = useState(false);
+  const [hooterTestError, setHooterTestError] = useState<string | null>(null);
+  const [hooterTestSuccess, setHooterTestSuccess] = useState<string | null>(null);
 
   useEffect(() => {
     if (mesAcc != null) setOverrideValue(String(mesAcc));
@@ -202,6 +161,38 @@ function MillHooterVerificationPanel({
       setOverrideError(e instanceof Error ? e.message : "Failed to update open accumulation.");
     } finally {
       setApplying(false);
+    }
+  };
+
+  const testHooter = async () => {
+    const t = getSettingsToken();
+    if (!t) {
+      setHooterTestError("Settings login required.");
+      return;
+    }
+    const millNo = mill.millNo;
+    if (millNo == null || millNo < 1 || millNo > 4) {
+      setHooterTestError("Invalid mill number.");
+      return;
+    }
+    setTestingHooter(true);
+    setHooterTestError(null);
+    setHooterTestSuccess(null);
+    try {
+      const res = await api.settingsTestHooter(t, millNo, requireThreshold);
+      const addr = res.outputAddress ?? mill.hooterOutputAddress ?? "Q6.7";
+      const dur = res.durationMs ?? mill.hooterDurationMs ?? 30000;
+      setHooterTestSuccess(
+        res.message ??
+          (res.pulsed
+            ? `Hooter ${addr} pulsed ON; resets after ${dur / 1000}s.`
+            : "Hooter test completed.")
+      );
+      onApplied?.();
+    } catch (e) {
+      setHooterTestError(e instanceof Error ? e.message : "Hooter test failed.");
+    } finally {
+      setTestingHooter(false);
     }
   };
 
@@ -274,6 +265,43 @@ function MillHooterVerificationPanel({
       </div>
       <div className="px-5 pb-5 border-t border-violet-100 pt-4 space-y-3">
         <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+          Test hooter pulse
+        </h4>
+        <p className="text-xs text-gray-600">
+          Writes the hooter output through the same path as production: PAS enable{" "}
+          <code className="bg-gray-100 px-1 rounded">{mill.hooterPasEnableAddress ?? "DB260.DBX3.6"}</code>{" "}
+          must be ON,{" "}
+          <code className="bg-gray-100 px-1 rounded">{mill.hooterOutputAddress ?? "Q6.7"}</code> must be
+          OFF, then SET for {mill.hooterDurationMs ? `${mill.hooterDurationMs / 1000}s` : "30s"} (poll loop
+          RESETs). With the checkbox on, also requires MW56 &gt; MW58 like live arming.
+        </p>
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="inline-flex items-center gap-2 text-xs text-gray-700 select-none">
+            <input
+              type="checkbox"
+              checked={requireThreshold}
+              onChange={(e) => setRequireThreshold(e.target.checked)}
+              className="rounded border-gray-300"
+            />
+            Require MW56 &gt; MW58 (production condition)
+          </label>
+          <button
+            type="button"
+            onClick={() => void testHooter()}
+            disabled={testingHooter || mill.plcConnectionEnabled === false}
+            className="px-4 py-2 rounded-md bg-amber-600 text-white text-sm font-medium hover:bg-amber-700 disabled:opacity-50"
+          >
+            {testingHooter ? "Pulsing…" : "Test hooter"}
+          </button>
+          {mill.plcConnectionEnabled === false && (
+            <span className="text-xs text-amber-700">Connect PLC first.</span>
+          )}
+        </div>
+        {hooterTestError && <p className="text-sm text-red-700">{hooterTestError}</p>}
+        {hooterTestSuccess && <p className="text-sm text-green-800">{hooterTestSuccess}</p>}
+      </div>
+      <div className="px-5 pb-5 border-t border-violet-100 pt-4 space-y-3">
+        <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
           Manual open accumulation override
         </h4>
         <p className="text-xs text-gray-600">
@@ -336,6 +364,14 @@ export default function SettingsPage() {
     { millNo: 3, address: "", port: 9100 },
     { millNo: 4, address: "", port: 9100 },
   ]);
+  const [mill1Fg, setMill1Fg] = useState<SettingsPrinterNamed>({
+    address: "192.168.0.55",
+    port: 9100,
+  });
+  const [pasRoom, setPasRoom] = useState<SettingsPrinterNamed>({
+    address: "192.168.0.124",
+    port: 9100,
+  });
   const [stationPrinters, setStationPrinters] = useState<SettingsPrinterStation[]>([
     { stationCode: "VISUAL_REVISUAL", displayName: "Visual / Revisual", address: "", port: 9100 },
     { stationCode: "BIG_HYDRO", displayName: "Big Hydrotesting", address: "", port: 9100 },
@@ -350,6 +386,7 @@ export default function SettingsPage() {
   const [poChangeTestResult, setPoChangeTestResult] = useState<SettingsPoChangeTestResult | null>(null);
   const [plcConnectionBusyMill, setPlcConnectionBusyMill] = useState<number | null>(null);
   const [printerTestPrintMill, setPrinterTestPrintMill] = useState<number | null>(null);
+  const [printerTestPrintTarget, setPrinterTestPrintTarget] = useState<string | null>(null);
   const [printerTestPrintStation, setPrinterTestPrintStation] = useState<string | null>(null);
   const plcPollInFlight = useRef(false);
 
@@ -389,6 +426,18 @@ export default function SettingsPage() {
             ? mills
             : [1, 2, 3, 4].map((m) => ({ millNo: m, address: "", port: 9100 }))
         );
+        setMill1Fg({
+          address: r.mill1Fg?.address ?? "192.168.0.55",
+          port: r.mill1Fg?.port ?? 9100,
+          status: r.mill1Fg?.status,
+          displayName: r.mill1Fg?.displayName ?? "Mill-1 FG printer",
+        });
+        setPasRoom({
+          address: r.pasRoom?.address ?? "192.168.0.124",
+          port: r.pasRoom?.port ?? 9100,
+          status: r.pasRoom?.status,
+          displayName: r.pasRoom?.displayName ?? "PAS Room printer",
+        });
         const stations = Array.isArray(r.stations) ? r.stations : [];
         const stationDefaults: SettingsPrinterStation[] = [
           { stationCode: "VISUAL_REVISUAL", displayName: "Visual / Revisual", address: "", port: 9100 },
@@ -557,6 +606,7 @@ export default function SettingsPage() {
         address: (p.address ?? "").trim(),
         port: p.port && p.port > 0 ? p.port : 9100,
       }));
+      const mill1 = mills.find((m) => m.millNo === 1);
       const stations = stationPrinters
         .filter((s) => (s.stationCode ?? "").trim())
         .map((s) => ({
@@ -564,7 +614,21 @@ export default function SettingsPage() {
           address: (s.address ?? "").trim(),
           port: s.port && s.port > 0 ? s.port : 9100,
         }));
-      const res = await api.settingsSavePrinters(t, mills, stations);
+      const res = await api.settingsSavePrinters(t, {
+        mills,
+        stations,
+        mill1Wip: mill1
+          ? { address: mill1.address, port: mill1.port }
+          : undefined,
+        mill1Fg: {
+          address: (mill1Fg.address ?? "").trim(),
+          port: mill1Fg.port && mill1Fg.port > 0 ? mill1Fg.port : 9100,
+        },
+        pasRoom: {
+          address: (pasRoom.address ?? "").trim(),
+          port: pasRoom.port && pasRoom.port > 0 ? pasRoom.port : 9100,
+        },
+      });
       setMessage(res.message ?? "Printer settings saved.");
       await loadTabData();
     } catch (e) {
@@ -608,28 +672,30 @@ export default function SettingsPage() {
     }
   };
 
-  const testPrinter = async (millNo: number) => {
+  const testPrinter = async (millNo: number, printerTarget?: ReprintPrinterTarget) => {
     const t = getSettingsToken();
     if (!t) return;
     setMessage(null);
     setError(null);
     try {
-      const r = await api.settingsTestPrinter(t, millNo);
-      setMessage(`Mill ${millNo}: ${r.status ?? "—"} (${r.address ?? ""}:${r.port ?? 9100})`);
+      const r = await api.settingsTestPrinter(t, millNo, printerTarget);
+      const label = r.displayName ?? (printerTarget ? printerTarget.toUpperCase() : `Mill ${millNo}`);
+      setMessage(`${label}: ${r.status ?? "—"} (${r.address ?? ""}:${r.port ?? 9100})`);
       await loadTabData();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Test failed");
     }
   };
 
-  const testPrintPrinter = async (millNo: number) => {
+  const testPrintPrinter = async (millNo: number, printerTarget?: ReprintPrinterTarget) => {
     const t = getSettingsToken();
     if (!t) return;
     setPrinterTestPrintMill(millNo);
+    setPrinterTestPrintTarget(printerTarget ?? `mill-${millNo}`);
     setMessage(null);
     setError(null);
     try {
-      const r = await api.settingsTestPrintPrinter(t, millNo);
+      const r = await api.settingsTestPrintPrinter(t, millNo, printerTarget);
       if (r.success === false) {
         setError(r.message ?? `Mill ${millNo}: test print failed.`);
       } else {
@@ -642,6 +708,7 @@ export default function SettingsPage() {
       setError(e instanceof Error ? e.message : "Test print failed");
     } finally {
       setPrinterTestPrintMill(null);
+      setPrinterTestPrintTarget(null);
     }
   };
 
@@ -1090,9 +1157,10 @@ export default function SettingsPage() {
       ) : tab === "printers" ? (
         <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
           <p className="px-5 py-3 text-sm text-gray-600 border-b border-gray-100">
-            Edit mill close-tag printers and station printers below. Visual and Revisual share one IP. Station tags
-            print at the inspection point (not the bundle mill). <strong>Test</strong> checks TCP;{" "}
-            <strong>Print test tag</strong> sends dummy ZPL (save the IP first).
+            Mill-1 has separate WIP and FG printer IPs (plant toggles which physical unit is online). Reprints from
+            Printed Tags / Reconcile can target WIP, FG, or the PAS Room desk printer. Station tags print at the
+            inspection point. <strong>Test</strong> checks TCP; <strong>Print test tag</strong> sends dummy ZPL
+            (save the IP first).
           </p>
           <div className="px-5 py-2 bg-gray-50 border-b border-gray-100 text-sm font-semibold text-gray-800">
             Mill printers
@@ -1101,7 +1169,7 @@ export default function SettingsPage() {
             <table className="min-w-full text-sm">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="px-4 py-2 text-left">Mill</th>
+                  <th className="px-4 py-2 text-left">Printer</th>
                   <th className="px-4 py-2 text-left">IP / host</th>
                   <th className="px-4 py-2 text-left">Port</th>
                   <th className="px-4 py-2 text-left">Status</th>
@@ -1109,14 +1177,27 @@ export default function SettingsPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
-                {printers.map((p, i) => (
-                  <tr key={p.millNo ?? i}>
-                    <td className="px-4 py-2 font-medium">Mill-{p.millNo}</td>
+                {printers.map((p, i) => {
+                  const isMill1 = p.millNo === 1;
+                  const label = isMill1 ? "Mill-1 WIP printer" : `Mill-${p.millNo}`;
+                  const target: ReprintPrinterTarget | undefined = isMill1 ? "wip" : undefined;
+                  const busyKey = target ?? `mill-${p.millNo}`;
+                  return (
+                  <Fragment key={p.millNo ?? i}>
+                  <tr>
+                    <td className="px-4 py-2 font-medium">
+                      {label}
+                      {isMill1 ? (
+                        <span className="block text-[11px] font-normal text-gray-500">
+                          Auto close-tag + reprint option (default 192.168.0.54)
+                        </span>
+                      ) : null}
+                    </td>
                     <td className="px-4 py-2">
                       <input
                         type="text"
                         className="w-full min-w-[10rem] border border-gray-300 rounded px-2 py-1"
-                        placeholder="192.168.0.125"
+                        placeholder={isMill1 ? "192.168.0.54" : "192.168.0.125"}
                         value={p.address ?? ""}
                         onChange={(e) =>
                           setPrinters((prev) =>
@@ -1153,7 +1234,7 @@ export default function SettingsPage() {
                         <button
                           type="button"
                           disabled={printerTestPrintMill !== null}
-                          onClick={() => p.millNo && testPrinter(p.millNo)}
+                          onClick={() => p.millNo && testPrinter(p.millNo, target)}
                           className="text-primary-600 hover:text-primary-800 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           Test
@@ -1161,15 +1242,140 @@ export default function SettingsPage() {
                         <button
                           type="button"
                           disabled={printerTestPrintMill !== null}
-                          onClick={() => p.millNo && void testPrintPrinter(p.millNo)}
+                          onClick={() => p.millNo && void testPrintPrinter(p.millNo, target)}
                           className="px-2 py-1 text-xs font-medium rounded-md border border-primary-300 text-primary-800 bg-primary-50 hover:bg-primary-100 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
                         >
-                          {printerTestPrintMill === p.millNo ? "Printing…" : "Print test tag"}
+                          {printerTestPrintTarget === busyKey ? "Printing…" : "Print test tag"}
                         </button>
                       </div>
                     </td>
                   </tr>
-                ))}
+                  {isMill1 ? (
+                <tr>
+                  <td className="px-4 py-2 font-medium">
+                    Mill-1 FG printer
+                    <span className="block text-[11px] font-normal text-gray-500">
+                      Reprint option when FG is running (default 192.168.0.55)
+                    </span>
+                  </td>
+                  <td className="px-4 py-2">
+                    <input
+                      type="text"
+                      className="w-full min-w-[10rem] border border-gray-300 rounded px-2 py-1"
+                      placeholder="192.168.0.55"
+                      value={mill1Fg.address ?? ""}
+                      onChange={(e) => setMill1Fg((prev) => ({ ...prev, address: e.target.value }))}
+                    />
+                  </td>
+                  <td className="px-4 py-2">
+                    <input
+                      type="number"
+                      min={1}
+                      className="w-20 border border-gray-300 rounded px-2 py-1"
+                      value={mill1Fg.port ?? 9100}
+                      onChange={(e) => {
+                        const v = parseInt(e.target.value, 10);
+                        setMill1Fg((prev) => ({ ...prev, port: Number.isFinite(v) ? v : 9100 }));
+                      }}
+                    />
+                  </td>
+                  <td className="px-4 py-2">
+                    <span
+                      className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusBadgeClass(mill1Fg.status)}`}
+                    >
+                      {mill1Fg.status ?? "—"}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2">
+                    <div className="flex flex-wrap gap-2 items-center">
+                      <button
+                        type="button"
+                        disabled={printerTestPrintMill !== null}
+                        onClick={() => void testPrinter(1, "fg")}
+                        className="text-primary-600 hover:text-primary-800 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        Test
+                      </button>
+                      <button
+                        type="button"
+                        disabled={printerTestPrintMill !== null}
+                        onClick={() => void testPrintPrinter(1, "fg")}
+                        className="px-2 py-1 text-xs font-medium rounded-md border border-primary-300 text-primary-800 bg-primary-50 hover:bg-primary-100 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                      >
+                        {printerTestPrintTarget === "fg" ? "Printing…" : "Print test tag"}
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+                  ) : null}
+                  </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div className="px-5 py-2 bg-amber-50 border-t border-amber-100 text-sm font-semibold text-amber-950">
+            PAS Room printer — desk reprints for the application operator
+          </div>
+          <div className="overflow-x-auto border-b border-gray-100">
+            <table className="min-w-full text-sm">
+              <tbody>
+                <tr>
+                  <td className="px-4 py-2 font-medium w-[14rem]">
+                    PAS Room
+                    <span className="block text-[11px] font-normal text-gray-500">
+                      Default 192.168.0.124
+                    </span>
+                  </td>
+                  <td className="px-4 py-2">
+                    <input
+                      type="text"
+                      className="w-full min-w-[10rem] border border-gray-300 rounded px-2 py-1"
+                      placeholder="192.168.0.124"
+                      value={pasRoom.address ?? ""}
+                      onChange={(e) => setPasRoom((prev) => ({ ...prev, address: e.target.value }))}
+                    />
+                  </td>
+                  <td className="px-4 py-2 w-24">
+                    <input
+                      type="number"
+                      min={1}
+                      className="w-20 border border-gray-300 rounded px-2 py-1"
+                      value={pasRoom.port ?? 9100}
+                      onChange={(e) => {
+                        const v = parseInt(e.target.value, 10);
+                        setPasRoom((prev) => ({ ...prev, port: Number.isFinite(v) ? v : 9100 }));
+                      }}
+                    />
+                  </td>
+                  <td className="px-4 py-2 w-28">
+                    <span
+                      className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusBadgeClass(pasRoom.status)}`}
+                    >
+                      {pasRoom.status ?? "—"}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2">
+                    <div className="flex flex-wrap gap-2 items-center">
+                      <button
+                        type="button"
+                        disabled={printerTestPrintMill !== null}
+                        onClick={() => void testPrinter(1, "pas")}
+                        className="text-primary-600 hover:text-primary-800 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        Test
+                      </button>
+                      <button
+                        type="button"
+                        disabled={printerTestPrintMill !== null}
+                        onClick={() => void testPrintPrinter(1, "pas")}
+                        className="px-2 py-1 text-xs font-medium rounded-md border border-primary-300 text-primary-800 bg-primary-50 hover:bg-primary-100 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                      >
+                        {printerTestPrintTarget === "pas" ? "Printing…" : "Print test tag"}
+                      </button>
+                    </div>
+                  </td>
+                </tr>
               </tbody>
             </table>
           </div>

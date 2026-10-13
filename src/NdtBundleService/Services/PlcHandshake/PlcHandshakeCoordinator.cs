@@ -69,6 +69,36 @@ public sealed class PlcHandshakeCoordinator
         return await service.RunSettingsTestAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Settings hooter test: same PAS / Q / WriteOutputBit / DurationMs path as production pulse.
+    /// When <paramref name="requireThreshold"/> is true, also requires MW56 &gt; MW58.
+    /// </summary>
+    public async Task<PlcHooterTestResult> RunSettingsHooterTestAsync(
+        int millNo,
+        bool requireThreshold,
+        CancellationToken cancellationToken)
+    {
+        PlcHandshakeService? service;
+        lock (_sync)
+        {
+            if (!_byMill.TryGetValue(millNo, out service))
+            {
+                return new PlcHooterTestResult
+                {
+                    Success = false,
+                    MillNo = millNo,
+                    RequireThreshold = requireThreshold,
+                    Message =
+                        "Handshake loop for this mill is not running. Ensure PlcHandshake.Enabled is true and restart NdtBundleService."
+                };
+            }
+        }
+
+        return await service
+            .RunSettingsHooterTestAsync(requireThreshold, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     public async Task NotifyPoEndWorkflowCompletedAsync(int millNo, CancellationToken cancellationToken)
     {
         PlcHandshakeService? service;

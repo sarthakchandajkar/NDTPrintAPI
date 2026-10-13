@@ -3,7 +3,7 @@ using NdtBundleService.Configuration;
 namespace NdtBundleService.Services;
 
 /// <summary>
-/// Resolves slit width from slitting accepted CSVs (<c>Z:\To SAP\TM\Slitting\Slit Accepted</c>).
+/// Resolves slit width from slitting accepted CSVs (<c>Z:\To SAP\Slitting\Slit Accepted</c>).
 /// </summary>
 public static class SlitAcceptedCsvLookup
 {

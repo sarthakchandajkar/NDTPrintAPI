@@ -10,8 +10,9 @@ public sealed class MillCsvBatchModeEntry
     public string Value { get; set; } = "10001";
 
     /// <summary>
-    /// CSV batch value for zero-NDT rows (NdtPipes &lt;= 0). Written to CSV only;
-    /// SQL <c>Output_Slit_Row.NDT_Batch_No</c> stays NULL (no <c>NDT_Bundle</c> parent).
+    /// Legacy / Constant-mode CSV batch for zero-NDT rows when
+    /// <see cref="MillCsvBatchModeResolver.ResolveNonFillCsvBatch"/> is used.
+    /// FillToTarget mills assign a real NDT Batch No for zero-NDT slits (do not use this placeholder).
     /// </summary>
     public string ZeroNdtValue { get; set; } = "10001";
 
@@ -55,8 +56,9 @@ public static class MillCsvBatchModeResolver
         Resolve(options, millNo).IsFillToTarget;
 
     /// <summary>
-    /// Resolves the CSV batch column and whether SQL should link an <c>NDT_Bundle</c> parent.
-    /// Constant / zero-NDT / hollow-FG values go to CSV only (<paramref name="LinkBundleParent"/> = false).
+    /// Resolves non-FillToTarget CSV batch values (Constant mills, hollow FG).
+    /// FillToTarget zero-NDT rows must not call this — they go through real batch assignment.
+    /// Constant / hollow-FG values go to CSV only (<paramref name="LinkBundleParent"/> = false).
     /// </summary>
     public static (string CsvBatchNo, bool LinkBundleParent) ResolveNonFillCsvBatch(
         MillCsvBatchModeEntry entry,
@@ -66,6 +68,7 @@ public static class MillCsvBatchModeResolver
         if (isHollowFg)
             return ((entry.HollowFgValue ?? string.Empty).Trim(), false);
 
+        // Constant mills: same placeholder for zero and non-zero NDT (Value / ZeroNdtValue).
         if (ndtPipes <= 0)
             return (NullToDefault(entry.ZeroNdtValue), false);
 

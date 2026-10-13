@@ -15,7 +15,7 @@ public sealed class NdtZplTagPrinterPrintErrorTests
         var printer = CreatePrinter(configured: false, send: new PrinterSendResult(true));
         var result = await printer.PrintBundleTagAsync(Record(millNo: 3), 1, 10, false, CancellationToken.None);
         Assert.False(result.Success);
-        Assert.Equal("no printer configured for mill 3", result.ErrorDetail);
+        Assert.Contains("no printer configured for mill 3", result.ErrorDetail);
     }
 
     [Fact]
@@ -75,6 +75,25 @@ public sealed class NdtZplTagPrinterPrintErrorTests
             Task.CompletedTask;
         public (string Address, int Port, bool Configured) ResolveForMill(int millNo) =>
             configured ? ("10.9.9.9", 9100, true) : (string.Empty, 9100, false);
+        public Task<NamedPrinterEndpoint> GetMill1WipAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new NamedPrinterEndpoint("MILL_1_WIP", configured ? "10.9.9.9" : "", 9100));
+        public Task<NamedPrinterEndpoint> GetMill1FgAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new NamedPrinterEndpoint("MILL_1_FG", "", 9100));
+        public Task<NamedPrinterEndpoint> GetPasRoomAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new NamedPrinterEndpoint("PAS_ROOM", "", 9100));
+        public Task SaveReprintPrintersAsync(
+            NamedPrinterEndpoint? mill1Wip,
+            NamedPrinterEndpoint? mill1Fg,
+            NamedPrinterEndpoint? pasRoom,
+            CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+        public (string Address, int Port, bool Configured, string DisplayName) ResolveReprintTarget(
+            int millNo,
+            string? printerTarget)
+        {
+            var r = ResolveForMill(millNo);
+            return (r.Address, r.Port, r.Configured, "Mill printer");
+        }
     }
 
     private sealed class OptionsMonitorStub(NdtBundleOptions value) : IOptionsMonitor<NdtBundleOptions>

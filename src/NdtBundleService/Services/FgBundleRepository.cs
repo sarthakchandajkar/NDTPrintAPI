@@ -10,6 +10,7 @@ public interface IFgBundleRepository
 {
     Task<bool> EnsureImportReadyAsync(CancellationToken cancellationToken);
     Task<bool> IsImportSourceFilePresentAsync(string sourceFileKey, CancellationToken cancellationToken);
+    Task<HashSet<string>> GetImportedSourceKeysAsync(CancellationToken cancellationToken);
     Task<int> InsertImportRowsAsync(string sourceFileKey, IReadOnlyList<FgBundleRow> rows, CancellationToken cancellationToken);
     Task<int> InsertAuditRowsAsync(string sourceFileKey, IReadOnlyList<CsvFolderAuditRow> rows, CancellationToken cancellationToken);
     Task<string?> TryGetLatestPipeGradeAsync(string poNumber, int? millNo, CancellationToken cancellationToken);
@@ -53,6 +54,30 @@ FROM (
         cmd.Parameters.AddWithValue("@SourceFile", sourceFileKey);
         var scalar = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
         return scalar is not null and not DBNull;
+    }
+
+    public async Task<HashSet<string>> GetImportedSourceKeysAsync(CancellationToken cancellationToken)
+    {
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!await EnsureImportReadyAsync(cancellationToken).ConfigureAwait(false))
+            return keys;
+
+        await using var conn = SqlTraceabilityConnection.Create(_options);
+        await SqlTraceabilityConnection.OpenAsync(conn, _logger, "Fg_Bundle source key load", cancellationToken)
+            .ConfigureAwait(false);
+        await using var cmd = new SqlCommand(
+            @"SELECT Source_File FROM dbo.Fg_Bundle_Audit_Row WHERE Source_File IS NOT NULL
+UNION
+SELECT Source_File FROM dbo.Fg_Bundle_Row WHERE Source_File IS NOT NULL;",
+            conn);
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (!reader.IsDBNull(0))
+                keys.Add(reader.GetString(0));
+        }
+
+        return keys;
     }
 
     public async Task<int> InsertImportRowsAsync(

@@ -32,7 +32,10 @@ public static class CsvFillLogic
 {
     /// <summary>
     /// Whole-file assignment: never split. If <paramref name="fileNdtPipes"/> exceeds remaining
-    /// capacity, the file still stamps wholly onto the current bundle (overshoot).
+    /// capacity against a <em>formed</em> target (<paramref name="targetNdtPcs"/> &gt; 0), the file
+    /// still stamps wholly onto the current bundle (overshoot).
+    /// Target 0 means the bundle is not yet formed — slits may accumulate as <see cref="CsvFillState.CsvFilling"/>
+    /// but never as overshoot (overshoot = slit sum &gt; formed total).
     /// </summary>
     public static CsvFillStampResult ComputeAfterStamp(
         string bundleNo,
@@ -49,22 +52,7 @@ public static class CsvFillLogic
             throw new ArgumentOutOfRangeException(nameof(targetNdtPcs));
 
         var after = csvFilledBefore + fileNdtPipes;
-        string state;
-        var discrepancy = false;
-
-        if (after < targetNdtPcs)
-        {
-            state = CsvFillState.CsvFilling;
-        }
-        else if (after == targetNdtPcs)
-        {
-            state = CsvFillState.CsvComplete;
-        }
-        else
-        {
-            state = CsvFillState.CsvOvershoot;
-            discrepancy = true;
-        }
+        var (state, discrepancy) = ResolveFillState(targetNdtPcs, after);
 
         var escalate = ShouldEscalateManualReview(targetNdtPcs, after, discrepancyReviewThresholdPercent);
         return new CsvFillStampResult(
@@ -75,6 +63,34 @@ public static class CsvFillLogic
             state,
             discrepancy,
             escalate);
+    }
+
+    /// <summary>
+    /// Maps filled vs formed target. Overshoot only when <paramref name="targetNdtPcs"/> &gt; 0
+    /// and <paramref name="csvFilled"/> &gt; target.
+    /// </summary>
+    public static (string State, bool CountDiscrepancy) ResolveFillState(int targetNdtPcs, int csvFilled)
+    {
+        if (targetNdtPcs < 0)
+            throw new ArgumentOutOfRangeException(nameof(targetNdtPcs));
+        if (csvFilled < 0)
+            throw new ArgumentOutOfRangeException(nameof(csvFilled));
+
+        // Not formed yet — do not treat any positive slit sum as overshoot against 0.
+        if (targetNdtPcs == 0)
+        {
+            return csvFilled == 0
+                ? (CsvFillState.PlcClosed, false)
+                : (CsvFillState.CsvFilling, false);
+        }
+
+        if (csvFilled < targetNdtPcs)
+            return (csvFilled == 0 ? CsvFillState.PlcClosed : CsvFillState.CsvFilling, false);
+
+        if (csvFilled == targetNdtPcs)
+            return (CsvFillState.CsvComplete, false);
+
+        return (CsvFillState.CsvOvershoot, true);
     }
 
     public static bool ShouldEscalateManualReview(
@@ -112,30 +128,17 @@ public static class CsvFillLogic
         int discrepancyReviewThresholdPercent)
     {
         var after = Math.Max(0, csvFilledBefore + delta);
-        string state;
-        var discrepancy = false;
-
-        if (after < targetNdtPcs)
-            state = after == 0 ? CsvFillState.PlcClosed : CsvFillState.CsvFilling;
-        else if (after == targetNdtPcs)
-            state = CsvFillState.CsvComplete;
-        else
-        {
-            state = CsvFillState.CsvOvershoot;
-            discrepancy = true;
-        }
-
-        if (after != targetNdtPcs && state is CsvFillState.CsvComplete)
-            discrepancy = true;
+        var (state, discrepancy) = ResolveFillState(targetNdtPcs, after);
 
         var escalate = ShouldEscalateManualReview(targetNdtPcs, after, discrepancyReviewThresholdPercent)
-                       || (discrepancy && after != targetNdtPcs && state == CsvFillState.CsvOvershoot);
-        return (after, state, discrepancy || after != targetNdtPcs && state == CsvFillState.CsvOvershoot, escalate);
+                       || state == CsvFillState.CsvOvershoot;
+        return (after, state, discrepancy, escalate);
     }
 
     /// <summary>
     /// Operator reconcile revising <paramref name="newTarget"/> while <paramref name="csvFilled"/> is already stamped.
-    /// Cases: (a) filled=0 → PlcClosed; (b) filled ≤ target → Filling/Complete; (c) filled &gt; target → Overshoot.
+    /// Cases: (a) filled=0 → PlcClosed; (b) filled ≤ formed target → Filling/Complete;
+    /// (c) filled &gt; formed target (&gt; 0) → Overshoot. Target 0 never overshoots.
     /// </summary>
     public static (string State, bool CountDiscrepancy, bool ManualReview) ComputeAfterTargetRevision(
         int newTarget,
@@ -147,27 +150,7 @@ public static class CsvFillLogic
         if (csvFilled < 0)
             throw new ArgumentOutOfRangeException(nameof(csvFilled));
 
-        string state;
-        var discrepancy = false;
-
-        if (csvFilled > newTarget)
-        {
-            state = CsvFillState.CsvOvershoot;
-            discrepancy = true;
-        }
-        else if (csvFilled == newTarget)
-        {
-            state = csvFilled == 0 ? CsvFillState.PlcClosed : CsvFillState.CsvComplete;
-        }
-        else if (csvFilled > 0)
-        {
-            state = CsvFillState.CsvFilling;
-        }
-        else
-        {
-            state = CsvFillState.PlcClosed;
-        }
-
+        var (state, discrepancy) = ResolveFillState(newTarget, csvFilled);
         var escalate = discrepancy
                        || ShouldEscalateManualReview(newTarget, csvFilled, discrepancyReviewThresholdPercent);
         return (state, discrepancy, escalate);

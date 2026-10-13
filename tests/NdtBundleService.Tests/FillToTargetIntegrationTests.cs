@@ -277,13 +277,32 @@ public sealed class FillToTargetIntegrationTests
             formationChartProvider: null!,
             pipeSizeProvider: null!,
             reconcileTagService: new OkTagService(),
+            millPrinters: new NoOpMillPrinters(),
             new SapStatusRepo(sapStatus),
             ppc,
             new NoOpMerge(),
             new NoOpMillSequence(),
             NoOpCsvFillService.Instance,
+            new TestPoLifecycleStub(),
+            new NoOpWipRunningPo(),
             new OptMon(),
             NullLogger<ReconcileController>.Instance);
+
+    private sealed class NoOpWipRunningPo : IWipBundleRunningPoProvider
+    {
+        public Task<string?> TryGetRunningPoForMillAsync(int millNo, CancellationToken cancellationToken) =>
+            Task.FromResult<string?>(null);
+        public void NotifyPoEndForMill(int millNo, string endedPo) { }
+        public bool IsWaitingForNewWipAfterPoEnd(int millNo) => false;
+        public bool TryGetPoEndWaitContext(int millNo, out bool waitingForNewWip, out string? endedPo)
+        {
+            waitingForNewWip = false;
+            endedPo = null;
+            return false;
+        }
+        public bool ResumeRunningWipForMill(int millNo) => false;
+        public bool TrySetRunningPoFromWipFile(int millNo, string newPo, DateTime wipStampUtc, string wipFileName) => false;
+    }
 
     private sealed class NoOpMerge : IBundleMergeService
     {
@@ -334,6 +353,14 @@ public sealed class FillToTargetIntegrationTests
             string poNumber, int millNo, int provisionalTargetNdtPcs, string? slitNo,
             CancellationToken cancellationToken) =>
             Task.FromResult<(int Sequence, string Formatted)?>(null);
+
+        public Task<int> TryVoidEmptyOrphanCsvAdvanceStampsExceptPoAsync(
+            int millNo, string keepPoNumber, CancellationToken cancellationToken) =>
+            Task.FromResult(0);
+
+        public Task<string?> TryPeekClaimableOpenFillBundleNoAsync(
+            string poNumber, int millNo, CancellationToken cancellationToken) =>
+            Task.FromResult<string?>(null);
     }
 
     private static object? GetProp(object obj, string name) =>
@@ -352,9 +379,37 @@ public sealed class FillToTargetIntegrationTests
         }
     }
 
+    private sealed class NoOpMillPrinters : IMillPrinterSettingsService
+    {
+        public Task<IReadOnlyList<MillPrinterEndpoint>> GetAllAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<MillPrinterEndpoint>>([]);
+        public Task SaveAllAsync(IReadOnlyList<MillPrinterEndpoint> mills, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+        public (string Address, int Port, bool Configured) ResolveForMill(int millNo) =>
+            (string.Empty, 9100, false);
+        public Task<NamedPrinterEndpoint> GetMill1WipAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new NamedPrinterEndpoint("MILL_1_WIP", "", 9100));
+        public Task<NamedPrinterEndpoint> GetMill1FgAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new NamedPrinterEndpoint("MILL_1_FG", "", 9100));
+        public Task<NamedPrinterEndpoint> GetPasRoomAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new NamedPrinterEndpoint("PAS_ROOM", "", 9100));
+        public Task SaveReprintPrintersAsync(
+            NamedPrinterEndpoint? mill1Wip,
+            NamedPrinterEndpoint? mill1Fg,
+            NamedPrinterEndpoint? pasRoom,
+            CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+        public (string Address, int Port, bool Configured, string DisplayName) ResolveReprintTarget(
+            int millNo, string? printerTarget) =>
+            (string.Empty, 9100, false, "Mill printer");
+    }
+
     private sealed class OkTagService : IReconcileBundleTagService
     {
-        public Task<ReconcileBundleTagPrintResult> ReprintAsync(NdtBundleRecord bundle, CancellationToken cancellationToken) =>
+        public Task<ReconcileBundleTagPrintResult> ReprintAsync(
+            NdtBundleRecord bundle,
+            CancellationToken cancellationToken,
+            string? printerTarget = null) =>
             Task.FromResult(new ReconcileBundleTagPrintResult { Success = true, Message = "ok" });
     }
 

@@ -8,6 +8,11 @@ public static class ReconcileCsvParsing
         public int PoNumber { get; init; } = 0;
         public int SlitNo { get; init; } = 1;
         public int NdtPipes { get; init; } = 2;
+        public int RejectedP { get; init; } = -1;
+        public int SlitStartTime { get; init; } = -1;
+        public int SlitFinishTime { get; init; } = -1;
+        public int NdtShortLengthPipe { get; init; } = -1;
+        public int RejectedShortLengthPipe { get; init; } = -1;
         public int NdtBatchNo { get; init; } = 9;
         public int MinColumns { get; init; } = 10;
 
@@ -31,6 +36,11 @@ public static class ReconcileCsvParsing
         var idxNd = InputSlitCsvParsing.HeaderIndex(headers, "NDT Pipes");
         var idxPo = InputSlitCsvParsing.HeaderIndex(headers, "PO Number", "PO_No", "PO No");
         var idxSlit = InputSlitCsvParsing.HeaderIndex(headers, "Slit No");
+        var idxRejected = InputSlitCsvParsing.HeaderIndex(headers, "Rejected Pipes", "Rejected P");
+        var idxStart = InputSlitCsvParsing.HeaderIndex(headers, "Slit Start Time");
+        var idxFinish = InputSlitCsvParsing.HeaderIndex(headers, "Slit Finish Time");
+        var idxShort = InputSlitCsvParsing.HeaderIndex(headers, "NDT Short Length Pipe");
+        var idxRejShort = InputSlitCsvParsing.HeaderIndex(headers, "Rejected Short Length Pipe");
         if (idxBatch < 0 || idxNd < 0)
         {
             return new OutputCsvColumnIndices();
@@ -41,6 +51,11 @@ public static class ReconcileCsvParsing
             PoNumber = idxPo >= 0 ? idxPo : 0,
             SlitNo = idxSlit >= 0 ? idxSlit : 1,
             NdtPipes = idxNd,
+            RejectedP = idxRejected,
+            SlitStartTime = idxStart,
+            SlitFinishTime = idxFinish,
+            NdtShortLengthPipe = idxShort,
+            RejectedShortLengthPipe = idxRejShort,
             NdtBatchNo = idxBatch,
             MinColumns = Math.Max(10, idxBatch + 1)
         };

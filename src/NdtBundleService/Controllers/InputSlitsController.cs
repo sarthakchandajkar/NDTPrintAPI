@@ -21,7 +21,7 @@ public sealed class InputSlitsController : ControllerBase
 {
     /// <summary>NDT Input Slit output header (inbox columns + NDT Batch No).</summary>
     public const string ManualNdtOutputCsvHeader =
-        "PO Number,Slit No,NDT Pipes,Rejected P,Slit Start Time,Slit Finish Time,Mill No,NDT Short Length Pipe,Rejected Short Length Pipe,NDT Batch No";
+        "PO Number,Slit No,NDT Pipes,Rejected Pipes,Slit Start Time,Slit Finish Time,Mill No,NDT Short Length Pipe,Rejected Short Length Pipe,NDT Batch No";
 
     /// <summary>Mandatory CSV wall-clock format for Slit Start / Finish Time.</summary>
     public const string SapSlitDateTimeFormat = "dd.MM.yyyy HH:mm:ss";
@@ -143,7 +143,7 @@ public sealed class InputSlitsController : ControllerBase
             return BadRequest(new { Message = "NDT Pipes must be >= 0." });
 
         if (request.RejectedPipes < 0)
-            return BadRequest(new { Message = "Rejected P must be >= 0." });
+            return BadRequest(new { Message = "Rejected Pipes must be >= 0." });
 
         var slitNo = (request.SlitNo ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(slitNo))

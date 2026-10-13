@@ -49,7 +49,19 @@ public static class WipBundleFolderScanner
         if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
             return;
 
-        foreach (var path in Directory.EnumerateFiles(folder))
+        // Pattern filter is required — Bundle Accepted holds tens of thousands of FG_*.csv;
+        // EnumerateFiles(folder) without a filter starved Shared dashboard APIs for minutes.
+        IEnumerable<string> paths;
+        try
+        {
+            paths = Directory.EnumerateFiles(folder, "WIP_*.csv");
+        }
+        catch (Exception)
+        {
+            return;
+        }
+
+        foreach (var path in paths)
         {
             var name = Path.GetFileName(path);
             if (!name.StartsWith("WIP_", StringComparison.OrdinalIgnoreCase))

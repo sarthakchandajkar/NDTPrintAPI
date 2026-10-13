@@ -34,6 +34,8 @@ public sealed class CsvFolderImportResult
 /// </summary>
 public sealed class SlitAcceptedImporter : ISlitAcceptedImporter
 {
+    private const int ProgressLogEvery = 500;
+
     private readonly NdtBundleOptions _options;
     private readonly ISlitAcceptedRepository _repository;
     private readonly ILogger<SlitAcceptedImporter> _logger;
@@ -56,15 +58,36 @@ public sealed class SlitAcceptedImporter : ISlitAcceptedImporter
         if (!await _repository.EnsureImportReadyAsync(cancellationToken).ConfigureAwait(false))
             return CsvFolderImportResult.Unavailable;
 
-        var files = SlitAcceptedCsvParser.ResolveEligibleFiles(_options);
+        var files = await Task.Run(
+                () => SlitAcceptedCsvParser.ResolveEligibleFiles(_options),
+                cancellationToken)
+            .ConfigureAwait(false);
+        _logger.LogInformation(
+            "Slit Accepted import scanning {Count} eligible file(s) under {Folder}.",
+            files.Count,
+            _options.SlitAcceptedFolder);
+
+        var knownKeys = await _repository.GetImportedSourceKeysAsync(cancellationToken).ConfigureAwait(false);
         var imported = 0;
         var skipped = 0;
         var lookupRows = 0;
         var auditRows = 0;
+        var processed = 0;
 
         foreach (var filePath in files)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            processed++;
+            if (processed == 1 || processed % ProgressLogEvery == 0 || processed == files.Count)
+            {
+                _logger.LogInformation(
+                    "Slit Accepted import progress {Processed}/{Total} (imported {Imported}, skipped {Skipped}).",
+                    processed,
+                    files.Count,
+                    imported,
+                    skipped);
+            }
+
             long ticks;
             try
             {
@@ -77,7 +100,7 @@ public sealed class SlitAcceptedImporter : ISlitAcceptedImporter
             }
 
             var key = PoPlanWipImportKeys.Format(filePath, ticks);
-            if (await _repository.IsImportSourceFilePresentAsync(key, cancellationToken).ConfigureAwait(false))
+            if (knownKeys.Contains(key))
             {
                 skipped++;
                 continue;
@@ -107,6 +130,7 @@ public sealed class SlitAcceptedImporter : ISlitAcceptedImporter
             if (auditInserted <= 0 && lookupInserted <= 0)
                 continue;
 
+            knownKeys.Add(key);
             imported++;
             auditRows += auditInserted;
             lookupRows += lookupInserted;
@@ -141,10 +165,12 @@ public sealed class SlitAcceptedImporter : ISlitAcceptedImporter
 
 /// <summary>
 /// Imports FG bundle CSVs into lookup + audit SQL tables.
-/// Source folder files are read-only inputs — never modified, moved, transformed on disk, or deleted.
+/// Source folder files are read-only inputs — never modified, moved, or deleted.
 /// </summary>
 public sealed class FgBundleImporter : IFgBundleImporter
 {
+    private const int ProgressLogEvery = 500;
+
     private readonly NdtBundleOptions _options;
     private readonly IFgBundleRepository _repository;
     private readonly ILogger<FgBundleImporter> _logger;
@@ -167,15 +193,35 @@ public sealed class FgBundleImporter : IFgBundleImporter
         if (!await _repository.EnsureImportReadyAsync(cancellationToken).ConfigureAwait(false))
             return CsvFolderImportResult.Unavailable;
 
-        var files = FgBundleCsvParser.ResolveEligibleFiles(_options);
+        var files = await Task.Run(
+                () => FgBundleCsvParser.ResolveEligibleFiles(_options),
+                cancellationToken)
+            .ConfigureAwait(false);
+        _logger.LogInformation(
+            "FG bundle import scanning {Count} eligible file(s) under Bundle/Bundle Accepted folders.",
+            files.Count);
+
+        var knownKeys = await _repository.GetImportedSourceKeysAsync(cancellationToken).ConfigureAwait(false);
         var imported = 0;
         var skipped = 0;
         var lookupRows = 0;
         var auditRows = 0;
+        var processed = 0;
 
         foreach (var filePath in files)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            processed++;
+            if (processed == 1 || processed % ProgressLogEvery == 0 || processed == files.Count)
+            {
+                _logger.LogInformation(
+                    "FG bundle import progress {Processed}/{Total} (imported {Imported}, skipped {Skipped}).",
+                    processed,
+                    files.Count,
+                    imported,
+                    skipped);
+            }
+
             long ticks;
             try
             {
@@ -188,7 +234,7 @@ public sealed class FgBundleImporter : IFgBundleImporter
             }
 
             var key = PoPlanWipImportKeys.Format(filePath, ticks);
-            if (await _repository.IsImportSourceFilePresentAsync(key, cancellationToken).ConfigureAwait(false))
+            if (knownKeys.Contains(key))
             {
                 skipped++;
                 continue;
@@ -218,6 +264,7 @@ public sealed class FgBundleImporter : IFgBundleImporter
             if (auditInserted <= 0 && lookupInserted <= 0)
                 continue;
 
+            knownKeys.Add(key);
             imported++;
             auditRows += auditInserted;
             lookupRows += lookupInserted;

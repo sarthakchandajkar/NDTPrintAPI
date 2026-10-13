@@ -12,6 +12,7 @@ public sealed class NdtBundleOutputPathsTests
         var options = new NdtBundleOptions();
         Assert.False(options.EnableBundleSummaryCsvFiles);
         Assert.False(options.EnableBundleZplPreviewFiles);
+        Assert.False(options.EnableStationZplPreviewFiles);
     }
 
     [Fact]

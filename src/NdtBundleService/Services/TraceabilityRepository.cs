@@ -167,6 +167,12 @@ public interface ITraceabilityRepository
         CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlyList<UploadBundleRow>>(Array.Empty<UploadBundleRow>());
 
+    /// <summary>Latest <c>Upload_Bundle_Row</c> for one batch, or null when none / SQL disabled.</summary>
+    Task<UploadBundleRow?> TryGetLatestUploadBundleRowForBatchAsync(
+        string ndtBatchNo,
+        CancellationToken cancellationToken) =>
+        Task.FromResult<UploadBundleRow?>(null);
+
     /// <summary>
     /// Distinct non-empty <c>Output_Slit_Row.Slit_No</c> values for the batch, ordered by latest
     /// <c>Slit_Finish_Time</c> descending (nulls last). Empty when SQL is disabled.
@@ -1188,18 +1194,29 @@ WHERE PO_Number = @Po
             // Idempotent per source file: a re-dropped/re-processed file REPLACES its earlier rows.
             // Blind appends double-count slit sums (2026-07-26: same late file attached 3× to a
             // closed bundle inflated Post_Recon_Csv_Sum 76 → 108).
-            if (!string.IsNullOrWhiteSpace(sourceFile))
+            // Always key on the SAP basename (strip linked-PO "_91" from the slit segment).
+            var sapSourceFile = ToSapOutputSourceFile(sourceFile);
+            if (!string.IsNullOrWhiteSpace(sapSourceFile))
             {
                 const string deleteSql = "DELETE FROM dbo.Output_Slit_Row WHERE Source_File = @SourceFile;";
                 await using var del = new SqlCommand(deleteSql, conn);
-                del.Parameters.AddWithValue("@SourceFile", sourceFile);
+                del.Parameters.AddWithValue("@SourceFile", sapSourceFile);
                 var removed = await del.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
                 if (removed > 0)
                 {
                     _logger.LogInformation(
                         "Replacing {Removed} existing Output_Slit_Row row(s) for re-processed file {File}.",
                         removed,
-                        sourceFile);
+                        sapSourceFile);
+                }
+
+                // Also clear any legacy row written under a "_91" basename for the same PO/day.
+                if (!string.Equals(sapSourceFile, sourceFile, StringComparison.OrdinalIgnoreCase)
+                    && !string.IsNullOrWhiteSpace(sourceFile))
+                {
+                    await using var delLegacy = new SqlCommand(deleteSql, conn);
+                    delLegacy.Parameters.AddWithValue("@SourceFile", sourceFile);
+                    await delLegacy.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
                 }
             }
 
@@ -1223,9 +1240,12 @@ VALUES
                     if (linkBundle)
                         await EnsureBundleRowExistsAsync(conn, r, batchNo, cancellationToken).ConfigureAwait(false);
 
+                    // SAP-facing slit identity never embeds linked-PO "_91" (basename + Slit_No).
+                    var sapSlitNo = LinkedPo.LinkedPoSlitIdentity.ToBaseSlitNo(r.SlitNo);
+
                     await using var cmd = new SqlCommand(sql, conn);
                     cmd.Parameters.AddWithValue("@PoNumber", InputSlitCsvParsing.NormalizePo(r.PoNumber));
-                    cmd.Parameters.AddWithValue("@SlitNo", (object?)NullIfEmpty(r.SlitNo) ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@SlitNo", (object?)NullIfEmpty(sapSlitNo) ?? DBNull.Value);
                     cmd.Parameters.AddWithValue("@NdtPipes", r.NdtPipes);
                     cmd.Parameters.AddWithValue("@RejectedP", r.RejectedPipes);
                     cmd.Parameters.AddWithValue("@StartTime", (object?)r.SlitStartTime ?? DBNull.Value);
@@ -1236,7 +1256,7 @@ VALUES
                     cmd.Parameters.AddWithValue(
                         "@BatchNo",
                         linkBundle ? batchNo : (object)DBNull.Value);
-                    cmd.Parameters.AddWithValue("@SourceFile", (object?)NullIfEmpty(sourceFile) ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@SourceFile", (object?)NullIfEmpty(sapSourceFile) ?? DBNull.Value);
                     cmd.Parameters.AddWithValue("@SourceRowNumber", rowNo);
                     await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
                     inserted++;
@@ -1852,6 +1872,58 @@ ORDER BY GeneratedAtUtc DESC, Bundle_Number DESC;";
         }
     }
 
+    public async Task<UploadBundleRow?> TryGetLatestUploadBundleRowForBatchAsync(
+        string ndtBatchNo,
+        CancellationToken cancellationToken)
+    {
+        if (!Enabled || string.IsNullOrWhiteSpace(ndtBatchNo))
+            return null;
+
+        var batch = ndtBatchNo.Trim();
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await OpenConnectionAsync(conn, "Upload_Bundle_Row by batch", cancellationToken).ConfigureAwait(false);
+
+            const string sql = @"
+SELECT TOP (1)
+    PO_NO, Slit_No, HRC_Number, Slit_Width, Slit_Thick, NSS, Slit_Grade,
+    Bundle_Number, NumOfPipes, TotalBundleWt, LenPerPipe, IsFullBundle, Source_File, GeneratedAtUtc
+FROM dbo.Upload_Bundle_Row
+WHERE Bundle_Number = @Batch
+ORDER BY GeneratedAtUtc DESC, Upload_Bundle_Row_ID DESC;";
+
+            await using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@Batch", batch);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                return null;
+
+            return new UploadBundleRow
+            {
+                PoNo = reader.IsDBNull(0) ? string.Empty : reader.GetString(0),
+                SlitNo = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                HrcNumber = reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
+                SlitWidth = reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
+                SlitThick = reader.IsDBNull(4) ? string.Empty : reader.GetString(4),
+                Nss = reader.IsDBNull(5) ? string.Empty : reader.GetString(5),
+                SlitGrade = reader.IsDBNull(6) ? string.Empty : reader.GetString(6),
+                BundleNumber = reader.IsDBNull(7) ? string.Empty : reader.GetString(7),
+                NumOfPipes = reader.IsDBNull(8) ? 0 : reader.GetInt32(8),
+                TotalBundleWt = reader.IsDBNull(9) ? string.Empty : reader.GetString(9),
+                LenPerPipe = reader.IsDBNull(10) ? string.Empty : reader.GetString(10),
+                IsFullBundle = reader.IsDBNull(11) ? null : reader.GetBoolean(11),
+                SourceFile = reader.IsDBNull(12) ? string.Empty : reader.GetString(12),
+                GeneratedAtUtc = reader.IsDBNull(13) ? null : reader.GetDateTime(13)
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to load Upload_Bundle_Row for batch {BatchNo}.", batch);
+            return null;
+        }
+    }
+
     public async Task<IReadOnlyList<(string SlitNo, DateTime? SlitFinishTime)>> GetOutputSlitsByFinishTimeForBatchAsync(
         string ndtBatchNo,
         CancellationToken cancellationToken)
@@ -2018,9 +2090,6 @@ WHERE NDT_Batch_No = @BatchNo
             return;
 
         var batch = ndtBatchNo.Trim();
-        const int colNdtPipes = 2;
-        const int colNdtBatchNo = 9;
-        const int minColumns = 10;
         var synced = 0;
         var ioToken = CancellationToken.None;
 
@@ -2031,10 +2100,16 @@ WHERE NDT_Batch_No = @BatchNo
 
             const string sql = @"
 UPDATE dbo.Output_Slit_Row
-SET NDT_Pipes = @NdtPipes
+SET NDT_Pipes = @NdtPipes,
+    Rejected_P = @RejectedP
 WHERE NDT_Batch_No = @BatchNo
-  AND Source_File = @SourceFile
-  AND Source_Row_Number = @SourceRow;";
+  AND Source_Row_Number = @SourceRow
+  AND (
+        Source_File = @SourceFileFull
+     OR Source_File = @SourceFileName
+     OR Source_File LIKE N'%\' + @SourceFileName
+     OR Source_File LIKE N'%/' + @SourceFileName
+  );";
 
             var candidatePaths = await ResolvePerSlitCsvPathsForBatchSyncAsync(conn, folder, batch, CancellationToken.None)
                 .ConfigureAwait(false);
@@ -2051,6 +2126,10 @@ WHERE NDT_Batch_No = @BatchNo
                     continue;
                 }
 
+                if (lines.Length == 0)
+                    continue;
+
+                var columns = ReconcileCsvParsing.ResolveOutputCsvColumns(lines[0]);
                 var baseName = Path.GetFileName(path);
                 for (var i = 1; i < lines.Length; i++)
                 {
@@ -2059,18 +2138,33 @@ WHERE NDT_Batch_No = @BatchNo
                         continue;
 
                     var cols = ReconcileCsvParsing.SplitCsvLine(line);
-                    if (cols.Count < minColumns)
+                    if (cols.Count < columns.MinColumns)
                         continue;
-                    if (!cols[colNdtBatchNo].Trim().Equals(batch, StringComparison.OrdinalIgnoreCase))
+                    if (!columns.TryGetField(cols, columns.NdtBatchNo, out var batchCell)
+                        || !batchCell.Equals(batch, StringComparison.OrdinalIgnoreCase))
+                    {
                         continue;
+                    }
 
-                    if (!int.TryParse(cols[colNdtPipes].Trim(), out var pipes))
+                    if (!columns.TryGetField(cols, columns.NdtPipes, out var ndtRaw)
+                        || !int.TryParse(ndtRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var pipes))
+                    {
                         pipes = 0;
+                    }
+
+                    var rejected = 0;
+                    if (columns.TryGetField(cols, columns.RejectedP, out var rejRaw)
+                        && InputSlitCsvParsing.TryParseRejectedPipes(rejRaw, out var parsedRej))
+                    {
+                        rejected = parsedRej;
+                    }
 
                     await using var cmd = new SqlCommand(sql, conn);
                     cmd.Parameters.AddWithValue("@NdtPipes", pipes);
+                    cmd.Parameters.AddWithValue("@RejectedP", rejected);
                     cmd.Parameters.AddWithValue("@BatchNo", batch);
-                    cmd.Parameters.AddWithValue("@SourceFile", baseName);
+                    cmd.Parameters.AddWithValue("@SourceFileFull", path);
+                    cmd.Parameters.AddWithValue("@SourceFileName", baseName);
                     cmd.Parameters.AddWithValue("@SourceRow", i + 1);
                     synced += await cmd.ExecuteNonQueryAsync(CancellationToken.None).ConfigureAwait(false);
                 }
@@ -2193,6 +2287,15 @@ END";
             _writeTracker.RecordFailure("NDT_Process_Consolidated", ex.Message, ndtBatchNo);
             _logger.LogWarning(ex, "Failed partial NDT_Process_Consolidated update for batch {BatchNo}.", ndtBatchNo);
         }
+    }
+
+    private static string? ToSapOutputSourceFile(string? sourceFile)
+    {
+        if (string.IsNullOrWhiteSpace(sourceFile))
+            return sourceFile;
+        var sapName = LinkedPo.LinkedPoSlitIdentity.ToSapOutputFileName(sourceFile);
+        var dir = Path.GetDirectoryName(sourceFile);
+        return string.IsNullOrEmpty(dir) ? sapName : Path.Combine(dir, sapName);
     }
 
     private static string? NullIfEmpty(string? s) =>

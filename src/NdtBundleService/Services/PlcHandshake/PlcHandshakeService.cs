@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.Extensions.Logging;
 using NdtBundleService.Configuration;
 using NdtBundleService.Services.PlcHandshake.PlcPoEnd;
@@ -57,7 +58,12 @@ public sealed class PlcHandshakeService
     private bool _hooterLoggedPasBlocked;
     private DateTimeOffset _hooterLastPeriodicLogUtc;
 
+    private PoChangeLadderDiagnosticsTracker? _ladderDiagnostics;
+    private bool _ladderDiagnosticsReadFailedLogged;
+    private DateTimeOffset _ladderDiagnosticsLastFailLogUtc;
+
     private static readonly TimeSpan HooterStatusLogInterval = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan LadderDiagnosticsFailLogInterval = TimeSpan.FromMinutes(5);
 
     public PlcHandshakeService(
         MillConfig mill,
@@ -304,6 +310,14 @@ public sealed class PlcHandshakeService
             });
 
             var telemetryCounts = TryUpdateDb251Counts(millNo);
+            // Read-only ladder diag may still want M40.6/7 even when handshake is telemetry-only.
+            var telemetryTrigger = IsPoChangeLadderDiagnosticsEnabled()
+                ? ReadMerkerBit(_mill.TriggerByte, _mill.TriggerBit)
+                : false;
+            var telemetryAck = IsPoChangeLadderDiagnosticsEnabled()
+                ? ReadMerkerBit(_mill.AckByte, _mill.AckBit)
+                : false;
+            TryObservePoChangeLadderDiagnostics(telemetryTrigger, telemetryAck, telemetryCounts.Ndt, telemetryCounts.SlitId);
             await TryCloseOnSlitEndSafeAsync(millNo, telemetryCounts.Ndt, telemetryCounts.SlitId, stoppingToken)
                 .ConfigureAwait(false);
             await TryUpdateMillSignalsAsync(millNo, stoppingToken).ConfigureAwait(false);
@@ -327,6 +341,7 @@ public sealed class PlcHandshakeService
         });
 
         var liveCounts = TryUpdateDb251Counts(millNo);
+        TryObservePoChangeLadderDiagnostics(trigger, ack, liveCounts.Ndt, liveCounts.SlitId);
         await TryCloseOnSlitEndSafeAsync(millNo, liveCounts.Ndt, liveCounts.SlitId, stoppingToken)
             .ConfigureAwait(false);
 
@@ -651,7 +666,16 @@ public sealed class PlcHandshakeService
             _logger.LogDebug(ex, "{MillName}: could not resolve running PO at manual-confirm arm.", _mill.Name);
         }
 
-        if (string.IsNullOrWhiteSpace(runningPo))
+        var waitingForNewWip = _wipRunningPo.IsWaitingForNewWipAfterPoEnd(millNo);
+        string? endedPo = null;
+        if (_wipRunningPo.TryGetPoEndWaitContext(millNo, out var waitNow, out var endedNow))
+        {
+            if (waitNow)
+                waitingForNewWip = true;
+            endedPo = string.IsNullOrWhiteSpace(endedNow) ? null : InputSlitCsvParsing.NormalizePo(endedNow);
+        }
+
+        if (string.IsNullOrWhiteSpace(runningPo) && !waitingForNewWip)
         {
             try
             {
@@ -673,17 +697,23 @@ public sealed class PlcHandshakeService
             ndtFinal,
             correlationId,
             detectedAt,
-            runningPo));
+            runningPo,
+            endedPo,
+            waitingForNewWip));
 
         _awaitingManualConfirm = true;
         SetState(millNo, "AwaitingManualConfirm");
         _logger.LogInformation(
-            "{MillName}: PO change edge held for manual confirm — Mill {MillNo}, PO_Id {PoId}, NDT {Ndt}, RunningPo {RunningPo}, CorrelationId {CorrelationId}. Confirm on dashboard /po-end.",
+            "{MillName}: PO change edge held for manual confirm — Mill {MillNo}, PO_Id {PoId}, NDT {Ndt}, "
+            + "RunningPo {RunningPo}, EndedPo {EndedPo}, WaitingForNewWip {Waiting}, CorrelationId {CorrelationId}. "
+            + "Confirm on dashboard /po-end.",
             _mill.Name,
             millNo,
             poIdVal,
             ndtFinal,
             runningPo ?? "(unknown)",
+            endedPo ?? "(none)",
+            waitingForNewWip,
             correlationId);
     }
 
@@ -822,6 +852,125 @@ public sealed class PlcHandshakeService
         await _s7.EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
 
     private void DisconnectPlc() => _s7.Disconnect();
+
+    private bool IsPoChangeLadderDiagnosticsEnabled() =>
+        _options.PoChangeLadderDiagnostics?.Enabled == true;
+
+    /// <summary>
+    /// Read-only ladder observation. Batches extra S7 reads in one gate entry; reuses M40.6/7 + DB251
+    /// NDT/SlitId already fetched this poll. No writes; does not affect handshake / ManualConfirmPoEnd.
+    /// </summary>
+    private void TryObservePoChangeLadderDiagnostics(bool m406, bool m407, int ndt, int slitId)
+    {
+        var cfg = _options.PoChangeLadderDiagnostics;
+        if (cfg is null || !cfg.Enabled)
+            return;
+
+        _ladderDiagnostics ??= new PoChangeLadderDiagnosticsTracker(cfg.Md232Threshold);
+
+        PoChangeLadderSnapshot snap;
+        try
+        {
+            snap = ReadPoChangeLadderSnapshot(cfg, m406, m407, ndt, slitId);
+            _ladderDiagnosticsReadFailedLogged = false;
+        }
+        catch (Exception ex)
+        {
+            var now = DateTimeOffset.UtcNow;
+            if (!_ladderDiagnosticsReadFailedLogged ||
+                now - _ladderDiagnosticsLastFailLogUtc >= LadderDiagnosticsFailLogInterval)
+            {
+                _ladderDiagnosticsReadFailedLogged = true;
+                _ladderDiagnosticsLastFailLogUtc = now;
+                _logger.LogWarning(
+                    ex,
+                    "{MillName}: PO-change ladder diagnostics S7 read failed (DB{SlitDb}.DBW{Slit1}/DBW{Slit2}, MD{Md}, DB{ReconDb}.DBX{ReconByte}.{ReconBit}, M{ManualByte}.{ManualBit}, MW{Mw}).",
+                    _mill.Name,
+                    cfg.SlitPoDbNumber,
+                    cfg.Slit1PoIdByteOffset,
+                    cfg.Slit2PoIdByteOffset,
+                    cfg.Md232ByteOffset,
+                    cfg.ReconOnDbNumber,
+                    cfg.ReconOnByteOffset,
+                    cfg.ReconOnBit,
+                    cfg.ManualButtEndByte,
+                    cfg.ManualButtEndBit,
+                    cfg.Mw314ByteOffset);
+            }
+
+            return;
+        }
+
+        if (!_ladderDiagnostics.Observe(snap, out var reason))
+            return;
+
+        _logger.LogInformation(
+            "{Line}",
+            PoChangeLadderDiagnosticsTracker.FormatLogLine(_mill.Name, snap, reason));
+    }
+
+    /// <summary>
+    /// One gate entry / several PDUs: DB50×2 INT, MD232 REAL, DB260 bit, M74.4, MW314.
+    /// M40.6/7 and DB251 NDT/SlitId are passed in from the existing poll reads.
+    /// </summary>
+    private PoChangeLadderSnapshot ReadPoChangeLadderSnapshot(
+        PoChangeLadderDiagnosticsOptions cfg,
+        bool m406,
+        bool m407,
+        int ndt,
+        int slitId) =>
+        _s7.Read(ops =>
+        {
+            var slit1 = ToNonNegInt(ops.Read(
+                DataType.DataBlock, cfg.SlitPoDbNumber, cfg.Slit1PoIdByteOffset, VarType.Int, 1));
+            var slit2 = ToNonNegInt(ops.Read(
+                DataType.DataBlock, cfg.SlitPoDbNumber, cfg.Slit2PoIdByteOffset, VarType.Int, 1));
+            var md232 = ToSingle(ops.Read(
+                DataType.Memory, 0, cfg.Md232ByteOffset, VarType.Real, 1));
+            var reconOn = ops.Read(
+                DataType.DataBlock,
+                cfg.ReconOnDbNumber,
+                cfg.ReconOnByteOffset,
+                VarType.Bit,
+                1,
+                (byte)cfg.ReconOnBit) is true;
+            var manualButt = ops.Read(
+                DataType.Memory,
+                0,
+                cfg.ManualButtEndByte,
+                VarType.Bit,
+                1,
+                (byte)cfg.ManualButtEndBit) is true;
+            var mw314 = ToNonNegInt(ops.Read(
+                DataType.Memory, 0, cfg.Mw314ByteOffset, VarType.Word, 1));
+
+            return new PoChangeLadderSnapshot(
+                slit1,
+                slit2,
+                md232,
+                reconOn,
+                manualButt,
+                m406,
+                m407,
+                mw314,
+                slitId,
+                ndt);
+        });
+
+    private static int ToNonNegInt(object? raw)
+    {
+        if (raw is null)
+            return 0;
+        var v = Convert.ToInt32(raw, CultureInfo.InvariantCulture);
+        return v < 0 ? 0 : v;
+    }
+
+    private static float ToSingle(object? raw)
+    {
+        if (raw is null)
+            return 0f;
+        return Convert.ToSingle(raw, CultureInfo.InvariantCulture);
+    }
 
     private bool ReadMerkerBit(int byteOffset, int bit) =>
         _s7.Read(ops =>
@@ -1155,6 +1304,8 @@ public sealed class PlcHandshakeService
             {
                 WriteMemoryInt(hooterCfg.ThresholdWordOffset, 0);
                 _hooterLastWrittenThreshold = 0;
+                // Fresh wait window — do not carry prior gap buffer into the next PO.
+                _slitEndCloser?.ClearPendingPoChangeNdt(millNo);
                 _logger.LogInformation(
                     "{MillName}: PO end — cleared MW{AccumWord}/MW{ThresholdWord}; waiting for new WIP bundle PO.",
                     _mill.Name,
@@ -1439,6 +1590,209 @@ public sealed class PlcHandshakeService
 
     private void UpdateStatus(int millNo, Action<PlcHandshakeMillStatus> apply) =>
         _statusRegistry.UpdateMill(millNo, apply);
+
+    /// <summary>
+    /// Settings hooter test: uses the same PAS enable / Q-already-on / WriteOutputBit / DurationMs
+    /// gates as <see cref="ProcessHooterPulse"/>. When <paramref name="requireThreshold"/> is true,
+    /// also requires MES MW56 &gt; MW58 (production arming condition).
+    /// The live poll loop resets Q after <see cref="MillHooterOptions.DurationMs"/>.
+    /// </summary>
+    public async Task<PlcHooterTestResult> RunSettingsHooterTestAsync(
+        bool requireThreshold,
+        CancellationToken cancellationToken)
+    {
+        var millNo = _mill.ResolveMillNo();
+        var steps = new List<string>();
+        var cfg = _mill.Hooter;
+        var outputAddress = cfg is null
+            ? "Q?.?"
+            : $"Q{cfg.OutputByte}.{cfg.OutputBit}";
+        var pasAddress = cfg is null
+            ? "DB?.DBX?.?"
+            : $"DB{cfg.PasEnableDbNumber}.DBX{cfg.PasEnableByteOffset}.{cfg.PasEnableBit}";
+
+        PlcHooterTestResult Fail(string message, bool plcConnected = false, int acc = 0, int thr = 0,
+            bool pas = false, bool qBefore = false, string? po = null, string? size = null) =>
+            new()
+            {
+                Success = false,
+                MillNo = millNo,
+                MillName = _mill.Name,
+                PlcConnected = plcConnected,
+                HooterEnabled = cfg?.Enabled == true,
+                PoNumber = po,
+                PipeSize = size,
+                Accumulated = acc,
+                Threshold = thr,
+                AboveThreshold = acc > thr,
+                RequireThreshold = requireThreshold,
+                PasEnable = pas,
+                QBefore = qBefore,
+                Pulsed = false,
+                DurationMs = cfg is null ? 0 : Math.Max(1000, cfg.DurationMs),
+                OutputAddress = outputAddress,
+                PasEnableAddress = pasAddress,
+                Message = message,
+                Steps = steps
+            };
+
+        if (cfg?.Enabled != true)
+        {
+            steps.Add("Hooter is not enabled for this mill.");
+            return Fail("NDT bundle hooter is not enabled for this mill.");
+        }
+
+        if (_hooterValues is null)
+        {
+            steps.Add("Hooter values service is not registered.");
+            return Fail("Hooter values service is unavailable.");
+        }
+
+        if (!_plcConnectionEnabled)
+        {
+            steps.Add("PLC connection is manually disconnected.");
+            return Fail(
+                "Mill PLC connection is manually disconnected. " +
+                "Use Connect PLC before running a hooter test.");
+        }
+
+        if (_hooterPulseActive)
+        {
+            steps.Add("A hooter pulse is already active.");
+            return Fail(
+                $"Hooter pulse already active on {outputAddress}; wait for it to finish " +
+                $"(~{Math.Max(1000, cfg.DurationMs)}ms) and try again.");
+        }
+
+        try
+        {
+            _logger.LogInformation(
+                "[Settings test] {MillName}: hooter pulse test started (requireThreshold={RequireThreshold}, {Output}, PAS {Pas}).",
+                _mill.Name,
+                requireThreshold,
+                outputAddress,
+                pasAddress);
+            steps.Add(
+                requireThreshold
+                    ? "Test started (production conditions: MW56 > MW58 + PAS + Q off)."
+                    : "Test started (force pulse: PAS + Q off; threshold bypassed).");
+
+            if (!await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false))
+            {
+                steps.Add("S7 connection failed.");
+                return Fail(
+                    "Could not connect to the mill PLC over S7. Check IP, rack/slot, and connection slots.");
+            }
+
+            steps.Add("S7 connected.");
+
+            var resolved = await _hooterValues.ResolveAsync(millNo, cancellationToken).ConfigureAwait(false);
+            SyncHooterMemoryWords(cfg, resolved, forcePoResync: false);
+            var accumulated = resolved.Accumulated;
+            var threshold = resolved.Threshold;
+            var aboveThreshold = accumulated > threshold;
+            steps.Add(
+                $"MES/open count MW{cfg.AccumulatedWordOffset}={accumulated}, " +
+                $"MW{cfg.ThresholdWordOffset}={threshold} (above={aboveThreshold}).");
+
+            if (requireThreshold && !aboveThreshold)
+            {
+                steps.Add("Production arming condition not met (MW56 ≤ MW58).");
+                return Fail(
+                    $"Production condition not met: MW{cfg.AccumulatedWordOffset}={accumulated} is not greater than " +
+                    $"MW{cfg.ThresholdWordOffset}={threshold}. Uncheck “Require MW56 > MW58” to force a hardware pulse " +
+                    "through the same PAS/Q write path.",
+                    plcConnected: true,
+                    acc: accumulated,
+                    thr: threshold,
+                    po: resolved.PoNumber,
+                    size: resolved.PipeSize);
+            }
+
+            var pasEnable = ReadDbBit(cfg.PasEnableDbNumber, cfg.PasEnableByteOffset, cfg.PasEnableBit);
+            steps.Add($"PAS enable {pasAddress}: {(pasEnable ? "ON" : "OFF")}.");
+            if (!pasEnable)
+            {
+                return Fail(
+                    $"Hooter armed path blocked: PAS enable {pasAddress} is OFF — same gate as production " +
+                    $"(Q{cfg.OutputByte}.{cfg.OutputBit} not pulsed).",
+                    plcConnected: true,
+                    acc: accumulated,
+                    thr: threshold,
+                    pas: false,
+                    po: resolved.PoNumber,
+                    size: resolved.PipeSize);
+            }
+
+            var qBefore = ReadOutputBit(cfg.OutputByte, cfg.OutputBit);
+            steps.Add($"{outputAddress} before write: {(qBefore ? "ON" : "OFF")}.");
+            if (qBefore)
+            {
+                return Fail(
+                    $"{outputAddress} is already ON — production skips SET when the output is already true. " +
+                    "Clear/reset the output on the PLC, then retry.",
+                    plcConnected: true,
+                    acc: accumulated,
+                    thr: threshold,
+                    pas: true,
+                    qBefore: true,
+                    po: resolved.PoNumber,
+                    size: resolved.PipeSize);
+            }
+
+            var durationMs = Math.Max(1000, cfg.DurationMs);
+            WriteOutputBit(cfg.OutputByte, cfg.OutputBit, true);
+            _hooterPulseActive = true;
+            _hooterResetUtc = DateTimeOffset.UtcNow.AddMilliseconds(durationMs);
+            if (aboveThreshold)
+                _hooterAboveThreshold = true;
+
+            UpdateStatus(millNo, s => s.HooterActive = true);
+
+            _logger.LogInformation(
+                "[Settings test] {MillName}: NDT bundle hooter {Output} ON — MW{AccumWord}={Accumulated} " +
+                "{Cmp} MW{ThresholdWord}={Threshold} (PAS enable on, requireThreshold={RequireThreshold}).",
+                _mill.Name,
+                outputAddress,
+                cfg.AccumulatedWordOffset,
+                accumulated,
+                aboveThreshold ? ">" : "≤",
+                cfg.ThresholdWordOffset,
+                threshold,
+                requireThreshold);
+            steps.Add($"{outputAddress} written ON; poll loop will RESET after {durationMs}ms.");
+
+            return new PlcHooterTestResult
+            {
+                Success = true,
+                MillNo = millNo,
+                MillName = _mill.Name,
+                PlcConnected = true,
+                HooterEnabled = true,
+                PoNumber = resolved.PoNumber,
+                PipeSize = resolved.PipeSize,
+                Accumulated = accumulated,
+                Threshold = threshold,
+                AboveThreshold = aboveThreshold,
+                RequireThreshold = requireThreshold,
+                PasEnable = true,
+                QBefore = false,
+                Pulsed = true,
+                DurationMs = durationMs,
+                OutputAddress = outputAddress,
+                PasEnableAddress = pasAddress,
+                Message =
+                    $"Hooter {outputAddress} ON (test pulse). Will RESET after {durationMs}ms via the same poll path as production.",
+                Steps = steps
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[Settings test] {MillName}: hooter pulse test failed.", _mill.Name);
+            steps.Add($"Error: {ex.Message}");
+            return Fail(ex.Message, plcConnected: true);
+        }
+    }
 
     /// <summary>
     /// Settings test: read trigger, run PO end workflow, pulse ack on the mill's existing S7 connection.

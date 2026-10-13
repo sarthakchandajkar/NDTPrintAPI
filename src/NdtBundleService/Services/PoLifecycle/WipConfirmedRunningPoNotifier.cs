@@ -5,20 +5,32 @@ public sealed class WipConfirmedRunningPoNotifier
     : IWipConfirmedRunningPoNotifier, IWipConfirmedRunningPoNotifierRegistration
 {
     private readonly object _lock = new();
-    private Action<int, string>? _handler;
+    private readonly List<Action<int, string>> _handlers = new();
 
     public void SetHandler(Action<int, string> handler)
     {
+        ArgumentNullException.ThrowIfNull(handler);
         lock (_lock)
-            _handler = handler;
+        {
+            _handlers.Clear();
+            _handlers.Add(handler);
+        }
+    }
+
+    public void AddHandler(Action<int, string> handler)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+        lock (_lock)
+            _handlers.Add(handler);
     }
 
     public void NotifyWipConfirmed(int millNo, string normalizedPo)
     {
-        Action<int, string>? handler;
+        Action<int, string>[] snapshot;
         lock (_lock)
-            handler = _handler;
+            snapshot = _handlers.ToArray();
 
-        handler?.Invoke(millNo, normalizedPo);
+        foreach (var handler in snapshot)
+            handler(millNo, normalizedPo);
     }
 }

@@ -45,14 +45,6 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
         }
 
         var opt = _options.CurrentValue;
-        var (address, printerPort, printerConfigured) = _millPrinters.ResolveForMill(record.MillNo);
-        if (!printerConfigured)
-        {
-            var error = $"no printer configured for mill {record.MillNo}";
-            _logger.LogWarning("NDT tag not sent: {Error}.", error);
-            return new PrinterSendResult(false, error);
-        }
-
         var ndtBatchNoFormatted = FormatNdtBatchNo(batchNumber, record.MillNo);
         var wip = await _wipLabelProvider.GetWipLabelAsync(record.PoNumber, record.MillNo, cancellationToken).ConfigureAwait(false);
 
@@ -65,6 +57,16 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
             pipeLength,
             totalNdtPcs);
         var pipeType = wip?.PipeType ?? "";
+
+        var printerTarget = ReprintPrinterTarget.FromPipeType(record.MillNo, pipeType);
+        var (address, printerPort, printerConfigured, printerDisplay) =
+            _millPrinters.ResolveReprintTarget(record.MillNo, printerTarget);
+        if (!printerConfigured)
+        {
+            var error = $"no printer configured for mill {record.MillNo} ({printerDisplay})";
+            _logger.LogWarning("NDT tag not sent: {Error}.", error);
+            return new PrinterSendResult(false, error);
+        }
 
         if (wip is null
             || (string.IsNullOrWhiteSpace(pipeGrade)
@@ -102,11 +104,17 @@ public sealed class NdtZplTagPrinter : INdtTagPrinter
         var sendResult = await _sender.SendAsync(address, printerPort, zplBytes, cancellationToken).ConfigureAwait(false);
         if (sendResult.Success)
         {
-            _logger.LogInformation("Printed NDT tag {BatchNo} ({Pcs} pcs) to {Address}.", ndtBatchNoFormatted, totalNdtPcs, address);
+            _logger.LogInformation(
+                "Printed NDT tag {BatchNo} ({Pcs} pcs) to {Printer} at {Address} (Pipe_Type={PipeType}).",
+                ndtBatchNoFormatted,
+                totalNdtPcs,
+                printerDisplay,
+                address,
+                string.IsNullOrWhiteSpace(pipeType) ? "(none)" : pipeType);
             return sendResult;
         }
 
-        var unreachable = $"Printer unreachable at {address}:{printerPort}: {sendResult.ErrorDetail}";
+        var unreachable = $"Printer unreachable at {address}:{printerPort} ({printerDisplay}): {sendResult.ErrorDetail}";
         _logger.LogWarning("Failed to send NDT tag {BatchNo} to printer. {Detail}", ndtBatchNoFormatted, unreachable);
         return new PrinterSendResult(false, unreachable);
     }

@@ -111,9 +111,9 @@ export default function UploadBundlesPage() {
         <h1 className="text-2xl font-bold text-gray-900">MES PAS NDT Upload Files</h1>
         <p className="text-gray-600 text-sm mt-1">
           Bundles that already have an upload CSV under{" "}
-          <span className="font-mono text-xs">…/MES PAS NDT/Bundle</span>. Regenerate writes a new
-          timestamped CSV (older files are left in place). Requires Revisual / NDT process CSV for
-          the batch.
+          <span className="font-mono text-xs">…/MES PAS NDT/Bundle</span>. Regenerate writes a new{" "}
+          <span className="font-mono text-xs">ndt-ddmmyy1607000.csv</span> (sequence increments if
+          that name already exists). Requires Revisual / NDT process CSV for the batch.
         </p>
       </div>
 

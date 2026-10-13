@@ -35,6 +35,7 @@ const navEntries: NavEntry[] = [
   { type: "link", href: "/printed-tags", label: "Printed Tags" },
   { type: "link", href: "/upload-bundles", label: "Upload Files" },
   { type: "link", href: "/reconcile", label: "Reconcile Bundle" },
+  { type: "link", href: "/po-change-remediation", label: "PO-change Remediation" },
   { type: "link", href: "/po-end", label: "PO End" },
   { type: "link", href: "/mills-plc", label: "Mills PLC" },
   { type: "link", href: "/settings", label: "Settings" },

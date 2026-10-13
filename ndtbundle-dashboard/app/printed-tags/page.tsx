@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { api, type ReconcileBundle, type StationPrintedTag } from "@/lib/api";
+import { api, type ReconcileBundle, type ReprintPrinterTarget, type StationPrintedTag } from "@/lib/api";
 import { DateRangeFilter } from "@/components/DateRangeFilter";
 import { MillFilter } from "@/components/MillFilter";
+import { ReprintPrinterChooser } from "@/components/ReprintPrinterChooser";
 import {
   filterBundlesByDateRange,
   filterBundlesByMill,
@@ -115,7 +116,7 @@ function FilterChip({
     <button
       type="button"
       onClick={onClick}
-      className={`px-3 py-1.5 rounded-md text-sm font-medium border ${
+      className={`px-2 py-1 rounded text-xs font-medium border ${
         active
           ? "bg-amber-700 text-white border-amber-700"
           : "bg-white text-gray-700 border-gray-300 hover:bg-gray-50"
@@ -160,6 +161,7 @@ export default function PrintedTagsPage() {
   const [error, setError] = useState<string | null>(null);
   const [secondsUntilRefresh, setSecondsUntilRefresh] = useState(30);
   const [reprintingKey, setReprintingKey] = useState<string | null>(null);
+  const [reprintChooserBundle, setReprintChooserBundle] = useState<ReconcileBundle | null>(null);
   const [reprintMessage, setReprintMessage] = useState<string | null>(null);
   const [reprintError, setReprintError] = useState<string | null>(null);
 
@@ -233,7 +235,7 @@ export default function PrintedTagsPage() {
     }
   };
 
-  const reprintTag = async (bundle: ReconcileBundle) => {
+  const openReprintChooser = (bundle: ReconcileBundle) => {
     const batchNo = bundle.bundleNo?.trim();
     if (!batchNo) {
       setReprintError("Bundle has no NDT Batch No.");
@@ -243,11 +245,15 @@ export default function PrintedTagsPage() {
       setReprintError(`Bundle ${batchNo} is still forming and has no printed tag yet.`);
       return;
     }
-    if (
-      !window.confirm(
-        `Reprint mill tag for ${batchNo} (${bundle.totalNdtPcs ?? "?"} pcs)?\n\nThe label will include the Reprint marker.`
-      )
-    ) {
+    setReprintError(null);
+    setReprintMessage(null);
+    setReprintChooserBundle(bundle);
+  };
+
+  const reprintTag = async (bundle: ReconcileBundle, printerTarget: ReprintPrinterTarget) => {
+    const batchNo = bundle.bundleNo?.trim();
+    if (!batchNo) {
+      setReprintError("Bundle has no NDT Batch No.");
       return;
     }
 
@@ -256,7 +262,8 @@ export default function PrintedTagsPage() {
     setReprintError(null);
     setReprintMessage(null);
     try {
-      const res = await api.printReconciledBundle(batchNo);
+      const res = await api.printReconciledBundle(batchNo, printerTarget);
+      setReprintChooserBundle(null);
       setReprintMessage(
         res.message ??
           `Reprint sent for ${res.ndtBatchNo ?? batchNo}${
@@ -335,362 +342,431 @@ export default function PrintedTagsPage() {
   const stationSummaryCount = showStation ? filteredStationTags.length : 0;
   const millTotal = showMill ? bundles.length : 0;
   const stationTotal = showStation ? stationTags.length : 0;
+  const bothPanels = showMill && showStation;
 
   return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-gray-900">Printed Tags</h1>
-        <div className="flex items-center gap-3">
-          <span className="text-sm text-gray-500">Next refresh in {secondsUntilRefresh}s</span>
+    <div className="flex flex-col gap-3 min-h-[calc(100vh-7.5rem)]">
+      <div className="flex justify-between items-center shrink-0">
+        <div>
+          <h1 className="text-xl font-bold text-gray-900">Printed Tags</h1>
+          <p className="text-xs text-gray-500 mt-0.5">
+            {filtersActive
+              ? `${millSummaryCount + stationSummaryCount} of ${millTotal + stationTotal} row(s)`
+              : `${millTotal + stationTotal} row(s)`}
+            {" · "}
+            Mill: slit finish/start · Station: bundle end
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-500">Refresh {secondsUntilRefresh}s</span>
           <button
             onClick={refresh}
-            className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
+            className="px-3 py-1.5 border border-gray-300 rounded-md text-xs font-medium text-gray-700 bg-white hover:bg-gray-50"
           >
             Refresh
           </button>
         </div>
       </div>
 
-      {error && (
-        <div className="rounded-md bg-red-50 border border-red-200 p-4 text-red-700 text-sm">
-          {error}
-        </div>
-      )}
-
-      {reprintError && (
-        <div className="rounded-md bg-red-50 border border-red-200 p-4 text-red-700 text-sm">
-          {reprintError}
-        </div>
-      )}
-
-      {reprintMessage && (
-        <div className="rounded-md bg-green-50 border border-green-200 p-4 text-green-800 text-sm">
-          {reprintMessage}
-        </div>
-      )}
-
-      <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-4">
-        <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">Show</div>
-        <div className="flex flex-wrap gap-2">
-          {(
-            [
-              { value: "both" as const, label: "Mill + station" },
-              { value: "mill" as const, label: "Mill bundles only" },
-              { value: "station" as const, label: "Station tags only" },
-            ] as const
-          ).map((opt) => (
-            <button
-              key={opt.value}
-              type="button"
-              onClick={() => setTagSource(opt.value)}
-              className={`px-3 py-1.5 rounded-md text-sm font-medium border ${
-                tagSource === opt.value
-                  ? "bg-primary-600 text-white border-primary-600"
-                  : "bg-white text-gray-700 border-gray-300 hover:bg-gray-50"
-              }`}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-4">
-        <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">Search</div>
-        <div className="flex flex-wrap gap-3 items-end">
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">NDT Batch No</label>
-            <input
-              type="text"
-              value={searchBatch}
-              onChange={(e) => setSearchBatch(e.target.value)}
-              placeholder="e.g. 1226100001"
-              className="w-48 border border-gray-300 rounded-md px-3 py-2 text-sm font-mono"
-            />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">PO Number</label>
-            <input
-              type="text"
-              value={searchPo}
-              onChange={(e) => setSearchPo(e.target.value)}
-              placeholder="e.g. 1000060591"
-              className="w-48 border border-gray-300 rounded-md px-3 py-2 text-sm font-mono"
-            />
-          </div>
-          {(searchBatch || searchPo) && (
-            <button
-              type="button"
-              onClick={() => {
-                setSearchBatch("");
-                setSearchPo("");
-              }}
-              className="px-3 py-2 text-sm text-gray-600 border border-gray-300 rounded-md hover:bg-gray-50"
-            >
-              Clear search
-            </button>
+      {(error || reprintError || reprintMessage) && (
+        <div className="space-y-2 shrink-0">
+          {error && (
+            <div className="rounded-md bg-red-50 border border-red-200 px-3 py-2 text-red-700 text-sm">
+              {error}
+            </div>
+          )}
+          {reprintError && (
+            <div className="rounded-md bg-red-50 border border-red-200 px-3 py-2 text-red-700 text-sm">
+              {reprintError}
+            </div>
+          )}
+          {reprintMessage && (
+            <div className="rounded-md bg-green-50 border border-green-200 px-3 py-2 text-green-800 text-sm">
+              {reprintMessage}
+            </div>
           )}
         </div>
-      </div>
+      )}
 
-      <MillFilter
-        value={millFilter}
-        onChange={setMillFilter}
-        bundles={bundles}
-        className="bg-white rounded-lg border border-gray-200 shadow-sm p-4"
-      />
-
-      {showStation && (
-        <div className="bg-white rounded-lg border border-amber-200 shadow-sm p-4 space-y-3">
-          <div>
-            <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">
-              Station type
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {(
-                [
-                  { value: "all" as const, label: "All stations" },
-                  { value: "visual" as const, label: "Visual" },
-                  { value: "revisual" as const, label: "Revisual" },
-                  { value: "hydro" as const, label: "Hydrotesting" },
-                ] as const
-              ).map((opt) => (
-                <FilterChip
-                  key={opt.value}
-                  active={stationKind === opt.value}
-                  label={opt.label}
-                  onClick={() => {
-                    setStationKind(opt.value);
-                    if (opt.value !== "visual" && opt.value !== "revisual") {
-                      setVisualStationSub("all");
-                    }
-                    if (opt.value !== "hydro") {
-                      setHydroSub("all");
-                    }
-                  }}
-                />
-              ))}
-            </div>
+      {/* Compact filter toolbar */}
+      <div className="bg-white rounded-lg border border-gray-200 shadow-sm px-3 py-2.5 space-y-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Show</span>
+            {(
+              [
+                { value: "both" as const, label: "Both" },
+                { value: "mill" as const, label: "Mill" },
+                { value: "station" as const, label: "Station" },
+              ] as const
+            ).map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => setTagSource(opt.value)}
+                className={`px-2 py-1 rounded text-xs font-medium border ${
+                  tagSource === opt.value
+                    ? "bg-primary-600 text-white border-primary-600"
+                    : "bg-white text-gray-700 border-gray-300 hover:bg-gray-50"
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
           </div>
 
-          {(stationKind === "visual" || stationKind === "revisual") && (
+          <div className="h-5 w-px bg-gray-200 hidden sm:block" />
+
+          <MillFilter
+            value={millFilter}
+            onChange={setMillFilter}
+            bundles={bundles}
+            className="!gap-1.5 [&_span]:text-xs [&_button]:px-2 [&_button]:py-1 [&_button]:text-xs"
+          />
+
+          <div className="h-5 w-px bg-gray-200 hidden md:block" />
+
+          <div className="flex flex-wrap items-end gap-2">
             <div>
-              <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">
-                {stationKind === "visual" ? "Visual" : "Revisual"} physical station
-              </div>
-              <div className="flex flex-wrap gap-2">
+              <label className="block text-[10px] text-gray-500 mb-0.5">Batch</label>
+              <input
+                type="text"
+                value={searchBatch}
+                onChange={(e) => setSearchBatch(e.target.value)}
+                placeholder="12261…"
+                className="w-32 border border-gray-300 rounded px-2 py-1 text-xs font-mono"
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] text-gray-500 mb-0.5">PO</label>
+              <input
+                type="text"
+                value={searchPo}
+                onChange={(e) => setSearchPo(e.target.value)}
+                placeholder="10000…"
+                className="w-32 border border-gray-300 rounded px-2 py-1 text-xs font-mono"
+              />
+            </div>
+            {(searchBatch || searchPo) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchBatch("");
+                  setSearchPo("");
+                }}
+                className="px-2 py-1 text-xs text-gray-600 border border-gray-300 rounded hover:bg-gray-50"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-end gap-x-4 gap-y-2 border-t border-gray-100 pt-2">
+          <DateRangeFilter
+            value={dateRange}
+            onChange={setDateRange}
+            className="!p-0 !shadow-none !border-0 !bg-transparent !gap-2 flex-1 min-w-0 [&_label]:text-[10px] [&_input]:py-1 [&_input]:text-xs [&_button]:px-2 [&_button]:py-1 [&_button]:text-xs [&_div.text-sm]:text-xs"
+            summary={`${millSummaryCount + stationSummaryCount} of ${millTotal + stationTotal}`}
+          />
+
+          {showStation && (
+            <>
+              <div className="h-5 w-px bg-gray-200 hidden lg:block self-center" />
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+                  Station
+                </span>
                 {(
                   [
-                    { value: "all" as const, label: "Both stations" },
-                    { value: "1" as const, label: "Station 1" },
-                    { value: "2" as const, label: "Station 2" },
+                    { value: "all" as const, label: "All" },
+                    { value: "visual" as const, label: "Visual" },
+                    { value: "revisual" as const, label: "Revisual" },
+                    { value: "hydro" as const, label: "Hydro" },
                   ] as const
                 ).map((opt) => (
                   <FilterChip
                     key={opt.value}
-                    active={visualStationSub === opt.value}
+                    active={stationKind === opt.value}
                     label={opt.label}
-                    onClick={() => setVisualStationSub(opt.value)}
+                    onClick={() => {
+                      setStationKind(opt.value);
+                      if (opt.value !== "visual" && opt.value !== "revisual") {
+                        setVisualStationSub("all");
+                      }
+                      if (opt.value !== "hydro") {
+                        setHydroSub("all");
+                      }
+                    }}
                   />
                 ))}
+                {(stationKind === "visual" || stationKind === "revisual") && (
+                  <>
+                    <span className="text-gray-300 mx-0.5">|</span>
+                    {(
+                      [
+                        { value: "all" as const, label: "St 1+2" },
+                        { value: "1" as const, label: "St 1" },
+                        { value: "2" as const, label: "St 2" },
+                      ] as const
+                    ).map((opt) => (
+                      <FilterChip
+                        key={opt.value}
+                        active={visualStationSub === opt.value}
+                        label={opt.label}
+                        onClick={() => setVisualStationSub(opt.value)}
+                      />
+                    ))}
+                  </>
+                )}
+                {stationKind === "hydro" && (
+                  <>
+                    <span className="text-gray-300 mx-0.5">|</span>
+                    {(
+                      [
+                        { value: "all" as const, label: "All hydro" },
+                        { value: "fourHead" as const, label: "4-Head" },
+                        { value: "big" as const, label: "Big" },
+                      ] as const
+                    ).map((opt) => (
+                      <FilterChip
+                        key={opt.value}
+                        active={hydroSub === opt.value}
+                        label={opt.label}
+                        onClick={() => setHydroSub(opt.value)}
+                      />
+                    ))}
+                  </>
+                )}
               </div>
-            </div>
-          )}
-
-          {stationKind === "hydro" && (
-            <div>
-              <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">
-                Hydrotesting type
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {(
-                  [
-                    { value: "all" as const, label: "All hydro" },
-                    { value: "fourHead" as const, label: "Four Head" },
-                    { value: "big" as const, label: "Big" },
-                  ] as const
-                ).map((opt) => (
-                  <FilterChip
-                    key={opt.value}
-                    active={hydroSub === opt.value}
-                    label={opt.label}
-                    onClick={() => setHydroSub(opt.value)}
-                  />
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      <DateRangeFilter
-        value={dateRange}
-        onChange={setDateRange}
-        summary={
-          filtersActive
-            ? `${millSummaryCount + stationSummaryCount} of ${millTotal + stationTotal} row(s)`
-            : `${millTotal + stationTotal} row(s)`
-        }
-        hint="Mill bundles: Slit Finish / Start / PrintedAt. Station tags: Bundle End, then ImportedAt."
-      />
-
-      {showMill && (
-        <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
-          <h2 className="px-5 py-3 bg-primary-50 text-gray-900 font-semibold border-b border-gray-200">
-            Mill bundles (printed tags)
-            {!loading && bundles.length > 0 && filtersActive && (
-              <span className="ml-2 text-sm font-normal text-gray-600">
-                — {filteredBundles.length} of {bundles.length}
-              </span>
-            )}
-          </h2>
-          {loading ? (
-            <p className="px-5 py-8 text-gray-500">Loading...</p>
-          ) : filteredBundles.length === 0 ? (
-            <p className="px-5 py-8 text-gray-500 text-sm">
-              {bundles.length === 0
-                ? "No printed mill bundles yet."
-                : "No mill bundles match the selected mill and date range."}
-            </p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead>
-                  <tr className="bg-gray-50">
-                    <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">NDT Batch No</th>
-                    <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">PO Number</th>
-                    <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">Mill No</th>
-                    <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">Slit No</th>
-                    <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">Slit finish</th>
-                    <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">NDT Pipes</th>
-                    <th className="px-5 py-2 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-200">
-                  {filteredBundles.map((b) => {
-                    const batchNo = b.bundleNo?.trim() ?? "";
-                    const canReprint = Boolean(batchNo) && !b.isForming;
-                    const key = `mill:${batchNo}`;
-                    const isReprinting = reprintingKey === key;
-                    return (
-                      <tr key={`mill-${b.bundleNo}-${resolveBundleMillNo(b)}`} className="hover:bg-gray-50">
-                        <td className="px-5 py-2 text-sm font-medium text-gray-900">{b.bundleNo}</td>
-                        <td className="px-5 py-2 text-sm text-gray-700">{b.poNumber}</td>
-                        <td className="px-5 py-2 text-sm text-gray-700">{b.millNo}</td>
-                        <td className="px-5 py-2 text-sm text-gray-700">{b.slitNo}</td>
-                        <td className="px-5 py-2 text-sm text-gray-700 whitespace-nowrap">
-                          {formatDisplayDate(b.slitFinishTime || b.slitStartTime || b.printedAt)}
-                        </td>
-                        <td className="px-5 py-2 text-sm text-gray-700">{b.totalNdtPcs}</td>
-                        <td className="px-5 py-2 text-sm text-right whitespace-nowrap">
-                          <button
-                            type="button"
-                            onClick={() => void reprintTag(b)}
-                            disabled={!canReprint || reprintingKey != null}
-                            title={
-                              b.isForming
-                                ? "Still forming — no printed tag yet"
-                                : "Reprint ZPL tag with Reprint marker"
-                            }
-                            className="px-3 py-1.5 rounded-md border border-violet-300 bg-violet-50 text-violet-900 text-xs font-medium hover:bg-violet-100 disabled:opacity-50 disabled:pointer-events-none"
-                          >
-                            {isReprinting ? "Reprint…" : "Reprint"}
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+            </>
           )}
         </div>
-      )}
+      </div>
 
-      {showStation && (
-        <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
-          <h2 className="px-5 py-3 bg-amber-50 text-gray-900 font-semibold border-b border-gray-200">
-            Station tags (Visual / Hydro / Revisual)
-            {!loading && stationTags.length > 0 && filtersActive && (
-              <span className="ml-2 text-sm font-normal text-gray-600">
-                — {filteredStationTags.length} of {stationTags.length}
-              </span>
-            )}
-          </h2>
-          {loading ? (
-            <p className="px-5 py-8 text-gray-500">Loading...</p>
-          ) : filteredStationTags.length === 0 ? (
-            <p className="px-5 py-8 text-gray-500 text-sm">
-              {stationTags.length === 0
-                ? "No station tag runs recorded yet."
-                : "No station tags match the selected mill, station, search, and date range."}
-            </p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead>
-                  <tr className="bg-gray-50">
-                    <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">NDT Batch No</th>
-                    <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">PO Number</th>
-                    <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">Mill</th>
-                    <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">Station</th>
-                    <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">Hydro type</th>
-                    <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">OK / Reject</th>
-                    <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">Print</th>
-                    <th className="px-5 py-2 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
-                    <th className="px-5 py-2 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-200">
-                  {filteredStationTags.map((t) => {
-                    const batchNo = t.ndtBatchNo?.trim() ?? "";
-                    const workStation = t.workStation?.trim() ?? "";
-                    const key = `st:${t.id ?? `${batchNo}-${workStation}`}`;
-                    const isReprinting = reprintingKey === key;
-                    const canReprint = Boolean(batchNo && workStation);
-                    return (
-                      <tr key={key} className="hover:bg-gray-50">
-                        <td className="px-5 py-2 text-sm font-medium text-gray-900">{t.ndtBatchNo}</td>
-                        <td className="px-5 py-2 text-sm text-gray-700">{t.poNumber}</td>
-                        <td className="px-5 py-2 text-sm text-gray-700">
-                          {t.millNo ?? (resolveStationMillNo(t) || "—")}
-                        </td>
-                        <td className="px-5 py-2 text-sm text-gray-700">{t.workStation || "—"}</td>
-                        <td className="px-5 py-2 text-sm text-gray-700">{t.hydrotestingType?.trim() || "—"}</td>
-                        <td className="px-5 py-2 text-sm text-gray-700 tabular-nums">
-                          {t.okPcs ?? 0} / {t.rejectPcs ?? 0}
-                        </td>
-                        <td className="px-5 py-2 text-sm">
-                          <PrintStatusBadge status={t.printStatus} />
-                          {t.printError ? (
-                            <div className="text-[10px] text-red-600 mt-0.5 max-w-xs truncate" title={t.printError}>
-                              {t.printError}
+      {/* Side-by-side tables with independent scroll */}
+      <div
+        className={`flex-1 min-h-0 grid gap-3 ${
+          bothPanels ? "lg:grid-cols-2" : "grid-cols-1"
+        }`}
+      >
+        {showMill && (
+          <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden flex flex-col min-h-[18rem] max-h-[calc(100vh-13rem)]">
+            <h2 className="px-3 py-2 bg-primary-50 text-gray-900 text-sm font-semibold border-b border-gray-200 shrink-0">
+              Mill bundles
+              {!loading && bundles.length > 0 && (
+                <span className="ml-1.5 text-xs font-normal text-gray-600">
+                  {filtersActive
+                    ? `${filteredBundles.length} of ${bundles.length}`
+                    : filteredBundles.length}
+                </span>
+              )}
+            </h2>
+            <div className="flex-1 min-h-0 overflow-auto">
+              {loading ? (
+                <p className="px-3 py-6 text-gray-500 text-sm">Loading...</p>
+              ) : filteredBundles.length === 0 ? (
+                <p className="px-3 py-6 text-gray-500 text-sm">
+                  {bundles.length === 0
+                    ? "No printed mill bundles yet."
+                    : "No mill bundles match filters."}
+                </p>
+              ) : (
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="sticky top-0 z-10 bg-gray-50">
+                    <tr>
+                      <th className="px-3 py-1.5 text-left text-[10px] font-medium text-gray-500 uppercase">
+                        Batch
+                      </th>
+                      <th className="px-3 py-1.5 text-left text-[10px] font-medium text-gray-500 uppercase">
+                        PO
+                      </th>
+                      <th className="px-3 py-1.5 text-left text-[10px] font-medium text-gray-500 uppercase">
+                        M
+                      </th>
+                      <th className="px-3 py-1.5 text-left text-[10px] font-medium text-gray-500 uppercase hidden xl:table-cell">
+                        Slit
+                      </th>
+                      <th className="px-3 py-1.5 text-left text-[10px] font-medium text-gray-500 uppercase">
+                        Finish
+                      </th>
+                      <th className="px-3 py-1.5 text-left text-[10px] font-medium text-gray-500 uppercase">
+                        Pcs
+                      </th>
+                      <th className="px-3 py-1.5 text-right text-[10px] font-medium text-gray-500 uppercase">
+                       {" "}
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {filteredBundles.map((b) => {
+                      const batchNo = b.bundleNo?.trim() ?? "";
+                      const canReprint = Boolean(batchNo) && !b.isForming;
+                      const key = `mill:${batchNo}`;
+                      const isReprinting = reprintingKey === key;
+                      return (
+                        <tr
+                          key={`mill-${b.bundleNo}-${resolveBundleMillNo(b)}`}
+                          className="hover:bg-gray-50"
+                        >
+                          <td className="px-3 py-1.5 text-xs font-medium text-gray-900 font-mono whitespace-nowrap">
+                            {b.bundleNo}
+                          </td>
+                          <td className="px-3 py-1.5 text-xs text-gray-700 font-mono whitespace-nowrap">
+                            {b.poNumber}
+                          </td>
+                          <td className="px-3 py-1.5 text-xs text-gray-700 tabular-nums">{b.millNo}</td>
+                          <td className="px-3 py-1.5 text-xs text-gray-700 hidden xl:table-cell whitespace-nowrap">
+                            {b.slitNo}
+                          </td>
+                          <td className="px-3 py-1.5 text-xs text-gray-700 whitespace-nowrap">
+                            {formatDisplayDate(b.slitFinishTime || b.slitStartTime || b.printedAt)}
+                          </td>
+                          <td className="px-3 py-1.5 text-xs text-gray-700 tabular-nums">{b.totalNdtPcs}</td>
+                          <td className="px-3 py-1.5 text-right whitespace-nowrap">
+                            <button
+                              type="button"
+                              onClick={() => openReprintChooser(b)}
+                              disabled={!canReprint || reprintingKey != null || reprintChooserBundle != null}
+                              title={
+                                b.isForming
+                                  ? "Still forming — no printed tag yet"
+                                  : "Choose printer and reprint ZPL tag with Reprint marker"
+                              }
+                              className="px-2 py-0.5 rounded border border-violet-300 bg-violet-50 text-violet-900 text-[11px] font-medium hover:bg-violet-100 disabled:opacity-50 disabled:pointer-events-none"
+                            >
+                              {isReprinting ? "…" : "Reprint"}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        )}
+
+        {showStation && (
+          <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden flex flex-col min-h-[18rem] max-h-[calc(100vh-13rem)]">
+            <h2 className="px-3 py-2 bg-amber-50 text-gray-900 text-sm font-semibold border-b border-gray-200 shrink-0">
+              Station tags
+              {!loading && stationTags.length > 0 && (
+                <span className="ml-1.5 text-xs font-normal text-gray-600">
+                  {filtersActive
+                    ? `${filteredStationTags.length} of ${stationTags.length}`
+                    : filteredStationTags.length}
+                </span>
+              )}
+            </h2>
+            <div className="flex-1 min-h-0 overflow-auto">
+              {loading ? (
+                <p className="px-3 py-6 text-gray-500 text-sm">Loading...</p>
+              ) : filteredStationTags.length === 0 ? (
+                <p className="px-3 py-6 text-gray-500 text-sm">
+                  {stationTags.length === 0
+                    ? "No station tag runs recorded yet."
+                    : "No station tags match filters."}
+                </p>
+              ) : (
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="sticky top-0 z-10 bg-gray-50">
+                    <tr>
+                      <th className="px-3 py-1.5 text-left text-[10px] font-medium text-gray-500 uppercase">
+                        Batch
+                      </th>
+                      <th className="px-3 py-1.5 text-left text-[10px] font-medium text-gray-500 uppercase">
+                        Station
+                      </th>
+                      <th className="px-3 py-1.5 text-left text-[10px] font-medium text-gray-500 uppercase hidden xl:table-cell">
+                        Hydro
+                      </th>
+                      <th className="px-3 py-1.5 text-left text-[10px] font-medium text-gray-500 uppercase">
+                        OK
+                      </th>
+                      <th className="px-3 py-1.5 text-left text-[10px] font-medium text-gray-500 uppercase">
+                        Print
+                      </th>
+                      <th className="px-3 py-1.5 text-left text-[10px] font-medium text-gray-500 uppercase hidden 2xl:table-cell">
+                        Time
+                      </th>
+                      <th className="px-3 py-1.5 text-right text-[10px] font-medium text-gray-500 uppercase">
+                        {" "}
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {filteredStationTags.map((t) => {
+                      const batchNo = t.ndtBatchNo?.trim() ?? "";
+                      const workStation = t.workStation?.trim() ?? "";
+                      const key = `st:${t.id ?? `${batchNo}-${workStation}`}`;
+                      const isReprinting = reprintingKey === key;
+                      const canReprint = Boolean(batchNo && workStation);
+                      return (
+                        <tr key={key} className="hover:bg-gray-50">
+                          <td className="px-3 py-1.5 text-xs font-medium text-gray-900 font-mono whitespace-nowrap">
+                            <div>{t.ndtBatchNo}</div>
+                            <div className="text-[10px] text-gray-500 font-normal">
+                              PO {t.poNumber || "—"} · M{(t.millNo ?? resolveStationMillNo(t)) || "—"}
                             </div>
-                          ) : null}
-                        </td>
-                        <td className="px-5 py-2 text-sm text-gray-700 whitespace-nowrap">
-                          {formatDisplayDate(t.bundleEnd || t.importedAtUtc || t.bundleStart)}
-                        </td>
-                        <td className="px-5 py-2 text-sm text-right whitespace-nowrap">
-                          <button
-                            type="button"
-                            onClick={() => void reprintStationTag(t)}
-                            disabled={!canReprint || reprintingKey != null}
-                            title="Reprint station ZPL tag with Reprint marker"
-                            className="px-3 py-1.5 rounded-md border border-amber-300 bg-amber-50 text-amber-950 text-xs font-medium hover:bg-amber-100 disabled:opacity-50 disabled:pointer-events-none"
-                          >
-                            {isReprinting ? "Reprint…" : "Reprint"}
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+                          </td>
+                          <td className="px-3 py-1.5 text-xs text-gray-700 whitespace-nowrap">
+                            {t.workStation || "—"}
+                          </td>
+                          <td className="px-3 py-1.5 text-xs text-gray-700 hidden xl:table-cell whitespace-nowrap">
+                            {t.hydrotestingType?.trim() || "—"}
+                          </td>
+                          <td className="px-3 py-1.5 text-xs text-gray-700 tabular-nums whitespace-nowrap">
+                            {t.okPcs ?? 0}/{t.rejectPcs ?? 0}
+                          </td>
+                          <td className="px-3 py-1.5 text-xs">
+                            <PrintStatusBadge status={t.printStatus} />
+                          </td>
+                          <td className="px-3 py-1.5 text-xs text-gray-700 whitespace-nowrap hidden 2xl:table-cell">
+                            {formatDisplayDate(t.bundleEnd || t.importedAtUtc || t.bundleStart)}
+                          </td>
+                          <td className="px-3 py-1.5 text-right whitespace-nowrap">
+                            <button
+                              type="button"
+                              onClick={() => void reprintStationTag(t)}
+                              disabled={!canReprint || reprintingKey != null}
+                              title="Reprint station ZPL tag with Reprint marker"
+                              className="px-2 py-0.5 rounded border border-amber-300 bg-amber-50 text-amber-950 text-[11px] font-medium hover:bg-amber-100 disabled:opacity-50 disabled:pointer-events-none"
+                            >
+                              {isReprinting ? "…" : "Reprint"}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
             </div>
-          )}
-        </div>
-      )}
+          </div>
+        )}
+      </div>
+      <ReprintPrinterChooser
+        open={reprintChooserBundle != null}
+        millNo={
+          reprintChooserBundle != null ? resolveBundleMillNo(reprintChooserBundle) || 1 : 1
+        }
+        title="Choose reprint printer"
+        subtitle={
+          reprintChooserBundle
+            ? `Bundle ${reprintChooserBundle.bundleNo} (${reprintChooserBundle.totalNdtPcs ?? "?"} pcs). Label includes the Reprint marker.`
+            : undefined
+        }
+        confirmLabel="Reprint"
+        busy={reprintingKey != null}
+        onCancel={() => {
+          if (reprintingKey == null) setReprintChooserBundle(null);
+        }}
+        onConfirm={(target) => {
+          if (reprintChooserBundle) void reprintTag(reprintChooserBundle, target);
+        }}
+      />
     </div>
   );
 }

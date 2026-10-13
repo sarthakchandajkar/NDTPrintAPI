@@ -24,7 +24,9 @@ public sealed record PlcPoEndManualConfirmPending(
     int NdtAtEdge,
     Guid CorrelationId,
     DateTimeOffset DetectedAtUtc,
-    string? RunningPoAtEdge);
+    string? RunningPoAtEdge,
+    string? EndedPoAtEdge = null,
+    bool WaitingForNewWipAtEdge = false);
 
 public sealed class PlcPoEndManualConfirmStore : IPlcPoEndManualConfirmStore
 {

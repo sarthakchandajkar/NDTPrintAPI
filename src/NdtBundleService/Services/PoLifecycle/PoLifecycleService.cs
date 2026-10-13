@@ -151,13 +151,27 @@ public sealed class PoLifecycleService : IPoLifecycleService
         if (string.IsNullOrWhiteSpace(po) || millNo is < 1 or > 4 || !Allows(millNo))
             return PoLifecyclePhase.Running;
 
+        var key = MakeKey(millNo, po);
         lock (_lock)
         {
             EnsureLoaded();
-            return _entries.TryGetValue(MakeKey(millNo, po), out var entry)
-                ? entry.Phase
-                : PoLifecyclePhase.Running;
+            if (_entries.TryGetValue(key, out var entry))
+                return entry.Phase;
         }
+
+        // Cross-process: Mill-n may Close a PO after Shared already EnsureLoaded().
+        // Without a DB refresh, Shared GetPhase stays Running and Manual Reconcile can
+        // open a phantom CsvAdvance on the ended PO.
+        if (SqlEnabled && TryLoadPhaseFromDb(millNo, po, out var fromDb))
+        {
+            lock (_lock)
+            {
+                _entries[key] = fromDb;
+                return fromDb.Phase;
+            }
+        }
+
+        return PoLifecyclePhase.Running;
     }
 
     public IReadOnlyList<PoLifecycleDrainEntry> GetExpiredDrains(DateTime utcNow, TimeSpan drainWindow)
@@ -253,6 +267,48 @@ public sealed class PoLifecycleService : IPoLifecycleService
         catch (Exception ex)
         {
             _logger?.LogWarning(ex, "Failed to load Po_Lifecycle; starting with all POs Running.");
+        }
+    }
+
+    private bool TryLoadPhaseFromDb(int millNo, string po, out Entry entry)
+    {
+        entry = null!;
+        try
+        {
+            using var conn = SqlTraceabilityConnection.Create(_options.CurrentValue);
+            conn.Open();
+            using var cmd = new SqlCommand(@"
+SELECT Phase, Ended_AtUtc, Is_Resume_Candidate
+FROM dbo.Po_Lifecycle
+WHERE Mill_No = @Mill AND Po_Number = @Po;", conn);
+            cmd.Parameters.AddWithValue("@Mill", millNo);
+            cmd.Parameters.AddWithValue("@Po", po);
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read())
+                return false;
+
+            var phase = ParsePhase(reader.GetString(0));
+            if (phase == PoLifecyclePhase.Running)
+                return false;
+
+            entry = new Entry
+            {
+                MillNo = millNo,
+                PoNumber = po,
+                Phase = phase,
+                EndedAtUtc = reader.GetDateTime(1),
+                IsResumeCandidate = reader.GetBoolean(2)
+            };
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(
+                ex,
+                "Po_Lifecycle fresh read failed for Mill {Mill} PO {PO}; treating as Running.",
+                millNo,
+                po);
+            return false;
         }
     }
 

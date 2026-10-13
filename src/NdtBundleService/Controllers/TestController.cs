@@ -312,6 +312,12 @@ public sealed class TestController : ControllerBase
     public sealed class PlcManualPoEndConfirmRequest
     {
         public int MillNo { get; set; }
+
+        /// <summary>
+        /// When true, send MES ack only (no remainder flush / tag print).
+        /// Used for remediations after bundles were closed manually in SQL.
+        /// </summary>
+        public bool AckOnly { get; set; }
     }
 
     /// <summary>
@@ -340,12 +346,11 @@ public sealed class TestController : ControllerBase
             }
 
             var one = _manualPoEndConfirm.TryGetPending(m);
-            return Ok(new
-            {
-                Items = one is null
-                    ? Array.Empty<object>()
-                    : new object[] { ToManualPendingDto(one) }
-            });
+            if (one is null)
+                return Ok(new { Items = Array.Empty<object>() });
+
+            var dto = await ToManualPendingDtoAsync(one, cancellationToken).ConfigureAwait(false);
+            return Ok(new { Items = new object[] { dto } });
         }
 
         // Aggregate: Shared fans out; mill/monolith returns local store.
@@ -386,10 +391,10 @@ public sealed class TestController : ControllerBase
             return Ok(new { Items = items });
         }
 
-        return Ok(new
-        {
-            Items = _manualPoEndConfirm.ListPending().Select(ToManualPendingDto).ToList()
-        });
+        var local = new List<object>();
+        foreach (var pending in _manualPoEndConfirm.ListPending())
+            local.Add(await ToManualPendingDtoAsync(pending, cancellationToken).ConfigureAwait(false));
+        return Ok(new { Items = local });
     }
 
     /// <summary>
@@ -420,7 +425,8 @@ public sealed class TestController : ControllerBase
                 .ConfigureAwait(false);
         }
 
-        var result = await _manualPoEndConfirm.ConfirmAsync(request.MillNo, cancellationToken)
+        var result = await _manualPoEndConfirm
+            .ConfirmAsync(request.MillNo, cancellationToken, request.AckOnly)
             .ConfigureAwait(false);
 
         if (!result.Success)
@@ -468,16 +474,37 @@ public sealed class TestController : ControllerBase
         };
     }
 
-    private static object ToManualPendingDto(PlcPoEndManualConfirmPending p) => new
+    private async Task<object> ToManualPendingDtoAsync(
+        PlcPoEndManualConfirmPending p,
+        CancellationToken cancellationToken)
     {
-        p.MillNo,
-        p.MillName,
-        p.PoIdAtEdge,
-        p.NdtAtEdge,
-        p.CorrelationId,
-        DetectedAtUtc = p.DetectedAtUtc,
-        RunningPoAtEdge = p.RunningPoAtEdge
-    };
+        var expected = await _manualPoEndConfirm
+            .BuildExpectedOutcomeAsync(p, cancellationToken)
+            .ConfigureAwait(false);
+
+        return new
+        {
+            p.MillNo,
+            p.MillName,
+            p.PoIdAtEdge,
+            p.NdtAtEdge,
+            p.CorrelationId,
+            DetectedAtUtc = p.DetectedAtUtc,
+            RunningPoAtEdge = p.RunningPoAtEdge,
+            EndedPoAtEdge = p.EndedPoAtEdge,
+            WaitingForNewWipAtEdge = p.WaitingForNewWipAtEdge,
+            PoNumber = expected.PoNumber,
+            ExpectedNdtBatchNumber = expected.ExpectedNdtBatchNumber,
+            ExpectedNdtPipeCount = expected.ExpectedNdtPipeCount,
+            WillFormBundle = expected.WillFormBundle,
+            PipeType = expected.PipeType,
+            ExpectedPrinterTarget = expected.ExpectedPrinterTarget,
+            ExpectedPrinterDisplayName = expected.ExpectedPrinterDisplayName,
+            WaitingForNewWip = expected.WaitingForNewWip || p.WaitingForNewWipAtEdge,
+            EndedPo = expected.EndedPo ?? p.EndedPoAtEdge,
+            PoResolveSource = expected.PoResolveSource
+        };
+    }
 
     private bool ShouldAdvancePoPlanOnPoEnd(int millNo)
     {
@@ -679,7 +706,7 @@ public sealed class TestController : ControllerBase
                 var now = DateTimeOffset.UtcNow;
                 statusByMill = _millStatus.LoadAll()
                     .Where(r => r.MillNo is >= 1 and <= 4
-                                && r.LastUpdateUtc + MillInstanceStatusFreshness.StaleAfter >= now)
+                                && r.LastUpdateUtc + TimeSpan.FromHours(12) >= now)
                     .GroupBy(r => r.MillNo)
                     .ToDictionary(g => g.Key, g => g.First());
             }
@@ -790,20 +817,29 @@ public sealed class TestController : ControllerBase
                 row.NdtPcsPerBundle = ResolveNdtPcsPerBundleFromChart(formation, pipeSize);
             }
 
-            int? liveNdtCount = null;
-            if (liveOpts.ApplyToMillNo is >= 1 and <= 4 && MillSlitLiveS7EndpointConfigured(liveOpts))
+            int? liveNdtCount = TryLiveNdtFromMillStatus(liveOpts.ApplyToMillNo);
+            // Prefer mill-published NDT for Summary. Direct S7 from Shared often hangs when the mill
+            // handshake slot is busy/offline and blocked wip-by-mills for the full client timeout.
+            if (liveNdtCount is null
+                && liveOpts.ApplyToMillNo is >= 1 and <= 4
+                && MillSlitLiveS7EndpointConfigured(liveOpts))
             {
                 try
                 {
-                    liveNdtCount = await _millNdtCountReader.TryReadNdtPipesCountAsync(loadToken).ConfigureAwait(false);
+                    using var s7Cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    s7Cts.CancelAfter(TimeSpan.FromSeconds(1.5));
+                    liveNdtCount = await _millNdtCountReader.TryReadNdtPipesCountAsync(s7Cts.Token)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    _logger.LogDebug("Live mill NDT PLC read timed out for wip-by-mills; using mill-status only.");
                 }
                 catch (Exception ex)
                 {
                     _logger.LogDebug(ex, "Live mill NDT count read skipped for wip-by-mills.");
                 }
             }
-
-            liveNdtCount ??= TryLiveNdtFromMillStatus(liveOpts.ApplyToMillNo);
 
             var slitLocations = string.Join(" | ", _activePoPerMill.GetInputSlitReadFolderPaths().Where(static p => !string.IsNullOrWhiteSpace(p)));
             var bundleLoc = string.Join(
@@ -814,11 +850,29 @@ public sealed class TestController : ControllerBase
             var detail = string.IsNullOrEmpty(bundleLoc)
                 ? $"WIP: {sourcePath}; current PO per mill from slit CSVs in: {slitLocations}"
                 : $"WIP: {sourcePath}; PO from slits: {slitLocations}; when missing, from TM WIP bundle filenames in: {bundleLoc}";
+
+            // Full formation chart for Summary (same source Settings edits — file mtime / InvalidateCache).
+            var formationChart = formation.Values
+                .GroupBy(e => (e.PipeSize ?? string.Empty).Trim(), StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .OrderBy(e => string.Equals(e.PipeSize, "Default", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
+                .ThenBy(e => double.TryParse(
+                    e.PipeSize,
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out var sizeNum)
+                    ? sizeNum
+                    : double.MaxValue)
+                .ThenBy(e => e.PipeSize, StringComparer.OrdinalIgnoreCase)
+                .Select(e => new { pipeSize = e.PipeSize, requiredNdtPcs = e.RequiredNdtPcs })
+                .ToList();
+
             return Ok(new
             {
                 Mills = mills,
                 SourcePath = detail,
                 LiveMillNdt = new { millNo = liveOpts.ApplyToMillNo, ndtCount = liveNdtCount },
+                FormationChart = formationChart,
             });
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

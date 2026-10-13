@@ -471,6 +471,9 @@ WITH Ranked AS (
         Manual_Recon_Reason,
         Manual_Recon_Original_Total,
         Post_Recon_Csv_Sum,
+        Target_Ndt_Pcs,
+        Csv_Filled,
+        Csv_Fill_State,
         ISNULL(Voided, 0) AS Voided,
         ROW_NUMBER() OVER (PARTITION BY Bundle_No ORDER BY PrintedAt DESC) AS rn
     FROM dbo.NDT_Bundle
@@ -506,7 +509,11 @@ SELECT
     r.Manual_Recon_At AS ManualReconAt,
     r.Manual_Recon_Reason AS ManualReconReason,
     r.Manual_Recon_Original_Total AS ManualReconOriginalTotal,
-    r.Post_Recon_Csv_Sum AS PostReconCsvSum
+    r.Post_Recon_Csv_Sum AS PostReconCsvSum,
+    r.Target_Ndt_Pcs AS TargetNdtPcs,
+    r.Csv_Filled AS CsvFilled,
+    r.Csv_Fill_State AS CsvFillState,
+    r.Voided
 FROM Ranked r
 LEFT JOIN SlitSum s ON s.NDT_Batch_No = r.Bundle_No
 WHERE r.rn = 1
@@ -938,6 +945,70 @@ WHERE Mill_No = @MillNo
         }
     }
 
+    public async Task<int> TryReleaseFormingAfterPlcPoEndAsync(
+        string poNumber,
+        int millNo,
+        CancellationToken cancellationToken)
+    {
+        if (!UseDatabase || millNo is < 1 or > 4 || string.IsNullOrWhiteSpace(poNumber))
+            return 0;
+
+        var normalized = InputSlitCsvParsing.NormalizePo(poNumber);
+        try
+        {
+            await using var conn = SqlTraceabilityConnection.Create(Opt);
+            await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+            // Align Target to printed Total, then force terminal fill so open-fill claim / CSV-advance
+            // no longer block the next PO while Input Slit CSVs are still in flight.
+            const string sql = @"
+UPDATE dbo.NDT_Bundle
+SET Target_Ndt_Pcs = Total_NDT_Pcs,
+    Awaiting_Csv_Recon = 0,
+    Count_Discrepancy = CASE
+        WHEN COALESCE(Csv_Filled, 0) <> Total_NDT_Pcs THEN 1
+        ELSE Count_Discrepancy
+    END,
+    Csv_Fill_State = CASE
+        WHEN Total_NDT_Pcs > 0 AND COALESCE(Csv_Filled, 0) > Total_NDT_Pcs THEN N'CsvOvershoot'
+        WHEN COALESCE(Csv_Filled, 0) = Total_NDT_Pcs AND Total_NDT_Pcs > 0 THEN N'CsvComplete'
+        WHEN Total_NDT_Pcs = 0 AND COALESCE(Csv_Filled, 0) = 0 THEN N'PlcClosed'
+        WHEN Total_NDT_Pcs = 0 AND COALESCE(Csv_Filled, 0) > 0 THEN N'CsvFilling'
+        ELSE N'CsvShort'
+    END
+WHERE Mill_No = @MillNo
+  AND (PO_Number = @Po OR PO_Number = @PoNormalized)
+  AND Csv_Fill_State IN (N'PlcClosed', N'CsvFilling')
+  AND ISNULL(Voided, 0) = 0
+  AND Total_NDT_Pcs > 0;";
+
+            await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@MillNo", millNo);
+            cmd.Parameters.AddWithValue("@Po", poNumber.Trim());
+            cmd.Parameters.AddWithValue("@PoNormalized", normalized);
+            var updated = await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            if (updated > 0)
+            {
+                _logger.LogInformation(
+                    "PO-end forming release: marked {Count} incomplete bundle(s) terminal for PO {PO} Mill {Mill} (late CSV will attach without blocking next stamp).",
+                    updated,
+                    normalized,
+                    millNo);
+            }
+
+            return updated;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "PO-end forming release failed for PO {PO} Mill {Mill}.",
+                normalized,
+                millNo);
+            return 0;
+        }
+    }
+
     public async Task TrySetPlcCloseMetadataAsync(int engineBatchSequence, int millNo, CancellationToken cancellationToken)
     {
         if (!UseDatabase || engineBatchSequence <= 0 || millNo is < 1 or > 4)
@@ -1104,17 +1175,23 @@ WHERE Bundle_No = @BundleNo;", conn, (Microsoft.Data.SqlClient.SqlTransaction)tx
                 closeSource,
                 plcTotal,
                 slitSum);
+            var (reconcileFilled, reconcileState) = CsvFillSequenceAdvance.ResolveManualReconcileFill(
+                correctedTotal,
+                csvFilled,
+                slitSum);
 
             // Operator corrected total is BOTH printed tag total AND Target_Ndt_Pcs (fill continues / discrepancy flags).
+            // When slit-grid sum already matches the operator total, sync Csv_Filled and mark Complete so
+            // forming is not stuck waiting for a lagged stamp counter.
             const string updateSql = @"
 UPDATE dbo.NDT_Bundle
 SET Awaiting_Csv_Recon = 0,
     Count_Discrepancy = CASE
-        WHEN Csv_Filled > @CorrectedTotal THEN 1
+        WHEN @ReconcileFilled > @CorrectedTotal THEN 1
         WHEN @ForceFinalized = 1 THEN @Discrepancy
         ELSE Count_Discrepancy
     END,
-    Manual_Review = CASE WHEN Csv_Filled > @CorrectedTotal THEN 1 ELSE Manual_Review END,
+    Manual_Review = CASE WHEN @ReconcileFilled > @CorrectedTotal THEN 1 ELSE Manual_Review END,
     Manual_Recon = 1,
     Manual_Recon_By = @By,
     Manual_Recon_At = @At,
@@ -1122,12 +1199,8 @@ SET Awaiting_Csv_Recon = 0,
     Manual_Recon_Original_Total = COALESCE(Manual_Recon_Original_Total, @OriginalTotal),
     Total_NDT_Pcs = @CorrectedTotal,
     Target_Ndt_Pcs = @CorrectedTotal,
-    Csv_Fill_State = CASE
-        WHEN Csv_Filled > @CorrectedTotal THEN N'CsvOvershoot'
-        WHEN Csv_Filled = @CorrectedTotal THEN N'CsvComplete'
-        WHEN Csv_Filled > 0 THEN N'CsvFilling'
-        ELSE N'PlcClosed'
-    END
+    Csv_Filled = @ReconcileFilled,
+    Csv_Fill_State = @ReconcileState
 WHERE Bundle_No = @BundleNo;";
             await using (var upd = new Microsoft.Data.SqlClient.SqlCommand(updateSql, conn, (Microsoft.Data.SqlClient.SqlTransaction)tx))
             {
@@ -1138,6 +1211,8 @@ WHERE Bundle_No = @BundleNo;";
                 upd.Parameters.AddWithValue("@Reason", reasonTrimmed);
                 upd.Parameters.AddWithValue("@OriginalTotal", originalTotal);
                 upd.Parameters.AddWithValue("@CorrectedTotal", correctedTotal);
+                upd.Parameters.AddWithValue("@ReconcileFilled", reconcileFilled);
+                upd.Parameters.AddWithValue("@ReconcileState", reconcileState);
                 upd.Parameters.AddWithValue("@BundleNo", batchNoTrimmed);
                 var rows = await upd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
                 if (rows == 0)
@@ -1586,8 +1661,16 @@ WHERE NDT_Batch_No = @BatchNo
 
     public async Task<IReadOnlyList<(string SlitNo, int NdtPipes)>> GetSlitsForBatchAsync(string batchNo, CancellationToken cancellationToken)
     {
+        var details = await GetSlitDetailsForBatchAsync(batchNo, cancellationToken).ConfigureAwait(false);
+        return details.Select(d => (d.SlitNo, d.NdtPipes)).ToList();
+    }
+
+    public async Task<IReadOnlyList<ReconcileSlitDetail>> GetSlitDetailsForBatchAsync(
+        string batchNo,
+        CancellationToken cancellationToken)
+    {
         if (string.IsNullOrWhiteSpace(batchNo))
-            return Array.Empty<(string, int)>();
+            return Array.Empty<ReconcileSlitDetail>();
 
         var batchNoTrimmed = batchNo.Trim();
 
@@ -1595,22 +1678,78 @@ WHERE NDT_Batch_No = @BatchNo
         {
             try
             {
-                var fromSql = await GetSlitsForBatchFromSqlAsync(batchNoTrimmed, cancellationToken).ConfigureAwait(false);
+                var fromSql = await GetSlitDetailsForBatchFromSqlAsync(batchNoTrimmed, cancellationToken)
+                    .ConfigureAwait(false);
                 if (fromSql.Count > 0)
                     return fromSql;
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to load slits for batch {BatchNo} from SQL; falling back to per-slit CSV scan.", batchNoTrimmed);
+                _logger.LogWarning(
+                    ex,
+                    "Failed to load slit details for batch {BatchNo} from SQL; falling back to per-slit CSV scan.",
+                    batchNoTrimmed);
             }
         }
 
+        return await GetSlitDetailsForBatchFromCsvAsync(batchNoTrimmed, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<IReadOnlyList<ReconcileSlitDetail>> GetSlitDetailsForBatchFromSqlAsync(
+        string batchNoTrimmed,
+        CancellationToken cancellationToken)
+    {
+        await using var conn = SqlTraceabilityConnection.Create(Opt);
+        await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+        const string sql = @"
+SELECT
+    COALESCE(NULLIF(LTRIM(RTRIM(Slit_No)), N''), N'—') AS SlitNo,
+    SUM(ISNULL(NDT_Pipes, 0)) AS NdtPipes,
+    SUM(ISNULL(Rejected_P, 0)) AS RejectedPipes,
+    MIN(Slit_Start_Time) AS SlitStartTime,
+    MAX(Slit_Finish_Time) AS SlitFinishTime,
+    MAX(NULLIF(LTRIM(RTRIM(NDT_Short_Length_Pipe)), N'')) AS NdtShortLengthPipe,
+    MAX(NULLIF(LTRIM(RTRIM(Rejected_Short_Length_Pipe)), N'')) AS RejectedShortLengthPipe
+FROM dbo.Output_Slit_Row
+WHERE NDT_Batch_No = @BatchNo
+GROUP BY COALESCE(NULLIF(LTRIM(RTRIM(Slit_No)), N''), N'—')
+ORDER BY SlitNo";
+
+        await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@BatchNo", batchNoTrimmed);
+
+        var list = new List<ReconcileSlitDetail>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var slit = reader.IsDBNull(0) ? "—" : reader.GetString(0);
+            list.Add(new ReconcileSlitDetail(
+                slit,
+                ReadSqlInt32(reader, 1),
+                ReadSqlInt32(reader, 2),
+                reader.IsDBNull(3) ? null : reader.GetDateTime(3),
+                reader.IsDBNull(4) ? null : reader.GetDateTime(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6)));
+        }
+
+        _logger.LogDebug(
+            "Loaded {Count} slit detail row(s) for batch {BatchNo} from Output_Slit_Row.",
+            list.Count,
+            batchNoTrimmed);
+        return list;
+    }
+
+    private async Task<IReadOnlyList<ReconcileSlitDetail>> GetSlitDetailsForBatchFromCsvAsync(
+        string batchNoTrimmed,
+        CancellationToken cancellationToken)
+    {
         var folder = Opt.OutputBundleFolder;
         if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
-            return Array.Empty<(string, int)>();
-        var bySlit = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            return Array.Empty<ReconcileSlitDetail>();
 
-        // Use only per-slit output files (same name as input slit CSV). Exclude bundle summary files.
+        var bySlit = new Dictionary<string, AccumulableSlitDetail>(StringComparer.OrdinalIgnoreCase);
         var files = TryListPerSlitOutputCsvFiles();
 
         foreach (var path in files)
@@ -1641,52 +1780,139 @@ WHERE NDT_Batch_No = @BatchNo
                     var slit = ReconcileCsvParsing.NormalizeSlitKey(slitCell);
                     if (!columns.TryGetField(cols, columns.NdtPipes, out var ndtRaw))
                         ndtRaw = "0";
-                    var pipes = int.TryParse(ndtRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var p) ? p : 0;
-                    bySlit[slit] = bySlit.TryGetValue(slit, out var existing) ? existing + pipes : pipes;
+                    var pipes = int.TryParse(ndtRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var p)
+                        ? p
+                        : 0;
+
+                    var rejected = 0;
+                    if (columns.TryGetField(cols, columns.RejectedP, out var rejRaw)
+                        && int.TryParse(rejRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var rj))
+                    {
+                        rejected = rj;
+                    }
+
+                    DateTime? start = null;
+                    DateTime? finish = null;
+                    if (columns.TryGetField(cols, columns.SlitStartTime, out var startRaw))
+                        start = TryParseSapSlitDateTime(startRaw);
+                    if (columns.TryGetField(cols, columns.SlitFinishTime, out var finishRaw))
+                        finish = TryParseSapSlitDateTime(finishRaw);
+
+                    columns.TryGetField(cols, columns.NdtShortLengthPipe, out var shortRaw);
+                    columns.TryGetField(cols, columns.RejectedShortLengthPipe, out var rejShortRaw);
+
+                    if (!bySlit.TryGetValue(slit, out var acc))
+                    {
+                        bySlit[slit] = new AccumulableSlitDetail(
+                            pipes,
+                            rejected,
+                            start,
+                            finish,
+                            NullIfWhiteSpace(shortRaw),
+                            NullIfWhiteSpace(rejShortRaw));
+                    }
+                    else
+                    {
+                        bySlit[slit] = acc.Accumulate(
+                            pipes,
+                            rejected,
+                            start,
+                            finish,
+                            NullIfWhiteSpace(shortRaw),
+                            NullIfWhiteSpace(rejShortRaw));
+                    }
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogDebug(ex, "Skip slit scan for {Path}.", path);
+                _logger.LogDebug(ex, "Skip slit detail scan for {Path}.", path);
             }
         }
 
         return bySlit
             .OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
-            .Select(kv => (kv.Key, kv.Value))
+            .Select(kv => kv.Value.ToDetail(kv.Key))
             .ToList();
     }
 
-    private async Task<IReadOnlyList<(string SlitNo, int NdtPipes)>> GetSlitsForBatchFromSqlAsync(
-        string batchNoTrimmed,
-        CancellationToken cancellationToken)
+    private static string? NullIfWhiteSpace(string? s) =>
+        string.IsNullOrWhiteSpace(s) ? null : s.Trim();
+
+    private static DateTime? TryParseSapSlitDateTime(string? raw)
     {
-        await using var conn = SqlTraceabilityConnection.Create(Opt);
-        await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
-
-        const string sql = @"
-SELECT
-    COALESCE(NULLIF(LTRIM(RTRIM(Slit_No)), N''), N'—') AS SlitNo,
-    SUM(NDT_Pipes) AS NdtPipes
-FROM dbo.Output_Slit_Row
-WHERE NDT_Batch_No = @BatchNo
-GROUP BY COALESCE(NULLIF(LTRIM(RTRIM(Slit_No)), N''), N'—')
-ORDER BY SlitNo";
-
-        await using var cmd = new Microsoft.Data.SqlClient.SqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("@BatchNo", batchNoTrimmed);
-
-        var list = new List<(string, int)>();
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        if (string.IsNullOrWhiteSpace(raw))
+            return null;
+        if (DateTime.TryParseExact(
+                raw.Trim(),
+                NdtInputSlitOutputCsv.SapSlitDateTimeFormat,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out var exact))
         {
-            var slit = reader.IsDBNull(0) ? "—" : reader.GetString(0);
-            var pipes = ReadSqlInt32(reader, 1);
-            list.Add((slit, pipes));
+            return exact;
         }
 
-        _logger.LogDebug("Loaded {Count} slit row(s) for batch {BatchNo} from Output_Slit_Row.", list.Count, batchNoTrimmed);
-        return list;
+        return DateTime.TryParse(raw.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var loose)
+            ? loose
+            : null;
+    }
+
+    private readonly struct AccumulableSlitDetail
+    {
+        public AccumulableSlitDetail(
+            int ndtPipes,
+            int rejectedPipes,
+            DateTime? slitStartTime,
+            DateTime? slitFinishTime,
+            string? ndtShortLengthPipe,
+            string? rejectedShortLengthPipe)
+        {
+            NdtPipes = ndtPipes;
+            RejectedPipes = rejectedPipes;
+            SlitStartTime = slitStartTime;
+            SlitFinishTime = slitFinishTime;
+            NdtShortLengthPipe = ndtShortLengthPipe;
+            RejectedShortLengthPipe = rejectedShortLengthPipe;
+        }
+
+        public int NdtPipes { get; }
+        public int RejectedPipes { get; }
+        public DateTime? SlitStartTime { get; }
+        public DateTime? SlitFinishTime { get; }
+        public string? NdtShortLengthPipe { get; }
+        public string? RejectedShortLengthPipe { get; }
+
+        public AccumulableSlitDetail Accumulate(
+            int pipes,
+            int rejected,
+            DateTime? start,
+            DateTime? finish,
+            string? ndtShort,
+            string? rejShort) =>
+            new(
+                NdtPipes + pipes,
+                RejectedPipes + rejected,
+                MinDate(SlitStartTime, start),
+                MaxDate(SlitFinishTime, finish),
+                NdtShortLengthPipe ?? ndtShort,
+                RejectedShortLengthPipe ?? rejShort);
+
+        public ReconcileSlitDetail ToDetail(string slitNo) =>
+            new(slitNo, NdtPipes, RejectedPipes, SlitStartTime, SlitFinishTime, NdtShortLengthPipe, RejectedShortLengthPipe);
+
+        private static DateTime? MinDate(DateTime? a, DateTime? b)
+        {
+            if (!a.HasValue) return b;
+            if (!b.HasValue) return a;
+            return a.Value <= b.Value ? a : b;
+        }
+
+        private static DateTime? MaxDate(DateTime? a, DateTime? b)
+        {
+            if (!a.HasValue) return b;
+            if (!b.HasValue) return a;
+            return a.Value >= b.Value ? a : b;
+        }
     }
 
     public async Task<IReadOnlyList<(string SlitNo, string SourceFileName)>> GetSlitSourceFileNamesForBatchAsync(

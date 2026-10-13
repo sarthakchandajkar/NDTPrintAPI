@@ -9,7 +9,7 @@ namespace NdtBundleService.Services;
 public static class BundleCloseCsv
 {
     public const string Header =
-        "PO Number,Slit No,NDT Pipes,Rejected P,Slit Start Time,Slit Finish Time,Mill No,NDT Short Length Pipe,Rejected Short Length Pipe,NDT Batch No";
+        "PO Number,Slit No,NDT Pipes,Rejected Pipes,Slit Start Time,Slit Finish Time,Mill No,NDT Short Length Pipe,Rejected Short Length Pipe,NDT Batch No";
 
     public static string FormatLine(InputSlitRecord context, int totalNdtPcs, string ndtBatchNoFormatted) =>
         string.Join(",",

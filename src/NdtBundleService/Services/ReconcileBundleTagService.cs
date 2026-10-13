@@ -36,7 +36,10 @@ public sealed class ReconcileBundleTagService : IReconcileBundleTagService
         _logger = logger;
     }
 
-    public async Task<ReconcileBundleTagPrintResult> ReprintAsync(NdtBundleRecord bundle, CancellationToken cancellationToken)
+    public async Task<ReconcileBundleTagPrintResult> ReprintAsync(
+        NdtBundleRecord bundle,
+        CancellationToken cancellationToken,
+        string? printerTarget = null)
     {
         if (!_zplToggle.IsEnabled)
         {
@@ -47,13 +50,25 @@ public sealed class ReconcileBundleTagService : IReconcileBundleTagService
             };
         }
 
-        var (address, printerPort, printerConfigured) = _millPrinters.ResolveForMill(bundle.MillNo);
+        var target = ReprintPrinterTarget.Normalize(printerTarget);
+        if (!ReprintPrinterTarget.IsKnown(printerTarget) && !string.IsNullOrWhiteSpace(printerTarget))
+        {
+            return new ReconcileBundleTagPrintResult
+            {
+                Success = false,
+                Message = $"Unknown printerTarget '{printerTarget}'. Use wip, fg, pas, or mill."
+            };
+        }
+
+        var (address, printerPort, printerConfigured, displayName) =
+            _millPrinters.ResolveReprintTarget(bundle.MillNo, target);
         if (!printerConfigured)
         {
             return new ReconcileBundleTagPrintResult
             {
                 Success = false,
-                Message = $"Printer not configured for Mill {bundle.MillNo} (Settings → printers)."
+                Message =
+                    $"{displayName} is not configured for Mill {bundle.MillNo} (Settings → printers)."
             };
         }
 
@@ -98,9 +113,12 @@ public sealed class ReconcileBundleTagService : IReconcileBundleTagService
             labelSize: ZplNdtLabelBuilder.NdtTagLabelSize.FromOptions(_options, bundle.MillNo));
 
         _logger.LogInformation(
-            "Printing bundle {BatchNo} (Reprint) with {NdtPcs} pcs.",
+            "Printing bundle {BatchNo} (Reprint) with {NdtPcs} pcs to {Printer} ({Address}:{Port}).",
             bundle.BundleNo,
-            bundle.TotalNdtPcs);
+            bundle.TotalNdtPcs,
+            displayName,
+            address,
+            printerPort);
 
         try
         {
@@ -121,7 +139,7 @@ public sealed class ReconcileBundleTagService : IReconcileBundleTagService
                 return new ReconcileBundleTagPrintResult
                 {
                     Success = true,
-                    Message = "Bundle tag (Reprint) sent to printer."
+                    Message = $"Bundle tag (Reprint) sent to {displayName} ({address}:{printerPort})."
                 };
             }
 

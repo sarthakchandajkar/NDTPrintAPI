@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
+using NdtBundleService.Services.PoLifecycle;
 
 namespace NdtBundleService.Services;
 
@@ -161,16 +162,22 @@ public sealed class CsvFillService : ICsvFillService
 {
     private readonly IOptionsMonitor<NdtBundleOptions> _options;
     private readonly IMillSequenceService? _millSequence;
+    private readonly IWipBundleRunningPoProvider? _wipRunningPo;
+    private readonly IPoLifecycleService? _poLifecycle;
     private readonly ILogger<CsvFillService> _logger;
 
     public CsvFillService(
         IOptionsMonitor<NdtBundleOptions> options,
         ILogger<CsvFillService> logger,
-        IMillSequenceService? millSequence = null)
+        IMillSequenceService? millSequence = null,
+        IWipBundleRunningPoProvider? wipRunningPo = null,
+        IPoLifecycleService? poLifecycle = null)
     {
         _options = options;
         _logger = logger;
         _millSequence = millSequence;
+        _wipRunningPo = wipRunningPo;
+        _poLifecycle = poLifecycle;
     }
 
     private NdtBundleOptions Opt => _options.CurrentValue;
@@ -421,6 +428,17 @@ WHERE Bundle_No = @BundleNo;", conn, tx))
         if (!CsvFillSequenceAdvance.ShouldOpenNextStampTarget(fillState, anotherIncomplete is not null))
             return;
 
+        if (!await IsEligibleForCsvAdvanceAsync(poNumber, millNo, cancellationToken).ConfigureAwait(false))
+        {
+            _logger.LogInformation(
+                "Skipping CSV-advance after terminal fill of {BundleNo} PO {PO} Mill {Mill} — "
+                + "PO is not the live running PO (or mill is waiting for WIP / lifecycle Closed|Draining).",
+                closedBundleNo,
+                InputSlitCsvParsing.NormalizePo(poNumber),
+                millNo);
+            return;
+        }
+
         int? manualOriginal = null;
         int? targetPcs = null;
         var totalPcs = 0;
@@ -462,6 +480,35 @@ WHERE Bundle_No = @BundleNo;", conn);
         await _millSequence
             .TryOpenCsvAdvanceStampTargetAsync(poNumber, millNo, provisional, slitNo, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    private async Task<bool> IsEligibleForCsvAdvanceAsync(
+        string poNumber,
+        int millNo,
+        CancellationToken cancellationToken)
+    {
+        var phase = _poLifecycle?.GetPhase(millNo, poNumber) ?? PoLifecyclePhase.Running;
+        string? runningPo = null;
+        var waiting = false;
+        if (_wipRunningPo is not null)
+        {
+            waiting = _wipRunningPo.IsWaitingForNewWipAfterPoEnd(millNo);
+            try
+            {
+                runningPo = await _wipRunningPo
+                    .TryGetRunningPoForMillAsync(millNo, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(
+                    ex,
+                    "Could not resolve running PO for mill {Mill} before CSV-advance after terminal fill.",
+                    millNo);
+            }
+        }
+
+        return CsvFillSequenceAdvance.IsEligiblePoForCsvAdvance(phase, poNumber, runningPo, waiting);
     }
 
     public async Task<int> AdvanceQuietShortAsync(

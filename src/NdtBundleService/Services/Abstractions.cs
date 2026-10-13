@@ -65,6 +65,20 @@ public interface INdtBundleRepository
     Task<int> UpdateOutputCsvFilesForBundleAsync(string batchNo, int newPipes, CancellationToken cancellationToken);
     /// <summary>Returns slit details (slitNo -> ndtPipes sum) for the given NDT Batch No from per-slit output CSVs (excludes NDT_Bundle_*.csv summary files).</summary>
     Task<IReadOnlyList<(string SlitNo, int NdtPipes)>> GetSlitsForBatchAsync(string batchNo, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Rich slit traceability for Reconcile UI (rejects, start/finish, short-length fields).
+    /// Default maps <see cref="GetSlitsForBatchAsync"/> with empty extras; SQL/CSV implementations fill them.
+    /// </summary>
+    async Task<IReadOnlyList<ReconcileSlitDetail>> GetSlitDetailsForBatchAsync(
+        string batchNo,
+        CancellationToken cancellationToken)
+    {
+        var slits = await GetSlitsForBatchAsync(batchNo, cancellationToken).ConfigureAwait(false);
+        return slits
+            .Select(s => new ReconcileSlitDetail(s.SlitNo, s.NdtPipes, 0, null, null, null, null))
+            .ToList();
+    }
     /// <summary>Updates the NDT Pipes value for rows matching (batchNo, slitNo) in per-slit output CSVs and overwrites the affected files. Returns the number of files updated.</summary>
     Task<int> UpdateOutputCsvFilesForSlitAsync(string batchNo, string slitNo, int newPipes, CancellationToken cancellationToken);
     /// <summary>Updates the bundle total in the database only (no output CSV updates). No-op if DB not configured.</summary>
@@ -117,6 +131,17 @@ public interface INdtBundleRepository
     /// columns are initialized. Never sets <c>Awaiting_Csv_Recon=1</c>.
     /// </summary>
     Task TrySetPlcCloseMetadataAsync(int engineBatchSequence, int millNo, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// After PLC PO-end Immediate flush: mark incomplete fill parents for the ended PO as terminal
+    /// (<c>CsvShort</c>/<c>CsvComplete</c>/<c>CsvOvershoot</c>) so forming no longer waits on late CSVs.
+    /// Returns rows updated; 0 when SQL disabled or none matched.
+    /// </summary>
+    Task<int> TryReleaseFormingAfterPlcPoEndAsync(
+        string poNumber,
+        int millNo,
+        CancellationToken cancellationToken) =>
+        Task.FromResult(0);
 
     /// <summary>Legacy FIFO API ? always null after fill-to-target cutover.</summary>
     Task<(string BundleNo, int EngineSequence, int PlcTotal)?> TryGetAwaitingPlcReconBatchAsync(
@@ -281,6 +306,9 @@ public interface IPoPlanWipRepository
 
     /// <summary>Returns true when this exact file version (<c>path|w:ticks</c>) was already imported.</summary>
     Task<bool> IsImportSourceFilePresentAsync(string sourceFileKey, CancellationToken cancellationToken);
+
+    /// <summary>Loads all known import <c>Source_File</c> keys once (avoids per-file SQL round-trips on large folders).</summary>
+    Task<HashSet<string>> GetImportedSourceKeysAsync(CancellationToken cancellationToken);
 
     /// <summary>Inserts one row per PO from a PO Accepted CSV import batch.</summary>
     Task<int> InsertImportRowsAsync(
@@ -585,7 +613,13 @@ public interface INdtTagPrinter
 /// <summary>Reprints an NDT bundle tag with the existing "Reprint" ZPL marker and updates print status.</summary>
 public interface IReconcileBundleTagService
 {
-    Task<ReconcileBundleTagPrintResult> ReprintAsync(NdtBundleRecord bundle, CancellationToken cancellationToken);
+    /// <param name="printerTarget">
+    /// Optional reprint destination: <c>wip</c>, <c>fg</c>, <c>pas</c>, or <c>mill</c>/null (default mill printer).
+    /// </param>
+    Task<ReconcileBundleTagPrintResult> ReprintAsync(
+        NdtBundleRecord bundle,
+        CancellationToken cancellationToken,
+        string? printerTarget = null);
 }
 
 public sealed class ReconcileBundleTagPrintResult

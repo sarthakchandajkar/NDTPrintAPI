@@ -97,6 +97,9 @@ public sealed class UploadNdtBundleFileServiceTests : IDisposable
         Assert.True(File.Exists(result.FilePath));
         Assert.EndsWith(".csv", result.FilePath, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(".xlsx", result.FilePath, StringComparison.OrdinalIgnoreCase);
+        Assert.Matches(
+            @"^ndt-\d{6}1607000\.csv$",
+            Path.GetFileName(result.FilePath));
 
         var bytes = await File.ReadAllBytesAsync(result.FilePath);
         Assert.True(bytes.Length >= 3);
@@ -140,10 +143,48 @@ public sealed class UploadNdtBundleFileServiceTests : IDisposable
         Assert.Empty(Directory.GetFiles(Path.Combine(_root, "upload")));
     }
 
+    [Fact]
+    public async Task GenerateForBatchAsync_updates_existing_upload_file_in_place()
+    {
+        WriteProcessCsv("1226100001", po: "1000057001", ndtPcs: 50, ok: 48);
+        var existing = Path.Combine(_root, "upload", "ndt-0710261607000.csv");
+        await File.WriteAllTextAsync(existing, "old\n", Encoding.UTF8);
+
+        var sut = CreateSut(priorUploadPath: existing, priorNumOfPipes: 47);
+        var result = await sut.GenerateForBatchAsync("1226100001", CancellationToken.None);
+
+        Assert.Equal(existing, result.FilePath);
+        Assert.Single(Directory.GetFiles(Path.Combine(_root, "upload"), "ndt-*.csv"));
+        var text = await File.ReadAllTextAsync(result.FilePath, Encoding.UTF8);
+        Assert.Contains("48", text.Split('\n')[1], StringComparison.Ordinal);
+        Assert.DoesNotContain("47", text.Split('\n')[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AllocateUploadFileName_uses_ddMMyy_and_sequence_seed()
+    {
+        var folder = Path.Combine(_root, "upload");
+        var when = new DateTime(2026, 10, 1, 16, 7, 0);
+        var name = UploadNdtBundleFileService.AllocateUploadFileName(folder, when);
+        Assert.Equal("ndt-0110261607000.csv", name);
+    }
+
+    [Fact]
+    public void AllocateUploadFileName_increments_when_seed_exists()
+    {
+        var folder = Path.Combine(_root, "upload");
+        File.WriteAllText(Path.Combine(folder, "ndt-0110261607000.csv"), "x");
+        var when = new DateTime(2026, 10, 1, 16, 7, 0);
+        var name = UploadNdtBundleFileService.AllocateUploadFileName(folder, when);
+        Assert.Equal("ndt-0110261607001.csv", name);
+    }
+
     private UploadNdtBundleFileService CreateSut(
         string contextSlitNo = "2603832_05",
         IReadOnlyList<(string SlitNo, DateTime? SlitFinishTime)>? outputSlits = null,
-        IReadOnlyCollection<string>? claimed = null)
+        IReadOnlyCollection<string>? claimed = null,
+        string? priorUploadPath = null,
+        int priorNumOfPipes = 0)
     {
         var options = Options.Create(new NdtBundleOptions
         {
@@ -153,8 +194,9 @@ public sealed class UploadNdtBundleFileServiceTests : IDisposable
         return new UploadNdtBundleFileService(
             options,
             new StubBundleRepository(contextSlitNo),
-            new StubTraceability(outputSlits, claimed),
+            new StubTraceability(outputSlits, claimed, priorUploadPath, priorNumOfPipes),
             new StubWipLabel(),
+            new StubPoPlanWip(),
             new StubSlitAccepted(),
             new StubFgBundle(),
             NullLogger<UploadNdtBundleFileService>.Instance);
@@ -182,10 +224,37 @@ public sealed class UploadNdtBundleFileServiceTests : IDisposable
             });
     }
 
+    private sealed class StubPoPlanWip : IPoPlanWipRepository
+    {
+        public Task<bool> IsAvailableAsync(CancellationToken cancellationToken) => Task.FromResult(true);
+        public Task<string?> TryGetDataSignatureAsync(CancellationToken cancellationToken) => Task.FromResult<string?>(null);
+        public Task<IReadOnlyDictionary<string, string>> GetLatestPipeSizeByPoAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string>());
+        public Task<PoPlanWipSqlSnapshot> GetLatestEnrichmentAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new PoPlanWipSqlSnapshot());
+        public Task<PoPlanWipRow?> TryGetLatestByPoAsync(string poNumber, CancellationToken cancellationToken) =>
+            Task.FromResult<PoPlanWipRow?>(new PoPlanWipRow
+            {
+                PoNumber = poNumber,
+                PipeGrade = "X52",
+                PipeThickness = "9.53",
+                PipeLength = "12",
+                PipeWeightPerMeter = "20"
+            });
+        public Task<bool> EnsureImportReadyAsync(CancellationToken cancellationToken) => Task.FromResult(true);
+        public Task<bool> IsImportSourceFilePresentAsync(string sourceFileKey, CancellationToken cancellationToken) => Task.FromResult(false);
+        public Task<HashSet<string>> GetImportedSourceKeysAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+        public Task<int> InsertImportRowsAsync(string sourceFileKey, IEnumerable<PoPlanWipRow> rows, CancellationToken cancellationToken) =>
+            Task.FromResult(0);
+    }
+
     private sealed class StubSlitAccepted : ISlitAcceptedRepository
     {
         public Task<bool> EnsureImportReadyAsync(CancellationToken cancellationToken) => Task.FromResult(false);
         public Task<bool> IsImportSourceFilePresentAsync(string sourceFileKey, CancellationToken cancellationToken) => Task.FromResult(false);
+        public Task<HashSet<string>> GetImportedSourceKeysAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new HashSet<string>(StringComparer.OrdinalIgnoreCase));
         public Task<int> InsertImportRowsAsync(string sourceFileKey, IReadOnlyList<SlitAcceptedRow> rows, CancellationToken cancellationToken) => Task.FromResult(0);
         public Task<int> InsertAuditRowsAsync(string sourceFileKey, IReadOnlyList<CsvFolderAuditRow> rows, CancellationToken cancellationToken) => Task.FromResult(0);
         public Task<string?> TryGetLatestSlitWidthAsync(string slitNo, CancellationToken cancellationToken) => Task.FromResult<string?>(null);
@@ -195,6 +264,8 @@ public sealed class UploadNdtBundleFileServiceTests : IDisposable
     {
         public Task<bool> EnsureImportReadyAsync(CancellationToken cancellationToken) => Task.FromResult(false);
         public Task<bool> IsImportSourceFilePresentAsync(string sourceFileKey, CancellationToken cancellationToken) => Task.FromResult(false);
+        public Task<HashSet<string>> GetImportedSourceKeysAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new HashSet<string>(StringComparer.OrdinalIgnoreCase));
         public Task<int> InsertImportRowsAsync(string sourceFileKey, IReadOnlyList<FgBundleRow> rows, CancellationToken cancellationToken) => Task.FromResult(0);
         public Task<int> InsertAuditRowsAsync(string sourceFileKey, IReadOnlyList<CsvFolderAuditRow> rows, CancellationToken cancellationToken) => Task.FromResult(0);
         public Task<string?> TryGetLatestPipeGradeAsync(string poNumber, int? millNo, CancellationToken cancellationToken) => Task.FromResult<string?>(null);
@@ -204,13 +275,19 @@ public sealed class UploadNdtBundleFileServiceTests : IDisposable
     {
         private readonly IReadOnlyList<(string SlitNo, DateTime? SlitFinishTime)> _outputSlits;
         private readonly IReadOnlyCollection<string> _claimed;
+        private readonly string? _priorUploadPath;
+        private readonly int _priorNumOfPipes;
 
         public StubTraceability(
             IReadOnlyList<(string SlitNo, DateTime? SlitFinishTime)>? outputSlits,
-            IReadOnlyCollection<string>? claimed)
+            IReadOnlyCollection<string>? claimed,
+            string? priorUploadPath = null,
+            int priorNumOfPipes = 0)
         {
             _outputSlits = outputSlits ?? Array.Empty<(string, DateTime?)>();
             _claimed = claimed ?? Array.Empty<string>();
+            _priorUploadPath = priorUploadPath;
+            _priorNumOfPipes = priorNumOfPipes;
         }
 
         public Task<IReadOnlyList<(string SlitNo, DateTime? SlitFinishTime)>> GetOutputSlitsByFinishTimeForBatchAsync(
@@ -222,6 +299,20 @@ public sealed class UploadNdtBundleFileServiceTests : IDisposable
             string excludeBundleNo,
             CancellationToken cancellationToken) =>
             Task.FromResult(_claimed);
+
+        public Task<UploadBundleRow?> TryGetLatestUploadBundleRowForBatchAsync(
+            string ndtBatchNo,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<UploadBundleRow?>(
+                string.IsNullOrWhiteSpace(_priorUploadPath)
+                    ? null
+                    : new UploadBundleRow
+                    {
+                        BundleNumber = ndtBatchNo,
+                        SourceFile = _priorUploadPath,
+                        NumOfPipes = _priorNumOfPipes,
+                        SlitNo = "2603832_05"
+                    });
 
         public Task RecordUploadBundleRowsAsync(string generatedFile, IReadOnlyList<UploadBundleRow> rows, CancellationToken cancellationToken) =>
             Task.CompletedTask;

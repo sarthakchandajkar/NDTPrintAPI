@@ -53,6 +53,23 @@ public sealed class PlcSlitEndSlitIdChangeTests
     }
 
     [Fact]
+    public void SlitId_change_uses_peak_NDT_when_PLC_clears_count_before_SlitId_advances()
+    {
+        // Floor pattern for PO 1000062629: NDT climbs, drops to 0 on same SlitId, then SlitId bumps.
+        var sut = CreateCloser();
+        var s7 = new AlwaysHealthyNoOpS7();
+        var handshake = new PlcHandshakeOptions { SlitEndTriggerByte = -1 };
+
+        Assert.False(sut.TryDetectSlitEnd(1, handshake, s7, 1, 3, out _, out _));
+        Assert.False(sut.TryDetectSlitEnd(1, handshake, s7, 2, 3, out _, out _));
+        Assert.False(sut.TryDetectSlitEnd(1, handshake, s7, 3, 3, out _, out _));
+        Assert.False(sut.TryDetectSlitEnd(1, handshake, s7, 0, 3, out _, out _)); // PLC cleared NDT
+
+        Assert.True(sut.TryDetectSlitEnd(1, handshake, s7, 1, 4, out _, out var plcCount));
+        Assert.Equal(3, plcCount);
+    }
+
+    [Fact]
     public void SlitId_change_updates_baseline_for_next_slit()
     {
         var sut = CreateCloser();
@@ -151,12 +168,38 @@ public sealed class PlcSlitEndSlitIdChangeTests
         Assert.Equal(5, runtime.GetSizeCounts("1000060163", 1)["Default"]);
     }
 
+    [Fact]
+    public async Task SlitEnd_without_active_PO_buffers_peak_NDT_then_flushes_to_new_PO()
+    {
+        // PO-change gap: first new-PO slit finishes before WIP confirms running PO.
+        var closed = new List<(int Batch, int Pcs)>();
+        var runtime = new MiniRuntime();
+        await runtime.EnsureInitializedAsync(CancellationToken.None);
+        var active = new MutableActivePo(null);
+        var sut = CreateCloserWithRuntime(closed, runtime, active);
+
+        var mill = new MillConfig { Name = "Mill-1", MillNo = 1 };
+        var s7 = new AlwaysHealthyNoOpS7();
+
+        await sut.TryCloseOnSlitEndAsync(1, mill, s7, 1, 1, CancellationToken.None);
+        await sut.TryCloseOnSlitEndAsync(1, mill, s7, 5, 1, CancellationToken.None);
+        await sut.TryCloseOnSlitEndAsync(1, mill, s7, 0, 2, CancellationToken.None); // slit-end, no PO
+
+        Assert.Equal(0, runtime.GetSizeCounts("1000062632", 1).GetValueOrDefault("Default"));
+
+        var flushed = await sut.FlushPendingPoChangeNdtAsync(1, "1000062632", CancellationToken.None);
+        Assert.Equal(5, flushed);
+        Assert.Equal(5, runtime.GetSizeCounts("1000062632", 1)["Default"]);
+        Assert.Empty(closed);
+    }
+
     private static PlcSlitEndBundleCloser CreateCloser() =>
         CreateCloserWithRuntime(new List<(int, int)>(), new MiniRuntime());
 
     private static PlcSlitEndBundleCloser CreateCloserWithRuntime(
         List<(int Batch, int Pcs)> closed,
-        INdtBundleRuntimeStateStore runtime) =>
+        INdtBundleRuntimeStateStore runtime,
+        IActivePoPerMillService? activePo = null) =>
         new(
             Options.Create(new NdtBundleOptions
             {
@@ -165,7 +208,7 @@ public sealed class PlcSlitEndSlitIdChangeTests
             }),
             new FakePlcCloseEngine(closed, runtime),
             new NoOpOutputWriter(),
-            new FixedActivePo("1000060163"),
+            activePo ?? new FixedActivePo("1000060163"),
             new PipeSizeStub(),
             new FormationStub(10),
             runtime,
@@ -298,6 +341,21 @@ public sealed class PlcSlitEndSlitIdChangeTests
         public FixedActivePo(string po) => _po = po;
         public Task<IReadOnlyDictionary<int, string>> GetLatestPoByMillAsync(CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyDictionary<int, string>>(new Dictionary<int, string> { [1] = _po });
+        public IReadOnlyList<string> GetInputSlitReadFolderPaths() => Array.Empty<string>();
+    }
+
+    private sealed class MutableActivePo : IActivePoPerMillService
+    {
+        private string? _po;
+        public MutableActivePo(string? po) => _po = po;
+        public void Set(string? po) => _po = po;
+        public Task<IReadOnlyDictionary<int, string>> GetLatestPoByMillAsync(CancellationToken cancellationToken)
+        {
+            IReadOnlyDictionary<int, string> map = string.IsNullOrWhiteSpace(_po)
+                ? new Dictionary<int, string>()
+                : new Dictionary<int, string> { [1] = _po };
+            return Task.FromResult(map);
+        }
         public IReadOnlyList<string> GetInputSlitReadFolderPaths() => Array.Empty<string>();
     }
 

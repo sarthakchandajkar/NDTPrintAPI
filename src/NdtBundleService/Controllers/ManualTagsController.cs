@@ -190,11 +190,12 @@ public sealed class ManualTagsController : ControllerBase
                 OperatorStationNumber = request.OperatorStationNumber <= 0 ? 1 : request.OperatorStationNumber
             }, cancellationToken).ConfigureAwait(false);
 
+            var defaultRecordMsg = st == ManualTagStation.Revisual
+                ? "Station recorded; consolidated NDT process CSV and upload bundle CSV generated."
+                : "Station recorded.";
             return Ok(new
             {
-                Message = st == ManualTagStation.Revisual
-                    ? "Station recorded; consolidated NDT process CSV and upload bundle CSV generated."
-                    : "Station recorded.",
+                Message = string.IsNullOrWhiteSpace(result.Message) ? defaultRecordMsg : result.Message,
                 Station = station,
                 result.NdtBatchNo,
                 result.IncomingPcs,
@@ -204,7 +205,8 @@ public sealed class ManualTagsController : ControllerBase
                 result.Printed,
                 result.PrintError,
                 result.CsvPath,
-                result.UploadFilePath
+                result.UploadFilePath,
+                result.ProcessFileAlreadySentToSap
             });
         }
         catch (InvalidOperationException ex)
@@ -246,11 +248,12 @@ public sealed class ManualTagsController : ControllerBase
                 OperatorStationNumber = request.OperatorStationNumber <= 0 ? 1 : request.OperatorStationNumber
             }, cancellationToken).ConfigureAwait(false);
 
+            var defaultReconcileMsg = st == ManualTagStation.Revisual
+                ? "Station reconciled; NDT process CSV and MES upload CSV updated in place when still in Bundle."
+                : "Station reconciled. Downstream steps may need to be re-entered if the flow was reset.";
             return Ok(new
             {
-                Message = st == ManualTagStation.Revisual
-                    ? "Station reconciled; consolidated NDT process CSV and upload bundle CSV replaced."
-                    : "Station reconciled. Downstream steps may need to be re-entered if the flow was reset.",
+                Message = string.IsNullOrWhiteSpace(result.Message) ? defaultReconcileMsg : result.Message,
                 Station = station,
                 result.NdtBatchNo,
                 result.IncomingPcs,
@@ -260,7 +263,8 @@ public sealed class ManualTagsController : ControllerBase
                 result.Printed,
                 result.PrintError,
                 result.CsvPath,
-                result.UploadFilePath
+                result.UploadFilePath,
+                result.ProcessFileAlreadySentToSap
             });
         }
         catch (InvalidOperationException ex)

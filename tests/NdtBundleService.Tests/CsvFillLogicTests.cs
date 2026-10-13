@@ -52,6 +52,24 @@ public sealed class CsvFillLogicTests
     }
 
     [Fact]
+    public void Unformed_TargetZero_FirstSlitIsFilling_NotOvershoot()
+    {
+        // Forming / CsvAdvance row with Target_Ndt_Pcs=0 must not treat the first CSV as overshoot.
+        var r = CsvFillLogic.ComputeAfterStamp("1226100044", targetNdtPcs: 0, csvFilledBefore: 0, fileNdtPipes: 2, 20);
+        Assert.Equal(2, r.CsvFilledAfter);
+        Assert.Equal(CsvFillState.CsvFilling, r.FillState);
+        Assert.False(r.CountDiscrepancy);
+    }
+
+    [Fact]
+    public void Unformed_TargetZero_EmptyStaysPlcClosed()
+    {
+        var (state, discrepancy) = CsvFillLogic.ResolveFillState(targetNdtPcs: 0, csvFilled: 0);
+        Assert.Equal(CsvFillState.PlcClosed, state);
+        Assert.False(discrepancy);
+    }
+
+    [Fact]
     public void CountRevision_UsesDelta_NotFullAdd()
     {
         // Was 56 stamped, corrected to 46 → delta -10 (not +46).

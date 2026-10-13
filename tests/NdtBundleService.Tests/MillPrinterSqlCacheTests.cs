@@ -27,13 +27,16 @@ public sealed class MillPrinterSqlCacheTests
 
         await shared.SaveAllAsync([new MillPrinterEndpoint(1, "10.0.0.9", 9100)], CancellationToken.None);
         Assert.Equal("10.0.0.9", shared.ResolveForMill(1).Address);
+        var loadsAfterSharedResolve = backing.LoadCalls;
+        Assert.True(loadsAfterSharedResolve >= 2);
 
+        // Mill instance still serves its cached value until TTL expires.
         Assert.Equal("192.168.0.125", mill.ResolveForMill(1).Address);
-        Assert.Equal(1, backing.LoadCalls);
+        Assert.Equal(loadsAfterSharedResolve, backing.LoadCalls);
 
         now = now.Add(MillPrinterSettingsService.CacheTtl).AddMilliseconds(1);
         Assert.Equal("10.0.0.9", mill.ResolveForMill(1).Address);
-        Assert.True(backing.LoadCalls >= 2);
+        Assert.True(backing.LoadCalls > loadsAfterSharedResolve);
     }
 
     [Fact]
@@ -94,10 +97,40 @@ public sealed class MillPrinterSqlCacheTests
     [InlineData("VISUAL_REVISUAL")]
     [InlineData("MILL_5")]
     [InlineData("MILL_")]
+    [InlineData("MILL_1_WIP")]
+    [InlineData("MILL_1_FG")]
+    [InlineData("PAS_ROOM")]
     [InlineData("")]
     public void Printer_key_rejects_non_mill_keys(string key)
     {
         Assert.False(SqlPrinterTable.TryParseMillKey(key, out _));
+    }
+
+    [Fact]
+    public void ResolveReprintTarget_uses_wip_fg_and_pas_endpoints()
+    {
+        var backing = new InMemoryMillPrinterBackingStore();
+        backing.Save([new MillPrinterEndpoint(1, "192.168.0.54", 9100)]);
+        backing.SaveNamed(
+        [
+            ("MILL_1_WIP", "Mill", "192.168.0.54", 9100),
+            ("MILL_1_FG", "Mill", "192.168.0.55", 9100),
+            ("PAS_ROOM", "PasRoom", "192.168.0.124", 9100)
+        ]);
+
+        var svc = NewService(TestMillOwnership.Shared(), backing, () => DateTime.UtcNow);
+
+        var wip = svc.ResolveReprintTarget(1, "wip");
+        Assert.True(wip.Configured);
+        Assert.Equal("192.168.0.54", wip.Address);
+
+        var fg = svc.ResolveReprintTarget(1, "fg");
+        Assert.True(fg.Configured);
+        Assert.Equal("192.168.0.55", fg.Address);
+
+        var pas = svc.ResolveReprintTarget(2, "pas");
+        Assert.True(pas.Configured);
+        Assert.Equal("192.168.0.124", pas.Address);
     }
 
     private static MillPrinterSettingsService NewService(

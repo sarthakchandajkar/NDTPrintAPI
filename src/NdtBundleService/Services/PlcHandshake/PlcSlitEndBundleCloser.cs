@@ -10,7 +10,9 @@ namespace NdtBundleService.Services.PlcHandshake;
 /// Detects slit-end and accumulates live PLC NDT into the toward-next-bundle remainder (sizeCounts / MW56).
 /// Closes and prints when the accumulated remainder meets the formation-chart threshold.
 /// Detection order: optional DB/merker rising edge (<c>L1_ButtEnd</c> / M-bit), else Slit ID change (DB251.DBW10).
+/// For Slit-ID mode, accumulates the peak NDT seen on the finished slit (PLC may clear NDT before Slit ID advances).
 /// When Immediate PO-end deferred a remainder flush (slit in progress), completes that flush after slit-end accumulate.
+/// Slit-ends while waiting for the next running PO (post PO-change) are buffered and flushed when that PO is known.
 /// </summary>
 public interface IPlcSlitEndBundleCloser
 {
@@ -23,6 +25,15 @@ public interface IPlcSlitEndBundleCloser
         int liveNdtCount,
         int liveSlitId,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Applies NDT captured during the post-PO-end / pre-WIP gap into the new running PO remainder (MW56 source).
+    /// </summary>
+    /// <returns>Pending pcs flushed (0 if none).</returns>
+    Task<int> FlushPendingPoChangeNdtAsync(int millNo, string poNumber, CancellationToken cancellationToken);
+
+    /// <summary>Drops buffered gap NDT (e.g. at PO end before a new wait window).</summary>
+    void ClearPendingPoChangeNdt(int millNo);
 }
 
 public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
@@ -40,11 +51,15 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
     private readonly IPoEndWorkflowService _poEndWorkflow;
     private readonly ILogger<PlcSlitEndBundleCloser> _logger;
 
-    private readonly Dictionary<int, int> _prevNdtByMill = new();
+    /// <summary>Peak DB251 NDT seen while on the current Slit ID (survives PLC clearing NDT before Slit ID advances).</summary>
+    private readonly Dictionary<int, int> _peakNdtThisSlitByMill = new();
     private readonly Dictionary<int, int> _prevSlitIdByMill = new();
     private readonly HashSet<int> _slitIdPrimedByMill = new();
     private readonly Dictionary<int, bool> _prevSlitEndBitByMill = new();
     private readonly HashSet<int> _closedThisSlitByMill = new();
+    /// <summary>NDT from slit-ends while no running PO was known (waiting for WIP after PO change).</summary>
+    private readonly Dictionary<int, int> _pendingPoChangeNdtByMill = new();
+    private readonly object _pendingLock = new();
 
     public PlcSlitEndBundleCloser(
         IOptions<NdtBundleOptions> options,
@@ -121,6 +136,9 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
             if (poNorm is not null)
             {
                 await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
+                await ApplyPendingPoChangeNdtUnlockedAsync(
+                        millNo, mill, poNorm, sizeKey, threshold, pipeSize, cancellationToken)
+                    .ConfigureAwait(false);
                 var leftoverCounts = _runtimeState.GetSizeCounts(poNorm, millNo);
                 leftoverCounts.TryGetValue(sizeKey, out var leftover);
                 if (leftover >= threshold && leftover > 0)
@@ -150,9 +168,38 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
             if (poNorm is null && _poEndDeferral.TryGet(millNo, out var pendingPo))
                 poNorm = pendingPo.PoNumber;
 
+            var slitPcs = Math.Max(0, slitNdtPcs);
+
             if (poNorm is null)
             {
-                _logger.LogDebug("{MillName}: slit-end detected ({Reason}) but no active PO; skip PLC accumulate/close.", mill.Name, edgeReason);
+                // PO-change gap: mill already producing next PO slits, but WIP/running PO not known yet.
+                // Buffer peak NDT so it is applied when the new PO is confirmed (do not drop for hooter).
+                if (slitPcs > 0)
+                {
+                    int buffered;
+                    lock (_pendingLock)
+                    {
+                        _pendingPoChangeNdtByMill.TryGetValue(millNo, out var prev);
+                        buffered = prev + slitPcs;
+                        _pendingPoChangeNdtByMill[millNo] = buffered;
+                    }
+
+                    _logger.LogInformation(
+                        "{MillName}: slit-end ({Reason}) buffered {SlitPcs} NDT while waiting for next running PO (pending total {Pending}).",
+                        mill.Name,
+                        edgeReason,
+                        slitPcs,
+                        buffered);
+                }
+                else
+                {
+                    _logger.LogDebug(
+                        "{MillName}: slit-end detected ({Reason}) but no active PO and 0 NDT; nothing to buffer.",
+                        mill.Name,
+                        edgeReason);
+                }
+
+                _closedThisSlitByMill.Add(millNo);
                 return;
             }
 
@@ -176,9 +223,19 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
 
             await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
 
+            // Apply any gap buffer first (e.g. first new-PO slit finished before WIP arrived).
+            await ApplyPendingPoChangeNdtUnlockedAsync(
+                    millNo,
+                    mill,
+                    poNorm,
+                    sizeKey,
+                    threshold,
+                    pipeSize,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
             var sizeCounts = _runtimeState.GetSizeCounts(poNorm, millNo);
             sizeCounts.TryGetValue(sizeKey, out var prevAccumulated);
-            var slitPcs = Math.Max(0, slitNdtPcs);
             _runtimeState.IncrementSizeCount(poNorm, millNo, sizeKey, slitPcs);
             await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
             var accumulated = prevAccumulated + slitPcs;
@@ -227,6 +284,113 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
                     cancellationToken)
                 .ConfigureAwait(false);
         }
+    }
+
+    public async Task<int> FlushPendingPoChangeNdtAsync(
+        int millNo,
+        string poNumber,
+        CancellationToken cancellationToken)
+    {
+        var poNorm = InputSlitCsvParsing.NormalizePo(poNumber);
+        if (string.IsNullOrWhiteSpace(poNorm) || millNo is < 1 or > 4)
+            return 0;
+
+        var mill = (_options.Value.PlcHandshake?.Mills ?? new List<MillConfig>())
+                       .FirstOrDefault(m => m.MillNo == millNo)
+                   ?? new MillConfig { Name = $"Mill-{millNo}", MillNo = millNo };
+
+        string? pipeSize = null;
+        try
+        {
+            pipeSize = await _pipeSizeProvider.TryGetPipeSizeForPoAsync(poNorm, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            /* default threshold */
+        }
+
+        var formation = await _formationChart.GetFormationChartAsync(cancellationToken).ConfigureAwait(false);
+        var threshold = FormationChartLookup.ResolveThreshold(formation, pipeSize);
+        var sizeKey = FormationChartLookup.NormalizePipeSizeKey(pipeSize);
+        if (string.IsNullOrEmpty(sizeKey))
+            sizeKey = "Default";
+
+        using (await _millLock.AcquireAsync(millNo, cancellationToken).ConfigureAwait(false))
+        {
+            await _runtimeState.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
+            var flushed = await ApplyPendingPoChangeNdtUnlockedAsync(
+                    millNo, mill, poNorm, sizeKey, threshold, pipeSize, cancellationToken)
+                .ConfigureAwait(false);
+            if (flushed <= 0)
+                return 0;
+
+            var counts = _runtimeState.GetSizeCounts(poNorm, millNo);
+            counts.TryGetValue(sizeKey, out var accumulated);
+            if (accumulated >= threshold && accumulated > 0)
+            {
+                await CloseAccumulatedAsync(
+                        millNo,
+                        mill,
+                        poNorm,
+                        pipeSize,
+                        accumulated,
+                        "flush pending PO-change slit NDT",
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            return flushed;
+        }
+    }
+
+    public void ClearPendingPoChangeNdt(int millNo)
+    {
+        lock (_pendingLock)
+        {
+            if (_pendingPoChangeNdtByMill.Remove(millNo, out var dropped) && dropped > 0)
+            {
+                _logger.LogInformation(
+                    "Cleared {Pcs} buffered PO-change slit NDT for Mill {Mill} (PO end).",
+                    dropped,
+                    millNo);
+            }
+        }
+    }
+
+    /// <summary>Caller must hold the mill lock and have initialized runtime state.</summary>
+    private async Task<int> ApplyPendingPoChangeNdtUnlockedAsync(
+        int millNo,
+        MillConfig mill,
+        string poNorm,
+        string sizeKey,
+        int threshold,
+        string? pipeSize,
+        CancellationToken cancellationToken)
+    {
+        int pending;
+        lock (_pendingLock)
+        {
+            if (!_pendingPoChangeNdtByMill.TryGetValue(millNo, out pending) || pending <= 0)
+                return 0;
+            _pendingPoChangeNdtByMill.Remove(millNo);
+        }
+
+        var sizeCounts = _runtimeState.GetSizeCounts(poNorm, millNo);
+        sizeCounts.TryGetValue(sizeKey, out var prev);
+        _runtimeState.IncrementSizeCount(poNorm, millNo, sizeKey, pending);
+        await _runtimeState.SaveAsync(cancellationToken).ConfigureAwait(false);
+        var accumulated = prev + pending;
+
+        _logger.LogInformation(
+            "{MillName}: flushed {Pending} buffered PO-change slit NDT → remainder {Accumulated} for PO {PO} (threshold={Threshold}, was {Prev}).",
+            mill.Name,
+            pending,
+            accumulated,
+            poNorm,
+            threshold,
+            prev);
+
+        return pending;
     }
 
     private async Task CloseAccumulatedAsync(
@@ -311,14 +475,15 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
         }
 
         // Default: Mills PLC Slit ID (DB251.DBW10) changed → previous slit finished.
-        // Use the NDT count from the previous poll (before the PLC resets/rolls to the new slit).
+        // Track peak NDT while on that Slit ID — PLC often clears DB251 NDT to 0 before
+        // advancing Slit ID; using last-polled NDT would silently accumulate 0 and stall MW56/hooter.
         _prevSlitIdByMill.TryGetValue(millNo, out var prevSlitId);
-        _prevNdtByMill.TryGetValue(millNo, out var prevNdt);
+        _peakNdtThisSlitByMill.TryGetValue(millNo, out var peakNdt);
 
         if (!_slitIdPrimedByMill.Contains(millNo))
         {
             _prevSlitIdByMill[millNo] = liveSlitId;
-            _prevNdtByMill[millNo] = liveNdtCount;
+            _peakNdtThisSlitByMill[millNo] = Math.Max(0, liveNdtCount);
             _slitIdPrimedByMill.Add(millNo);
             return false;
         }
@@ -327,13 +492,14 @@ public sealed class PlcSlitEndBundleCloser : IPlcSlitEndBundleCloser
         {
             _closedThisSlitByMill.Remove(millNo);
             reason = $"Slit ID change ({prevSlitId}→{liveSlitId})";
-            plcCountForClose = prevNdt;
+            plcCountForClose = Math.Max(0, peakNdt);
             _prevSlitIdByMill[millNo] = liveSlitId;
-            _prevNdtByMill[millNo] = liveNdtCount;
+            _peakNdtThisSlitByMill[millNo] = Math.Max(0, liveNdtCount);
             return true;
         }
 
-        _prevNdtByMill[millNo] = liveNdtCount;
+        if (liveNdtCount > peakNdt)
+            _peakNdtThisSlitByMill[millNo] = liveNdtCount;
         return false;
     }
 }

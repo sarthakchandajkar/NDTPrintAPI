@@ -207,6 +207,18 @@ public sealed class MillSequenceServiceTests
             CancellationToken cancellationToken) =>
             Task.FromResult<(int Sequence, string Formatted)?>(null);
 
+        public Task<int> TryVoidEmptyOrphanCsvAdvanceStampsExceptPoAsync(
+            int millNo,
+            string keepPoNumber,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(0);
+
+        public Task<string?> TryPeekClaimableOpenFillBundleNoAsync(
+            string poNumber,
+            int millNo,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<string?>(null);
+
         public Task EnsureScanDoesNotExceedTableAsync(int millNo, CancellationToken cancellationToken)
         {
             GuardedMills.Add(millNo);

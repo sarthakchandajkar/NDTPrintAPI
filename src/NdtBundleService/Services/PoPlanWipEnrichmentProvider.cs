@@ -80,12 +80,8 @@ public sealed class PoPlanWipEnrichmentProvider : IPoPlanWipEnrichmentProvider
             var sqlSignature = await _poPlanWipRepository.TryGetDataSignatureAsync(cancellationToken).ConfigureAwait(false);
             if (!string.IsNullOrWhiteSpace(sqlSignature))
             {
-                if (PoPlanWipEnrichmentMerge.IsPoPlanFolderReachable(_options))
-                {
-                    var files = PoPlanWipCsvMerger.ResolveEligiblePoPlanFiles(_options);
-                    return sqlSignature + "|folder:" + PoPlanWipCsvMerger.BuildPoPlanFilesSignature(files);
-                }
-
+                // PreferSqlForPoPlanWip: do not fingerprint the UNC PO Accepted folder here.
+                // Folder enumeration/merge blocked Shared dashboard APIs for minutes after restart.
                 return sqlSignature;
             }
         }
@@ -93,7 +89,10 @@ public sealed class PoPlanWipEnrichmentProvider : IPoPlanWipEnrichmentProvider
         var planFolder = (_options.PoPlanFolder ?? string.Empty).Trim();
         if (!string.IsNullOrWhiteSpace(planFolder) && Directory.Exists(planFolder))
         {
-            var files = PoPlanWipCsvMerger.ResolveEligiblePoPlanFiles(_options);
+            var files = await Task.Run(
+                    () => PoPlanWipCsvMerger.ResolveEligiblePoPlanFiles(_options),
+                    cancellationToken)
+                .ConfigureAwait(false);
             return "folder:" + PoPlanWipCsvMerger.BuildPoPlanFilesSignature(files);
         }
 
@@ -162,14 +161,18 @@ public sealed class PoPlanWipEnrichmentProvider : IPoPlanWipEnrichmentProvider
     {
         var sqlSnapshot = await _poPlanWipRepository.GetLatestEnrichmentAsync(cancellationToken).ConfigureAwait(false);
 
+        // PreferSqlForPoPlanWip means dashboard enrichment is SQL-first. Folder import (background)
+        // keeps dbo.PO_Plan_WIP fresh — do not re-scan PO Accepted CSVs on every cache build.
+        if (sqlSnapshot.ByPo.Count > 0)
+        {
+            return new PoPlanWipEnrichmentSnapshot(
+                sqlSnapshot.ByMill,
+                sqlSnapshot.ByPo,
+                sqlSnapshot.SourceDescription);
+        }
+
         if (!PoPlanWipEnrichmentMerge.IsPoPlanFolderReachable(_options))
         {
-            if (sqlSnapshot.ByPo.Count > 0)
-                return new PoPlanWipEnrichmentSnapshot(
-                    sqlSnapshot.ByMill,
-                    sqlSnapshot.ByPo,
-                    $"{sqlSnapshot.SourceDescription} (PO Accepted folder not reachable; SQL only)");
-
             _logger.LogWarning(
                 "PO Accepted folder is not reachable and dbo.PO_Plan_WIP has no rows; dashboard WIP columns will be empty.");
             return new PoPlanWipEnrichmentSnapshot(
@@ -178,8 +181,10 @@ public sealed class PoPlanWipEnrichmentProvider : IPoPlanWipEnrichmentProvider
                 $"{_options.PoPlanFolder} (not reachable from service account; PO_Plan_WIP empty)");
         }
 
+        _logger.LogInformation(
+            "dbo.PO_Plan_WIP is empty; falling back to PO Accepted folder enrichment for dashboard.");
         var csvSnapshot = await BuildFolderEnrichmentSnapshotAsync(cancellationToken).ConfigureAwait(false);
-        if (sqlSnapshot.ByPo.Count == 0 && csvSnapshot.ByPo.Count == 0)
+        if (csvSnapshot.ByPo.Count == 0)
         {
             return new PoPlanWipEnrichmentSnapshot(
                 sqlSnapshot.ByMill,
@@ -187,34 +192,7 @@ public sealed class PoPlanWipEnrichmentProvider : IPoPlanWipEnrichmentProvider
                 $"{sqlSnapshot.SourceDescription}; {_options.PoPlanFolder} (no SQL rows and no eligible PO Accepted CSV files)");
         }
 
-        if (sqlSnapshot.ByPo.Count == 0)
-        {
-            _logger.LogInformation(
-                "dbo.PO_Plan_WIP is empty; using PO Accepted folder enrichment ({PoCount} PO(s)).",
-                csvSnapshot.ByPo.Count);
-            return csvSnapshot;
-        }
-
-        if (csvSnapshot.ByPo.Count == 0)
-        {
-            return new PoPlanWipEnrichmentSnapshot(
-                sqlSnapshot.ByMill,
-                sqlSnapshot.ByPo,
-                sqlSnapshot.SourceDescription);
-        }
-
-        var merged = PoPlanWipEnrichmentMerge.MergeSnapshots(
-            sqlSnapshot,
-            csvSnapshot,
-            $"{sqlSnapshot.SourceDescription} + PO Accepted ({csvSnapshot.ByPo.Count} PO(s) from CSV, gaps filled from folder)");
-
-        _logger.LogInformation(
-            "Merged PO plan enrichment: {PoCount} PO(s) after SQL ({SqlCount}) + PO Accepted CSV ({CsvCount}).",
-            merged.ByPo.Count,
-            sqlSnapshot.ByPo.Count,
-            csvSnapshot.ByPo.Count);
-
-        return merged;
+        return csvSnapshot;
     }
 
     private async Task<PoPlanWipEnrichmentSnapshot> BuildFolderEnrichmentSnapshotAsync(CancellationToken cancellationToken)

@@ -43,6 +43,23 @@ public sealed class BundleAccumulationSqlAndOwnershipTests
     }
 
     [Fact]
+    public void Plc_close_claims_any_open_fill_parent_not_only_CsvAdvance()
+    {
+        var src = File.ReadAllText(Path.Combine(FindRepoRoot(), "src", "NdtBundleService", "Services", "MillSequenceService.cs"));
+        Assert.Contains("TryClaimOpenFillParentInTxAsync", src, StringComparison.Ordinal);
+        Assert.Contains("EnsureSequenceAtLeastInTxAsync", src, StringComparison.Ordinal);
+        Assert.Contains("Csv_Fill_State IN (N'PlcClosed', N'CsvFilling')", src, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN Close_Source = N'CsvAdvance' THEN 0 ELSE 1 END", src, StringComparison.Ordinal);
+        // Claim SQL must not require Close_Source=CsvAdvance only (2026-10-01 Mill-1 forming-seed collision).
+        var claimMethod = src.IndexOf("TryClaimOpenFillParentInTxAsync", StringComparison.Ordinal);
+        Assert.True(claimMethod >= 0);
+        var claimSqlEnd = src.IndexOf("ApplyClaimUpdateInTxAsync", claimMethod, StringComparison.Ordinal);
+        Assert.True(claimSqlEnd > claimMethod);
+        var claimSql = src[claimMethod..claimSqlEnd];
+        Assert.DoesNotContain("AND Close_Source = N'CsvAdvance'", claimSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Mill_1_cannot_read_or_write_mill_2_accumulation()
     {
         var store = CreateStore(TestMillOwnership.Mill(1));

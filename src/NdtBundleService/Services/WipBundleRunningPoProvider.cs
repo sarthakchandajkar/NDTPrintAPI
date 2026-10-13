@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Services.FileBasedPoChange;
+using NdtBundleService.Services.LinkedPo;
 using NdtBundleService.Services.PoLifecycle;
 
 namespace NdtBundleService.Services;
@@ -35,6 +36,7 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
 
     private readonly IOptions<NdtBundleOptions> _options;
     private readonly FileBasedPoChangeQueue? _fileBasedPoChangeQueue;
+    private readonly LinkedPoCutoverQueue? _linkedPoCutoverQueue;
     private readonly IWipConfirmedRunningPoNotifier _wipConfirmedNotifier;
     private readonly IMillOwnership _millOwnership;
     private readonly ILogger<WipBundleRunningPoProvider> _logger;
@@ -55,15 +57,39 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
         ILogger<WipBundleRunningPoProvider> logger,
         IWipConfirmedRunningPoNotifier wipConfirmedNotifier,
         IMillOwnership millOwnership,
-        FileBasedPoChangeQueue? fileBasedPoChangeQueue = null)
+        FileBasedPoChangeQueue? fileBasedPoChangeQueue = null,
+        LinkedPoCutoverQueue? linkedPoCutoverQueue = null)
     {
         _options = options;
         _logger = logger;
         _wipConfirmedNotifier = wipConfirmedNotifier;
         _millOwnership = millOwnership;
         _fileBasedPoChangeQueue = fileBasedPoChangeQueue;
+        _linkedPoCutoverQueue = linkedPoCutoverQueue;
 
-        TryStartWatchers();
+        // Shared owns no mills — skip seed/watchers/rescans of Bundle Accepted (10k–60k files).
+        // Dashboard Running_Po comes from Mill_Instance_Status, not local WIP folder state.
+        if (_millOwnership.OwnedMills.Count == 0)
+        {
+            _logger.LogInformation(
+                "WIP bundle running-PO watchers skipped (no owned mills on this instance).");
+            return;
+        }
+
+        // Seed + watchers off the DI/startup thread. Scanning Bundle Accepted (tens of thousands of
+        // WIP_*.csv) synchronously blocked mill host StartAsync / Kestrel (:5001–:5004) for minutes.
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                TryStartWatchers();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Background WIP bundle watcher startup failed.");
+            }
+        });
+
         // UNC FileSystemWatcher is unreliable — keep a slow background rescan off the publish path.
         _periodicRescanTimer = new Timer(
             _ =>
@@ -78,8 +104,8 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
                 }
             },
             null,
-            dueTime: TimeSpan.FromSeconds(15),
-            period: TimeSpan.FromSeconds(15));
+            dueTime: TimeSpan.FromSeconds(30),
+            period: TimeSpan.FromSeconds(30));
     }
 
     private bool IsFileBasedPoEndForMill(int millNo) =>
@@ -753,13 +779,50 @@ public sealed class WipBundleRunningPoProvider : IWipBundleRunningPoProvider, ID
             !InputSlitCsvParsing.PoEquals(st.RunningPo, normalizedNew) &&
             poEndSource is MillPoEndSource.Plc or MillPoEndSource.TcpOpen)
         {
-            _logger.LogWarning(
-                "Mill {Mill}: WIP bundle PO change {OldPo} → {NewPo} from {File} ignored for PO end — PoEndSource={Source} (expected File).",
-                millNo,
-                st.RunningPo,
-                normalizedNew,
-                wipFileName,
-                MillPoEndSourceResolver.ToConfigValue(poEndSource));
+            var endedPo = st.RunningPo!;
+            if (_options.Value.EnableLinkedPoCutover &&
+                _linkedPoCutoverQueue is not null &&
+                _millOwnership.Owns(millNo))
+            {
+                var enqueued = _linkedPoCutoverQueue.TryEnqueue(new LinkedPoCutoverRequest
+                {
+                    MillNo = millNo,
+                    EndedPo = endedPo,
+                    NewPo = normalizedNew,
+                    WipStampUtc = wipStampUtc,
+                    WipFileName = wipFileName,
+                    Trigger = "WipPoChange"
+                });
+                if (enqueued)
+                {
+                    _logger.LogInformation(
+                        "Mill {Mill}: WIP bundle PO change {OldPo} → {NewPo} from {File}; linked-PO cutover probe queued (no PLC trigger required if dual slit evidence).",
+                        millNo,
+                        endedPo,
+                        normalizedNew,
+                        wipFileName);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Mill {Mill}: WIP bundle PO change {OldPo} → {NewPo} from {File} — linked-PO cutover not queued (mill already in-flight); PoEndSource={Source}.",
+                        millNo,
+                        endedPo,
+                        normalizedNew,
+                        wipFileName,
+                        MillPoEndSourceResolver.ToConfigValue(poEndSource));
+                }
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Mill {Mill}: WIP bundle PO change {OldPo} → {NewPo} from {File} ignored for PO end — PoEndSource={Source} (expected File).",
+                    millNo,
+                    endedPo,
+                    normalizedNew,
+                    wipFileName,
+                    MillPoEndSourceResolver.ToConfigValue(poEndSource));
+            }
         }
 
         st.RunningPo = normalizedNew;

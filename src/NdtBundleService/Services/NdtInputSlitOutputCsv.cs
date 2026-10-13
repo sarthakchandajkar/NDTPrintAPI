@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using NdtBundleService.Models;
+using NdtBundleService.Services.LinkedPo;
 
 namespace NdtBundleService.Services;
 
@@ -11,7 +12,7 @@ namespace NdtBundleService.Services;
 public static class NdtInputSlitOutputCsv
 {
     public const string Header =
-        "PO Number,Slit No,NDT Pipes,Rejected P,Slit Start Time,Slit Finish Time,Mill No,NDT Short Length Pipe,Rejected Short Length Pipe,NDT Batch No";
+        "PO Number,Slit No,NDT Pipes,Rejected Pipes,Slit Start Time,Slit Finish Time,Mill No,NDT Short Length Pipe,Rejected Short Length Pipe,NDT Batch No";
 
     public const string SapSlitDateTimeFormat = "dd.MM.yyyy HH:mm:ss";
 
@@ -27,7 +28,8 @@ public static class NdtInputSlitOutputCsv
     public static string FormatDataLine(InputSlitRecord record, string ndtBatchNo) =>
         string.Join(",",
             CsvEscape(record.PoNumber),
-            CsvEscape(record.SlitNo),
+            // SAP rejects NDT Input Slit files whose Slit No / basename embed linked-PO "_91".
+            CsvEscape(LinkedPoSlitIdentity.ToBaseSlitNo(record.SlitNo)),
             record.NdtPipes.ToString(CultureInfo.InvariantCulture),
             record.RejectedPipes.ToString(CultureInfo.InvariantCulture),
             CsvEscape(FormatSapDateTime(record.SlitStartTime)),

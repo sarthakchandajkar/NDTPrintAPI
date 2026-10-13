@@ -49,6 +49,11 @@ SELECT TOP 1 1
 FROM dbo.PO_Plan_WIP
 WHERE Source_File = @SourceFile;";
 
+    private const string ImportSourceKeysSql = @"
+SELECT DISTINCT Source_File
+FROM dbo.PO_Plan_WIP
+WHERE Source_File IS NOT NULL AND LTRIM(RTRIM(Source_File)) <> '';";
+
     private const string InsertImportRowSql = @"
 INSERT INTO dbo.PO_Plan_WIP
     (PO_Number, Mill_No, Planned_Month, Pipe_Grade, Pipe_Size, Pipe_Thickness, Pipe_Length,
@@ -201,6 +206,27 @@ VALUES
         cmd.Parameters.AddWithValue("@SourceFile", sourceFileKey.Trim());
         var scalar = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
         return scalar is not null and not DBNull;
+    }
+
+    public async Task<HashSet<string>> GetImportedSourceKeysAsync(CancellationToken cancellationToken)
+    {
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!await EnsureImportReadyAsync(cancellationToken).ConfigureAwait(false))
+            return keys;
+
+        await using var conn = SqlTraceabilityConnection.Create(_options);
+        await SqlTraceabilityConnection.OpenAsync(conn, _logger, "PO_Plan_WIP source key load", cancellationToken)
+            .ConfigureAwait(false);
+
+        await using var cmd = new SqlCommand(ImportSourceKeysSql, conn);
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (!reader.IsDBNull(0))
+                keys.Add(reader.GetString(0));
+        }
+
+        return keys;
     }
 
     public async Task<int> InsertImportRowsAsync(

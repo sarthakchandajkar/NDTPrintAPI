@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Models;
+using NdtBundleService.Services.LinkedPo;
 using NdtBundleService.Services.PoLifecycle;
 using NdtBundleService.Services.PlcHandshake.S7;
 
@@ -39,6 +40,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
     private readonly INdtTagPrinter _zplTagPrinter;
     private readonly IS7ConnectionProviderRegistry _s7Registry;
     private readonly IMillOwnership _millOwnership;
+    private readonly LinkedPoCutoverQueue _linkedPoCutoverQueue;
+    private readonly LinkedPoCutoverEvidence _linkedPoEvidence;
     private readonly ILogger<SlitMonitoringWorker> _logger;
 
     // Per input path: last LastWriteTimeUtc we treated as fully handled (seed baseline or successful run).
@@ -74,6 +77,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
         INdtTagPrinter zplTagPrinter,
         IS7ConnectionProviderRegistry s7Registry,
         IMillOwnership millOwnership,
+        LinkedPoCutoverQueue linkedPoCutoverQueue,
+        LinkedPoCutoverEvidence linkedPoEvidence,
         ILogger<SlitMonitoringWorker> logger)
     {
         _optionsMonitor = optionsMonitor;
@@ -96,6 +101,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
         _zplTagPrinter = zplTagPrinter;
         _s7Registry = s7Registry;
         _millOwnership = millOwnership;
+        _linkedPoCutoverQueue = linkedPoCutoverQueue;
+        _linkedPoEvidence = linkedPoEvidence;
         _logger = logger;
     }
 
@@ -417,8 +424,27 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
             try
             {
-                (var headerLine, rows, var ndtColumnIndex, var poColumnIndex) =
+                (var headerLine, rows, var ndtColumnIndex, var poColumnIndex, var slitColumnIndex, var rejectedColumnIndex) =
                     await ReadSlitFileWithRawLinesAsync(fileFull, cancellationToken).ConfigureAwait(false);
+
+                // Blank/missing Rejected P means TM will regenerate the file — do not stamp or write NDT CSV yet.
+                if (HasIncompleteRejectedPipes(rows, o))
+                {
+                    var (delay, shouldLog, step) = _fileRetryTracker.Park(
+                        fileFull,
+                        DateTime.UtcNow,
+                        o.FileRetryBackoffSeconds);
+                    if (shouldLog)
+                    {
+                        _logger.LogWarning(
+                            "Input Slit {File} has blank/missing Rejected P — waiting for TM regeneration (backoff {DelaySeconds}s, step {Step}).",
+                            Path.GetFileName(fileFull),
+                            (int)delay.TotalSeconds,
+                            step);
+                    }
+
+                    continue;
+                }
 
                 var qualifyingForLive = rows
                     .Select(r => r.Record)
@@ -460,7 +486,11 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 }
 
                 // Build output content: same format as input with one extra column "NDT Batch No".
-                var outputLines = new List<string> { headerLine.TrimEnd() + ",NDT Batch No" };
+                // Canonicalize Rejected P → Rejected Pipes on NDT output (match TM Input Slit naming).
+                var outputLines = new List<string>
+                {
+                    InputSlitCsvParsing.NormalizeRejectedPipesHeader(headerLine).TrimEnd() + ",NDT Batch No"
+                };
                 var inputRowsForSql = new List<(InputSlitRecord Record, int SourceRowNumber)>();
                 var outputRowsForSql =
                     new List<(InputSlitRecord Record, string NdtBatchNo, int SourceRowNumber, bool LinkBundleParent)>();
@@ -474,7 +504,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
                 var isBackfill = _backfillCandidatePaths.Contains(fileFull);
                 var backfillCoverage = BackfillCoverageKind.None;
-                var outputFileBaseName = Path.GetFileName(fileFull);
+                // SAP NDT Input Slit basename must match TM Input Slit (no linked-PO "_91" in slit segment).
+                var outputFileBaseName = LinkedPoSlitIdentity.ToSapOutputFileName(fileFull);
                 var fileSapIngestGate = await GetSapIngestGateAsync(outputFileBaseName, cancellationToken)
                     .ConfigureAwait(false);
                 var ownedMillConstant = _millOwnership.SingleOwnedMill is int ownedM
@@ -617,6 +648,13 @@ public sealed class SlitMonitoringWorker : BackgroundService
                             Path.GetFileName(fileFull));
                     }
 
+                    await TryEnqueueLinkedPoCutoverFromSlitAsync(
+                            record,
+                            runningPoFromWip,
+                            Path.GetFileName(fileFull),
+                            cancellationToken)
+                        .ConfigureAwait(false);
+
                     var effectiveNdt = useLiveThisRow && plcNdt.HasValue
                         ? plcNdt.Value
                         : record.NdtPipes;
@@ -624,9 +662,11 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     var effectiveRecord = new InputSlitRecord
                     {
                         PoNumber = effectivePo,
-                        SlitNo = record.SlitNo,
+                        // Keep linked-PO detection on inbound record.SlitNo; SAP-facing rows use base slit.
+                        SlitNo = LinkedPoSlitIdentity.ToBaseSlitNo(record.SlitNo),
                         NdtPipes = effectiveNdt,
                         RejectedPipes = record.RejectedPipes,
+                        HasRejectedPipes = record.HasRejectedPipes,
                         SlitStartTime = record.SlitStartTime,
                         SlitFinishTime = record.SlitFinishTime,
                         MillNo = record.MillNo,
@@ -667,6 +707,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
                             rawConst = InputSlitCsvParsing.ReplaceFieldAtIndex(rawConst, poColumnIndex, effectivePo);
                         }
 
+                        rawConst = StripLinkedPoSuffixFromRawSlit(rawConst, slitColumnIndex, record.SlitNo);
+                        rawConst = EnsureRejectedNumericOnRaw(rawConst, rejectedColumnIndex, effectiveRecord.RejectedPipes);
                         outputLines.Add(rawConst.TrimEnd() + "," + csvBatch);
                         inputRowsForSql.Add((effectiveRecord, sourceRowNumber));
                         outputRowsForSql.Add((bundleRecord, csvBatch, sourceRowNumber, linkBundle));
@@ -847,6 +889,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
                             rawTrace = InputSlitCsvParsing.ReplaceFieldAtIndex(rawTrace, poColumnIndex, effectivePo);
                         }
 
+                        rawTrace = StripLinkedPoSuffixFromRawSlit(rawTrace, slitColumnIndex, record.SlitNo);
+                        rawTrace = EnsureRejectedNumericOnRaw(rawTrace, rejectedColumnIndex, effectiveRecord.RejectedPipes);
                         outputLines.Add(rawTrace.TrimEnd() + "," + (closedPoBatchNo ?? string.Empty));
                         inputRowsForSql.Add((effectiveRecord, sourceRowNumber));
                         if (!string.IsNullOrWhiteSpace(closedPoBatchNo))
@@ -861,11 +905,14 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
                     string ndtBatchNoFormatted;
                     var linkBundleParent = true;
-                    if (omitBatch || bundleRecord.NdtPipes <= 0)
+                    // Hollow FG: leave NDT Batch No blank (no placeholder).
+                    // Zero-NDT rows (Rejected may still be > 0) must get a real FillToTarget batch —
+                    // never the Constant/ZeroNdt "10001" placeholder.
+                    if (omitBatch)
                     {
                         (ndtBatchNoFormatted, linkBundleParent) = MillCsvBatchModeResolver.ResolveNonFillCsvBatch(
                             millBatchMode,
-                            omitBatch,
+                            isHollowFg: true,
                             bundleRecord.NdtPipes);
                     }
                     else
@@ -908,8 +955,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
                             }
                             else
                             {
-                                // Fill-to-target: stamp only. No invented number, no NoOpenBundle hold,
-                                // no file-driven allocate — retry next poll or Manual Input Slit / Reconcile.
+                                // Fill-to-target: stamp only (0 pipes still attaches to the open target).
+                                // No invented number, no NoOpenBundle hold — retry next poll if none yet.
                                 var assign = await _fillAssigner
                                     .AssignAsync(
                                         fileFull,
@@ -918,7 +965,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
                                         pipeSize,
                                         Math.Max(0, bundleRecord.NdtPipes),
                                         holdWhenNoOpenBundle: false,
-                                        cancellationToken)
+                                        cancellationToken,
+                                        seedOpenFillIfMissing: true)
                                     .ConfigureAwait(false);
 
                                 if (!string.IsNullOrWhiteSpace(assign.BatchNo))
@@ -950,6 +998,9 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     {
                         rawOut = InputSlitCsvParsing.ReplaceFieldAtIndex(rawOut, poColumnIndex, effectivePo);
                     }
+
+                    rawOut = StripLinkedPoSuffixFromRawSlit(rawOut, slitColumnIndex, record.SlitNo);
+                    rawOut = EnsureRejectedNumericOnRaw(rawOut, rejectedColumnIndex, effectiveRecord.RejectedPipes);
 
                     if (string.IsNullOrWhiteSpace(ndtBatchNoFormatted) && !omitBatch && linkBundleParent)
                     {
@@ -1044,7 +1095,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 else if (!string.IsNullOrWhiteSpace(outputFolder))
                 {
                     Directory.CreateDirectory(outputFolder);
-                    var outputFileName = Path.GetFileName(fileFull);
+                    var outputFileName = outputFileBaseName;
                     outputPath = Path.Combine(outputFolder, outputFileName);
                     sapIngestGate = fileSapIngestGate;
                     if (sapIngestGate == OutputSlitIngestGate.Accepted)
@@ -1289,12 +1340,42 @@ public sealed class SlitMonitoringWorker : BackgroundService
             SlitNo = r.SlitNo,
             NdtPipes = ndtPipes,
             RejectedPipes = r.RejectedPipes,
+            HasRejectedPipes = r.HasRejectedPipes,
             SlitStartTime = r.SlitStartTime,
             SlitFinishTime = r.SlitFinishTime,
             MillNo = r.MillNo,
             NdtShortLengthPipe = r.NdtShortLengthPipe,
             RejectedShortLengthPipe = r.RejectedShortLengthPipe,
         };
+
+    private bool HasIncompleteRejectedPipes(
+        IReadOnlyList<(string RawLine, InputSlitRecord? Record)> rows,
+        NdtBundleOptions o)
+    {
+        foreach (var row in rows)
+        {
+            var r = row.Record;
+            if (r is null || string.IsNullOrWhiteSpace(r.PoNumber))
+                continue;
+            if (!IsOwnedMillAllowed(o, r.MillNo))
+                continue;
+            if (!r.HasRejectedPipes)
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>Guarantees the Rejected Pipes cell is a numeric digit string (never blank) on NDT output lines.</summary>
+    private static string EnsureRejectedNumericOnRaw(string rawLine, int rejectedColumnIndex, int rejectedPipes)
+    {
+        if (rejectedColumnIndex < 0)
+            return rawLine;
+        return InputSlitCsvParsing.ReplaceFieldAtIndex(
+            rawLine,
+            rejectedColumnIndex,
+            rejectedPipes.ToString(CultureInfo.InvariantCulture));
+    }
 
     private async Task<BackfillBundlingAction> ApplyBackfillTerminalFillGateAsync(
         string fileFull,
@@ -1400,7 +1481,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
         return "12" + yy + millDigit + seq;
     }
 
-    private static async Task<(string HeaderLine, List<(string RawLine, InputSlitRecord? Record)> Rows, int NdtColumnIndex, int PoColumnIndex)> ReadSlitFileWithRawLinesAsync(
+    private static async Task<(string HeaderLine, List<(string RawLine, InputSlitRecord? Record)> Rows, int NdtColumnIndex, int PoColumnIndex, int SlitColumnIndex, int RejectedColumnIndex)> ReadSlitFileWithRawLinesAsync(
         string path,
         CancellationToken cancellationToken)
     {
@@ -1411,7 +1492,7 @@ public sealed class SlitMonitoringWorker : BackgroundService
 
         var headerRaw = await reader.ReadLineAsync();
         if (headerRaw is null)
-            return (string.Empty, rows, -1, -1);
+            return (string.Empty, rows, -1, -1, -1, -1);
 
         var headerLine = InputSlitCsvParsing.StripBom(headerRaw);
         var headers = InputSlitCsvParsing.SplitCsvFields(headerLine);
@@ -1419,7 +1500,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
         var poIndex = InputSlitCsvParsing.HeaderIndex(headers, "PO Number", "PO_No", "PO No");
         var slitIndex = InputSlitCsvParsing.HeaderIndex(headers, "Slit No");
         var ndtIndex = InputSlitCsvParsing.HeaderIndex(headers, "NDT Pipes");
-        var rejectedIndex = InputSlitCsvParsing.HeaderIndex(headers, "Rejected P");
+        // TM Input Slit uses "Rejected Pipes"; Input Slit Accepted often uses "Rejected P".
+        var rejectedIndex = InputSlitCsvParsing.HeaderIndex(headers, "Rejected Pipes", "Rejected P");
         var startIndex = InputSlitCsvParsing.HeaderIndex(headers, "Slit Start Time");
         var finishIndex = InputSlitCsvParsing.HeaderIndex(headers, "Slit Finish Time");
         var millIndex = InputSlitCsvParsing.HeaderIndex(headers, "Mill No", "Mill Number");
@@ -1442,13 +1524,16 @@ public sealed class SlitMonitoringWorker : BackgroundService
             var poNumber = string.IsNullOrWhiteSpace(poRaw) ? string.Empty : InputSlitCsvParsing.NormalizePo(poRaw);
 
             var millParsed = GetMillNo(cols, millIndex);
+            var rejectedRaw = rejectedIndex >= 0 ? GetString(cols, rejectedIndex) : string.Empty;
+            var hasRejected = InputSlitCsvParsing.TryParseRejectedPipes(rejectedRaw, out var rejectedPipes);
 
             var record = new InputSlitRecord
             {
                 PoNumber = poNumber,
                 SlitNo = GetString(cols, slitIndex),
                 NdtPipes = GetIntFlexible(cols, ndtIndex),
-                RejectedPipes = GetIntFlexible(cols, rejectedIndex),
+                RejectedPipes = hasRejected ? rejectedPipes : 0,
+                HasRejectedPipes = hasRejected,
                 SlitStartTime = GetDateTime(cols, startIndex),
                 SlitFinishTime = GetDateTime(cols, finishIndex),
                 MillNo = millParsed,
@@ -1460,7 +1545,20 @@ public sealed class SlitMonitoringWorker : BackgroundService
             rows.Add((line, string.IsNullOrWhiteSpace(record.PoNumber) ? null : record));
         }
 
-        return (headerLine, rows, ndtIndex, poIndex);
+        return (headerLine, rows, ndtIndex, poIndex, slitIndex, rejectedIndex);
+    }
+
+    /// <summary>
+    /// Rewrites the Slit No cell to the SAP base id when the inbound value carried a linked-PO <c>_91</c>.
+    /// </summary>
+    private static string StripLinkedPoSuffixFromRawSlit(string rawLine, int slitColumnIndex, string? inboundSlitNo)
+    {
+        if (slitColumnIndex < 0 || !LinkedPoSlitIdentity.HasLinkedSuffix(inboundSlitNo))
+            return rawLine;
+        return InputSlitCsvParsing.ReplaceFieldAtIndex(
+            rawLine,
+            slitColumnIndex,
+            LinkedPoSlitIdentity.ToBaseSlitNo(inboundSlitNo));
     }
 
     /// <summary>
@@ -1549,11 +1647,9 @@ public sealed class SlitMonitoringWorker : BackgroundService
                 foreach (var row in claim.Rows)
                 {
                     var record = row.Record;
-                    if (record.NdtPipes <= 0)
-                    {
-                        outputRows.Add((record, string.Empty, row.SourceRowNumber, linkBundleParent: false));
-                        continue;
-                    }
+                    // Zero-NDT rows still need a real FillToTarget batch (never blank / 10001).
+                    // Hollow FG is handled earlier on the primary Input Slit path; pending rows
+                    // are already mill-owned FillToTarget claims.
 
                     var sticky = await _traceability
                         .TryGetExistingOutputSlitBatchAsync(
@@ -1583,7 +1679,8 @@ public sealed class SlitMonitoringWorker : BackgroundService
                                 row.PipeSize,
                                 Math.Max(0, record.NdtPipes),
                                 holdWhenNoOpenBundle: false,
-                                cancellationToken)
+                                cancellationToken,
+                                seedOpenFillIfMissing: true)
                             .ConfigureAwait(false);
 
                         if (string.IsNullOrWhiteSpace(assign.BatchNo))
@@ -1606,20 +1703,44 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     continue;
 
                 string? outputPath = null;
+                var sapOutputFileName = LinkedPoSlitIdentity.ToSapOutputFileName(claim.SourceFileName);
+                // Normalize Slit No on SAP-facing rows (pending may still carry inbound _91).
+                var sapOutputRows = outputRows
+                    .Select(r =>
+                    {
+                        var baseSlit = LinkedPoSlitIdentity.ToBaseSlitNo(r.Record.SlitNo);
+                        if (string.Equals(baseSlit, r.Record.SlitNo, StringComparison.Ordinal))
+                            return r;
+                        var normalized = new InputSlitRecord
+                        {
+                            PoNumber = r.Record.PoNumber,
+                            SlitNo = baseSlit,
+                            NdtPipes = r.Record.NdtPipes,
+                            RejectedPipes = r.Record.RejectedPipes,
+                            HasRejectedPipes = r.Record.HasRejectedPipes,
+                            SlitStartTime = r.Record.SlitStartTime,
+                            SlitFinishTime = r.Record.SlitFinishTime,
+                            MillNo = r.Record.MillNo,
+                            NdtShortLengthPipe = r.Record.NdtShortLengthPipe,
+                            RejectedShortLengthPipe = r.Record.RejectedShortLengthPipe,
+                        };
+                        return (Record: normalized, r.NdtBatchNo, r.SourceRowNumber, r.LinkBundleParent);
+                    })
+                    .ToList();
                 if (!string.IsNullOrWhiteSpace(outputFolder))
                 {
                     Directory.CreateDirectory(outputFolder);
-                    outputPath = Path.Combine(outputFolder, claim.SourceFileName);
-                    var gate = await GetSapIngestGateAsync(claim.SourceFileName, cancellationToken)
+                    outputPath = Path.Combine(outputFolder, sapOutputFileName);
+                    var gate = await GetSapIngestGateAsync(sapOutputFileName, cancellationToken)
                         .ConfigureAwait(false);
                     if (gate == OutputSlitIngestGate.None)
                     {
                         var lines = NdtInputSlitOutputCsv.BuildLines(
-                            outputRows.Select(r => (r.Record, r.NdtBatchNo)));
+                            sapOutputRows.Select(r => (r.Record, r.NdtBatchNo)));
                         await File.WriteAllLinesAsync(outputPath, lines, cancellationToken).ConfigureAwait(false);
                         _logger.LogInformation(
                             "Wrote NDT Input Slit CSV from pending claim {File} batch {Batch}: {Path}",
-                            claim.SourceFileName,
+                            sapOutputFileName,
                             lastBatch,
                             outputPath);
                         await SeedSapStatusPendingAsync(outputPath, cancellationToken).ConfigureAwait(false);
@@ -1628,14 +1749,14 @@ public sealed class SlitMonitoringWorker : BackgroundService
                     {
                         _logger.LogWarning(
                             "Pending claim {File}: SAP ingest gate {Gate} — skipping CSV re-emit; still completing SQL.",
-                            claim.SourceFileName,
+                            sapOutputFileName,
                             gate);
                     }
                 }
 
                 var sourceForSql = outputPath
                     ?? claim.SourceFileClaimed
-                    ?? claim.SourceFileName;
+                    ?? sapOutputFileName;
                 var inputRows = claim.Rows
                     .Select(r => (r.Record, r.SourceRowNumber))
                     .ToList();
@@ -1647,16 +1768,16 @@ public sealed class SlitMonitoringWorker : BackgroundService
                         claim.SourceLastWriteTimeUtc)
                     .ConfigureAwait(false);
 
-                var gateForSql = await GetSapIngestGateAsync(claim.SourceFileName, cancellationToken)
+                var gateForSql = await GetSapIngestGateAsync(sapOutputFileName, cancellationToken)
                     .ConfigureAwait(false);
                 if (gateForSql == OutputSlitIngestGate.None)
                 {
                     await _traceability
-                        .RecordOutputSlitRowsAsync(sourceForSql, outputRows, cancellationToken)
+                        .RecordOutputSlitRowsAsync(sourceForSql, sapOutputRows, cancellationToken)
                         .ConfigureAwait(false);
                 }
 
-                foreach (var batchNo in outputRows
+                foreach (var batchNo in sapOutputRows
                              .Where(r => r.LinkBundleParent && !string.IsNullOrWhiteSpace(r.NdtBatchNo))
                              .Select(r => r.NdtBatchNo)
                              .Distinct(StringComparer.OrdinalIgnoreCase))
@@ -1726,6 +1847,70 @@ public sealed class SlitMonitoringWorker : BackgroundService
     /// Seed-on-write: records the freshly written NDT Input Slit output CSV as SAP-status Pending
     /// so a status row exists before SAP pulls the file. Best-effort (repository never throws on SQL).
     /// </summary>
+    private async Task TryEnqueueLinkedPoCutoverFromSlitAsync(
+        InputSlitRecord record,
+        string? runningPoFromWip,
+        string fileName,
+        CancellationToken cancellationToken)
+    {
+        var o = _optionsMonitor.CurrentValue;
+        if (!o.EnableLinkedPoCutover || record.MillNo is < 1 or > 4)
+            return;
+
+        var poEndSource = MillPoEndSourceResolver.ForMill(record.MillNo, o);
+        if (poEndSource is not (MillPoEndSource.Plc or MillPoEndSource.TcpOpen))
+            return;
+
+        if (string.IsNullOrWhiteSpace(record.PoNumber) || string.IsNullOrWhiteSpace(record.SlitNo))
+            return;
+
+        var newPo = InputSlitCsvParsing.NormalizePo(record.PoNumber);
+        if (string.IsNullOrWhiteSpace(newPo))
+            return;
+
+        // Strong signal: inbound slit carries _91, or prior half already stamped under another PO.
+        var evidence = await _linkedPoEvidence
+            .TryFindPriorPoForIncomingSlitAsync(record.MillNo, newPo, record.SlitNo, cancellationToken)
+            .ConfigureAwait(false);
+
+        string? endedPo = evidence?.PriorPo;
+        if (string.IsNullOrWhiteSpace(endedPo) &&
+            LinkedPoSlitIdentity.HasLinkedSuffix(record.SlitNo) &&
+            !string.IsNullOrWhiteSpace(runningPoFromWip) &&
+            !InputSlitCsvParsing.PoEquals(runningPoFromWip, newPo))
+        {
+            endedPo = InputSlitCsvParsing.NormalizePo(runningPoFromWip);
+        }
+
+        if (string.IsNullOrWhiteSpace(endedPo) || InputSlitCsvParsing.PoEquals(endedPo, newPo))
+            return;
+
+        if (_poLifecycle.GetPhase(record.MillNo, endedPo) == PoLifecyclePhase.Closed)
+            return;
+
+        var enqueued = _linkedPoCutoverQueue.TryEnqueue(new LinkedPoCutoverRequest
+        {
+            MillNo = record.MillNo,
+            EndedPo = endedPo,
+            NewPo = newPo,
+            SlitNoHint = record.SlitNo,
+            Trigger = "InputSlit",
+            WipFileName = fileName,
+            WipStampUtc = default
+        });
+
+        if (enqueued)
+        {
+            _logger.LogInformation(
+                "Mill {Mill}: linked-PO cutover probe queued from Input Slit {File} ({OldPo} → {NewPo}, slit {Slit}).",
+                record.MillNo,
+                fileName,
+                endedPo,
+                newPo,
+                record.SlitNo);
+        }
+    }
+
     private async Task SeedSapStatusPendingAsync(string outputPath, CancellationToken cancellationToken)
     {
         if (!_sapStatus.Enabled)

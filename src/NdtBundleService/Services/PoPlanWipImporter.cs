@@ -24,6 +24,8 @@ public sealed class PoPlanWipImportResult
 
 public sealed class PoPlanWipImporter : IPoPlanWipImporter
 {
+    private const int ProgressLogEvery = 200;
+
     private readonly NdtBundleOptions _options;
     private readonly IPoPlanWipRepository _repository;
     private readonly ILogger<PoPlanWipImporter> _logger;
@@ -56,14 +58,34 @@ public sealed class PoPlanWipImporter : IPoPlanWipImporter
             return PoPlanWipImportResult.Unavailable;
         }
 
-        var files = PoPlanWipCsvMerger.ResolveEligiblePoPlanImportFiles(_options);
+        var files = await Task.Run(
+                () => PoPlanWipCsvMerger.ResolveEligiblePoPlanImportFiles(_options),
+                cancellationToken)
+            .ConfigureAwait(false);
+        _logger.LogInformation(
+            "PO_Plan_WIP folder import scanning {Count} eligible file(s) under {Folder}.",
+            files.Count,
+            _options.PoPlanFolder);
+
+        var knownKeys = await _repository.GetImportedSourceKeysAsync(cancellationToken).ConfigureAwait(false);
         var filesImported = 0;
         var filesSkippedUnchanged = 0;
         var rowsInserted = 0;
+        var processed = 0;
 
         foreach (var filePath in files)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            processed++;
+            if (processed == 1 || processed % ProgressLogEvery == 0 || processed == files.Count)
+            {
+                _logger.LogInformation(
+                    "PO_Plan_WIP import progress {Processed}/{Total} (imported {Imported}, skipped {Skipped}).",
+                    processed,
+                    files.Count,
+                    filesImported,
+                    filesSkippedUnchanged);
+            }
 
             long lastWriteTicks;
             try
@@ -77,7 +99,7 @@ public sealed class PoPlanWipImporter : IPoPlanWipImporter
             }
 
             var sourceKey = PoPlanWipImportKeys.Format(filePath, lastWriteTicks);
-            if (await _repository.IsImportSourceFilePresentAsync(sourceKey, cancellationToken).ConfigureAwait(false))
+            if (knownKeys.Contains(sourceKey))
             {
                 filesSkippedUnchanged++;
                 continue;
@@ -110,6 +132,7 @@ public sealed class PoPlanWipImporter : IPoPlanWipImporter
             if (inserted <= 0)
                 continue;
 
+            knownKeys.Add(sourceKey);
             filesImported++;
             rowsInserted += inserted;
             _logger.LogInformation(

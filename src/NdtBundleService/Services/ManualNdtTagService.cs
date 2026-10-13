@@ -103,6 +103,10 @@ public sealed class ManualStationRecordResult
     public bool Printed { get; init; }
     /// <summary>Set when <see cref="Printed"/> is false after a print was requested.</summary>
     public string? PrintError { get; init; }
+    /// <summary>Operator-facing result text (e.g. mail-SAP when process CSV is already Accepted).</summary>
+    public string? Message { get; init; }
+    /// <summary>True when NDT process CSV is under Bundle Accepted — no new Bundle file was written.</summary>
+    public bool ProcessFileAlreadySentToSap { get; init; }
 }
 
 /// <summary>
@@ -215,11 +219,15 @@ public sealed class ManualNdtTagService : IManualNdtTagService
 
         string? csvPath = null;
         string? uploadPath = null;
+        string? operatorMessage = null;
+        var processAlreadySentToSap = false;
         if (request.Station == ManualTagStation.Revisual)
         {
             var export = await CompleteRevisualExportAsync(state, cancellationToken).ConfigureAwait(false);
             csvPath = export.ProcessCsvPath;
             uploadPath = export.UploadFilePath;
+            operatorMessage = export.OperatorMessage;
+            processAlreadySentToSap = export.ProcessFileAlreadySentToSap;
             state.LastNdtProcessCsvPath = csvPath;
             await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
         }
@@ -257,7 +265,9 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             CsvPath = csvPath ?? string.Empty,
             UploadFilePath = uploadPath ?? string.Empty,
             Printed = printed,
-            PrintError = printError
+            PrintError = printError,
+            Message = operatorMessage,
+            ProcessFileAlreadySentToSap = processAlreadySentToSap
         };
     }
 
@@ -304,8 +314,8 @@ public sealed class ManualNdtTagService : IManualNdtTagService
                 state.RevisualInvalidatedByUpstreamReconcile = true;
                 break;
             case ManualTagStation.Revisual:
-                TryDeleteCsv(state.LastNdtProcessCsvPath);
-                state.LastNdtProcessCsvPath = null;
+                // Keep LastNdtProcessCsvPath so CompleteRevisualExport can update the same Bundle file
+                // in place (deleting/regenerating created SAP-facing duplicates and race locks).
                 state.RevisualInvalidatedByUpstreamReconcile = false;
                 break;
         }
@@ -321,15 +331,22 @@ public sealed class ManualNdtTagService : IManualNdtTagService
 
         await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
 
+        // After station counts are persisted, finish CSV/SQL even if the dashboard proxy cancels the HTTP request.
+        var durableCt = CancellationToken.None;
+
         string? csvPath = null;
         string? uploadPath = null;
+        string? operatorMessage = null;
+        var processAlreadySentToSap = false;
         if (request.Station == ManualTagStation.Revisual)
         {
-            var export = await CompleteRevisualExportAsync(state, cancellationToken).ConfigureAwait(false);
+            var export = await CompleteRevisualExportAsync(state, durableCt).ConfigureAwait(false);
             csvPath = export.ProcessCsvPath;
             uploadPath = export.UploadFilePath;
+            operatorMessage = export.OperatorMessage;
+            processAlreadySentToSap = export.ProcessFileAlreadySentToSap;
             state.LastNdtProcessCsvPath = csvPath;
-            await SaveStateAsync(state, cancellationToken).ConfigureAwait(false);
+            await SaveStateAsync(state, durableCt).ConfigureAwait(false);
         }
 
         await _traceability.UpsertManualStationRunAsync(
@@ -343,20 +360,37 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             end: end,
             hydrotestingType: IsHydroStation(request.Station) ? HydrotestingTypeValue(request.Station) : null,
             sourceFile: csvPath ?? string.Empty,
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+            cancellationToken: durableCt).ConfigureAwait(false);
 
         await _reconcileSync.SyncAfterManualStationReconcileAsync(
             request.Station,
             BuildReconcileSnapshot(state),
             csvPath,
-            cancellationToken).ConfigureAwait(false);
+            durableCt).ConfigureAwait(false);
+
+        if (request.Station == ManualTagStation.Revisual &&
+            string.IsNullOrWhiteSpace(uploadPath) &&
+            !processAlreadySentToSap)
+        {
+            throw new InvalidOperationException(
+                $"Revisual reconcile updated NDT process CSV for batch {batch} but the MES PAS upload CSV was not written/updated. " +
+                "Retry shortly, or manually correct NumOfPipes on the existing file under MES PAS NDT\\Bundle.");
+        }
+
+        if (request.Station == ManualTagStation.Revisual &&
+            processAlreadySentToSap &&
+            string.IsNullOrWhiteSpace(uploadPath))
+        {
+            operatorMessage = (operatorMessage ?? string.Empty).Trim() +
+                " MES PAS upload CSV could not be updated — correct NumOfPipes there if that file is still in Bundle.";
+        }
 
         var printed = false;
         string? printError = null;
         if (request.PrintTag)
         {
             (printed, printError) = await TryPrintTagAsync(state.PoNumber, state.MillNo, batch, request.OkPcs, now, request.Station, opStation, isReprint: true, cancellationToken).ConfigureAwait(false);
-            await RecordStationPrintAsync(batch, WorkStationColumnValue(request.Station, opStation), printed, printError, cancellationToken).ConfigureAwait(false);
+            await RecordStationPrintAsync(batch, WorkStationColumnValue(request.Station, opStation), printed, printError, durableCt).ConfigureAwait(false);
         }
 
         return new ManualStationRecordResult
@@ -370,7 +404,9 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             CsvPath = csvPath ?? string.Empty,
             UploadFilePath = uploadPath ?? string.Empty,
             Printed = printed,
-            PrintError = printError
+            PrintError = printError,
+            Message = operatorMessage,
+            ProcessFileAlreadySentToSap = processAlreadySentToSap
         };
     }
 
@@ -548,10 +584,22 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             _ => ""
         };
 
-    /// <summary>Writes NDT process CSV to <see cref="NdtBundleOptions.NdtProcessOutputFolder"/> and persists consolidated SQL + final bundle total.</summary>
-    private async Task<(string ProcessCsvPath, string? UploadFilePath)> CompleteRevisualExportAsync(FlowState state, CancellationToken cancellationToken)
+    private sealed record RevisualExportResult(
+        string ProcessCsvPath,
+        string? UploadFilePath,
+        bool ProcessFileAlreadySentToSap,
+        string? OperatorMessage);
+
+    private sealed record ProcessCsvWriteResult(
+        string Path,
+        bool AlreadySentToSap,
+        string? OperatorMessage);
+
+    /// <summary>Writes NDT process CSV (or skips when already Accepted), persists consolidated SQL, updates MES upload.</summary>
+    private async Task<RevisualExportResult> CompleteRevisualExportAsync(FlowState state, CancellationToken cancellationToken)
     {
-        var csvPath = await WriteConsolidatedNdtProcessCsvAsync(state, cancellationToken).ConfigureAwait(false);
+        var write = await WriteConsolidatedNdtProcessCsvAsync(state, cancellationToken).ConfigureAwait(false);
+        var csvPath = write.Path;
         try
         {
             await RecordConsolidatedTraceabilityAsync(state, csvPath, cancellationToken).ConfigureAwait(false);
@@ -560,7 +608,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         {
             _logger.LogWarning(
                 ex,
-                "NDT process CSV {Path} was written but SQL traceability failed for batch {BatchNo}.",
+                "NDT process CSV {Path} was written/referenced but SQL traceability failed for batch {BatchNo}.",
                 csvPath,
                 state.NdtBatchNo);
         }
@@ -568,7 +616,18 @@ public sealed class ManualNdtTagService : IManualNdtTagService
         string? uploadPath = null;
         try
         {
-            var upload = await _uploadNdtBundle.GenerateForBatchAsync(state.NdtBatchNo, cancellationToken).ConfigureAwait(false);
+            // When process CSV is already Accepted, disk OK is stale — force corrected Revisual OK into MES upload.
+            var upload = write.AlreadySentToSap
+                ? await _uploadNdtBundle
+                    .GenerateForBatchAsync(
+                        state.NdtBatchNo,
+                        cancellationToken,
+                        okPcsOverride: state.Revisual!.OkPcs,
+                        poNumberOverride: state.PoNumber)
+                    .ConfigureAwait(false)
+                : await _uploadNdtBundle
+                    .GenerateForBatchAsync(state.NdtBatchNo, cancellationToken)
+                    .ConfigureAwait(false);
             uploadPath = upload.FilePath;
         }
         catch (Exception ex)
@@ -579,11 +638,19 @@ public sealed class ManualNdtTagService : IManualNdtTagService
                 state.NdtBatchNo);
         }
 
-        return (csvPath, uploadPath);
+        return new RevisualExportResult(
+            csvPath,
+            uploadPath,
+            write.AlreadySentToSap,
+            write.OperatorMessage);
     }
 
-    /// <summary>Single CSV after Revisual with Visual/Hydro/Revisual metrics; PO and batch tokens sanitized for the filename.</summary>
-    private async Task<string> WriteConsolidatedNdtProcessCsvAsync(FlowState state, CancellationToken cancellationToken)
+    /// <summary>
+    /// Single CSV after Revisual with Visual/Hydro/Revisual metrics.
+    /// Updates the existing Bundle file in place when still present.
+    /// When only Bundle Accepted has the file: do not create a new Bundle file; return Accepted path + mail-SAP message (SQL still updated by caller).
+    /// </summary>
+    private async Task<ProcessCsvWriteResult> WriteConsolidatedNdtProcessCsvAsync(FlowState state, CancellationToken cancellationToken)
     {
         var visual = state.Visual ?? throw new InvalidOperationException("Visual station must be recorded before exporting NDT process CSV.");
         var hydro = state.Hydrotesting ?? throw new InvalidOperationException("Hydrotesting station must be recorded before exporting NDT process CSV.");
@@ -591,14 +658,7 @@ public sealed class ManualNdtTagService : IManualNdtTagService
 
         var folder = GetNdtProcessOutputFolder();
         Directory.CreateDirectory(folder);
-
-        var now = DateTime.Now;
-        var datePart = now.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
-        var timePart = now.ToString("HHmmss", CultureInfo.InvariantCulture);
-        var safePo = CsvOutputFileNaming.SanitizeToken(state.PoNumber.Trim());
-        var safeBatch = CsvOutputFileNaming.SanitizeToken(state.NdtBatchNo);
-        var fileName = $"NDT_process_{safePo}_{safeBatch}_{datePart}_{timePart}.csv";
-        var path = Path.Combine(folder, fileName);
+        var acceptedFolder = (Options.NdtProcessAcceptedFolder ?? string.Empty).Trim();
 
         const string header = "PO Number, NDT BATCH NO, NDT Pcs, OK, Visual Reject, Hydrotest Reject, Re visual Reject, Bundle Start, Bundle End";
         var row = string.Join(", ",
@@ -612,9 +672,67 @@ public sealed class ManualNdtTagService : IManualNdtTagService
             Escape(FormatBundleDateTime(visual.StartTime)),
             Escape(FormatBundleDateTime(revisual.EndTime)));
 
-        await File.WriteAllLinesAsync(path, new[] { header, row }, cancellationToken).ConfigureAwait(false);
-        _logger.LogInformation("Wrote consolidated NDT process CSV: {Path}", path);
-        return path;
+        var existingInBundle = ResolveExistingNdtProcessPathInFolder(state, folder);
+        if (existingInBundle is null && !string.IsNullOrWhiteSpace(acceptedFolder))
+        {
+            var acceptedPath = ResolveExistingNdtProcessPathInFolder(state, acceptedFolder);
+            if (acceptedPath is not null)
+            {
+                var mailMsg =
+                    $"The NDT process file for batch {state.NdtBatchNo} has already been pushed to SAP " +
+                    $"(found under Bundle Accepted: {Path.GetFileName(acceptedPath)}). " +
+                    "Corrected counts were saved in MES SQL, but a new Bundle file was not created. " +
+                    $"Mail the SAP team with OK={revisual.OkPcs}, Visual Reject={visual.RejectedPcs}, " +
+                    $"Hydrotest Reject={hydro.RejectedPcs}, Re visual Reject={revisual.RejectedPcs} " +
+                    "so they can update the values on their side.";
+                _logger.LogWarning(
+                    "Batch {BatchNo}: NDT process CSV already in Bundle Accepted ({Path}); skipping Bundle rewrite. {Message}",
+                    state.NdtBatchNo,
+                    acceptedPath,
+                    mailMsg);
+                return new ProcessCsvWriteResult(acceptedPath, AlreadySentToSap: true, mailMsg);
+            }
+        }
+
+        string path;
+        if (existingInBundle is not null)
+        {
+            path = existingInBundle;
+            await File.WriteAllLinesAsync(path, new[] { header, row }, cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation(
+                "Updated consolidated NDT process CSV in place for batch {BatchNo}: {Path}",
+                state.NdtBatchNo,
+                path);
+        }
+        else
+        {
+            var now = DateTime.Now;
+            var datePart = now.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
+            var timePart = now.ToString("HHmmss", CultureInfo.InvariantCulture);
+            var safePo = CsvOutputFileNaming.SanitizeToken(state.PoNumber.Trim());
+            var safeBatch = CsvOutputFileNaming.SanitizeToken(state.NdtBatchNo);
+            var fileName = $"NDT_process_{safePo}_{safeBatch}_{datePart}_{timePart}.csv";
+            path = Path.Combine(folder, fileName);
+            await File.WriteAllLinesAsync(path, new[] { header, row }, cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation("Wrote consolidated NDT process CSV: {Path}", path);
+        }
+
+        return new ProcessCsvWriteResult(path, AlreadySentToSap: false, OperatorMessage: null);
+    }
+
+    private string? ResolveExistingNdtProcessPathInFolder(FlowState state, string folder)
+    {
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+            return null;
+
+        if (!string.IsNullOrWhiteSpace(state.LastNdtProcessCsvPath) &&
+            File.Exists(state.LastNdtProcessCsvPath) &&
+            UploadNdtBundleFileService.IsPathUnderFolder(state.LastNdtProcessCsvPath, folder))
+        {
+            return state.LastNdtProcessCsvPath;
+        }
+
+        return NdtProcessCsvReconcileHelper.FindLatestNdtProcessFileForBatch(folder, state.NdtBatchNo);
     }
 
     private Task RecordConsolidatedTraceabilityAsync(FlowState state, string csvPath, CancellationToken cancellationToken)
@@ -753,6 +871,10 @@ public sealed class ManualNdtTagService : IManualNdtTagService
 
     private async Task TrySaveZplPreviewAsync(ManualTagStation station, int operatorStationNumber, string ndtBatchNo, byte[] zplBytes, CancellationToken cancellationToken)
     {
+        // NdtProcessOutputFolder is a SAP pickup — keep it CSV-only unless explicitly enabled for debug.
+        if (!Options.EnableStationZplPreviewFiles)
+            return;
+
         try
         {
             string folder;

@@ -1,8 +1,10 @@
+using System.Net.Sockets;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using NdtBundleService.Configuration;
 using NdtBundleService.Models;
 using NdtBundleService.Services;
+using NdtBundleService.Services.PoLifecycle;
 
 namespace NdtBundleService.Controllers;
 
@@ -26,11 +28,14 @@ public sealed class ReconcileController : ControllerBase
     private readonly IFormationChartProvider _formationChartProvider;
     private readonly IPipeSizeProvider _pipeSizeProvider;
     private readonly IReconcileBundleTagService _reconcileTagService;
+    private readonly IMillPrinterSettingsService _millPrinters;
     private readonly IOutputSlitSapStatusRepository _sapStatus;
     private readonly IPpcCorrectionRepository _ppcCorrections;
     private readonly IBundleMergeService _bundleMerge;
     private readonly IMillSequenceService _millSequence;
     private readonly ICsvFillService _csvFill;
+    private readonly IPoLifecycleService _poLifecycle;
+    private readonly IWipBundleRunningPoProvider _wipRunningPo;
     private readonly IOptionsMonitor<NdtBundleOptions> _options;
     private readonly ILogger<ReconcileController> _logger;
 
@@ -41,11 +46,14 @@ public sealed class ReconcileController : ControllerBase
         IFormationChartProvider formationChartProvider,
         IPipeSizeProvider pipeSizeProvider,
         IReconcileBundleTagService reconcileTagService,
+        IMillPrinterSettingsService millPrinters,
         IOutputSlitSapStatusRepository sapStatus,
         IPpcCorrectionRepository ppcCorrections,
         IBundleMergeService bundleMerge,
         IMillSequenceService millSequence,
         ICsvFillService csvFill,
+        IPoLifecycleService poLifecycle,
+        IWipBundleRunningPoProvider wipRunningPo,
         IOptionsMonitor<NdtBundleOptions> options,
         ILogger<ReconcileController> logger)
     {
@@ -55,11 +63,14 @@ public sealed class ReconcileController : ControllerBase
         _formationChartProvider = formationChartProvider;
         _pipeSizeProvider = pipeSizeProvider;
         _reconcileTagService = reconcileTagService;
+        _millPrinters = millPrinters;
         _sapStatus = sapStatus;
         _ppcCorrections = ppcCorrections;
         _bundleMerge = bundleMerge;
         _millSequence = millSequence;
         _csvFill = csvFill;
+        _poLifecycle = poLifecycle;
+        _wipRunningPo = wipRunningPo;
         _options = options;
         _logger = logger;
     }
@@ -382,7 +393,8 @@ public sealed class ReconcileController : ControllerBase
 
     /// <summary>
     /// Operator manual bundle reconcile: force-finalize awaiting recon when applicable, lock bundle,
-    /// set corrected total, and reprint tag (with "Reprint" marker). Works with or without slit rows.
+    /// and set corrected total. By default also reprints the tag (with "Reprint" marker); set
+    /// <see cref="ManualBundleReconcileRequest.Reprint"/> to false to skip print. Works with or without slit rows.
     /// </summary>
     [HttpPost("manual-bundle-reconcile")]
     public async Task<IActionResult> ManualBundleReconcile(
@@ -397,6 +409,7 @@ public sealed class ReconcileController : ControllerBase
             return BadRequest(new { Message = "CorrectedTotal must be non-negative." });
 
         var batchNo = request.NdtBatchNo.Trim();
+        var shouldReprint = request.Reprint != false;
 
         string? poMismatchWarning = null;
         try
@@ -444,14 +457,23 @@ public sealed class ReconcileController : ControllerBase
             .UpdateBundleSummaryCsvAsync(batchNo, request.CorrectedTotal, CancellationToken.None)
             .ConfigureAwait(false);
 
-        var bundleForPrint = await _bundleRepository
-            .GetByBatchNoAsync(batchNo, cancellationToken)
-            .ConfigureAwait(false)
-            ?? result.Bundle;
+        var printSuccess = false;
+        string? printMessage = null;
+        string? printErrorDetail = null;
+        if (shouldReprint)
+        {
+            var bundleForPrint = await _bundleRepository
+                .GetByBatchNoAsync(batchNo, cancellationToken)
+                .ConfigureAwait(false)
+                ?? result.Bundle;
 
-        var printResult = await _reconcileTagService
-            .ReprintAsync(bundleForPrint, cancellationToken)
-            .ConfigureAwait(false);
+            var printResult = await _reconcileTagService
+                .ReprintAsync(bundleForPrint, cancellationToken, request.PrinterTarget)
+                .ConfigureAwait(false);
+            printSuccess = printResult.Success;
+            printMessage = printResult.Message;
+            printErrorDetail = printResult.ErrorDetail;
+        }
 
         // Plan case (c): mid-fill corrected target below already-stamped CSV → open PPC resubmit items
         // for any SAP-Accepted files on this batch (operator email path; system never auto-emails).
@@ -494,14 +516,19 @@ public sealed class ReconcileController : ControllerBase
             }
         }
 
+        var message = !shouldReprint
+            ? "Bundle manually reconciled (no tag reprint)."
+            : printSuccess
+                ? "Bundle manually reconciled and tag reprinted."
+                : "Bundle manually reconciled but tag reprint failed.";
+
         return Ok(new
         {
-            Message = printResult.Success
-                ? "Bundle manually reconciled and tag reprinted."
-                : "Bundle manually reconciled but tag reprint failed.",
-            PrintSuccess = printResult.Success,
-            PrintMessage = printResult.Message,
-            PrintErrorDetail = printResult.ErrorDetail,
+            Message = message,
+            PrintRequested = shouldReprint,
+            PrintSuccess = shouldReprint && printSuccess,
+            PrintMessage = printMessage,
+            PrintErrorDetail = printErrorDetail,
             NdtBatchNo = batchNo,
             OriginalTotal = result.OriginalTotal,
             CorrectedTotal = result.CorrectedTotal,
@@ -521,6 +548,8 @@ public sealed class ReconcileController : ControllerBase
     /// <summary>
     /// When Manual Reconcile leaves the bundle terminal (exact or overshoot), open the next
     /// stamp-only sequence so subsequent CSVs do not wait for the next PLC print.
+    /// Skipped for finished / previously-ran POs so slit corrections on old batches cannot
+    /// spawn a phantom forming stamp (e.g. Manual Reconcile on 1226100021 / PO 2545).
     /// </summary>
     private async Task TryOpenCsvAdvanceAfterManualReconcileAsync(
         ManualBundleReconcileResult result,
@@ -529,6 +558,43 @@ public sealed class ReconcileController : ControllerBase
         var bundle = result.Bundle;
         if (!CsvFillSequenceAdvance.IsTerminalForAdvance(bundle.CsvFillState))
             return;
+
+        var phase = _poLifecycle.GetPhase(bundle.MillNo, bundle.PoNumber);
+        string? runningPo = null;
+        try
+        {
+            runningPo = await _wipRunningPo
+                .TryGetRunningPoForMillAsync(bundle.MillNo, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(
+                ex,
+                "Could not resolve running PO for mill {Mill} before CSV-advance after manual reconcile of {BatchNo}.",
+                bundle.MillNo,
+                bundle.BundleNo);
+        }
+
+        var waitingForNewWip = _wipRunningPo.IsWaitingForNewWipAfterPoEnd(bundle.MillNo);
+        if (!CsvFillSequenceAdvance.IsEligiblePoForCsvAdvanceAfterManualReconcile(
+                phase,
+                bundle.PoNumber,
+                runningPo,
+                waitingForNewWip))
+        {
+            _logger.LogInformation(
+                "Skipping CSV-advance after manual reconcile of {BatchNo} PO {PO} Mill {Mill} "
+                + "(phase={Phase}, runningPo={RunningPo}, waitingForNewWip={Waiting}) — "
+                + "slit corrections on finished/prior POs must not open a forming stamp.",
+                bundle.BundleNo,
+                bundle.PoNumber,
+                bundle.MillNo,
+                phase,
+                runningPo ?? "(unknown)",
+                waitingForNewWip);
+            return;
+        }
 
         try
         {
@@ -625,7 +691,7 @@ public sealed class ReconcileController : ControllerBase
         if (bundle is null)
             return NotFound(new { Message = $"Bundle {batchNo} not found." });
 
-        var slits = await _bundleRepository.GetSlitsForBatchAsync(batchNo, cancellationToken).ConfigureAwait(false);
+        var slits = await _bundleRepository.GetSlitDetailsForBatchAsync(batchNo, cancellationToken).ConfigureAwait(false);
         var slitSum = slits.Sum(s => s.NdtPipes);
         var bundleIsForming = ReconcileFormingBundleHelper.IsForming(bundle, slitSum, fromDatabase is null);
         var displayTotal = ReconcileFormingBundleHelper.ResolveDisplayTotal(bundle, slitSum, bundleIsForming);
@@ -671,6 +737,11 @@ public sealed class ReconcileController : ControllerBase
                 {
                     SlitNo = s.SlitNo,
                     NdtPipes = s.NdtPipes,
+                    RejectedPipes = s.RejectedPipes,
+                    SlitStartTime = s.SlitStartTime,
+                    SlitFinishTime = s.SlitFinishTime,
+                    NdtShortLengthPipe = s.NdtShortLengthPipe,
+                    RejectedShortLengthPipe = s.RejectedShortLengthPipe,
                     SapStatus = strongest.HasValue ? OutputSlitSapStatusPolicy.ToDbString(strongest.Value) : null,
                     SapStatusAtUtc = strongestAtUtc,
                     ResubmitCount = known.Count > 0 ? known.Max(static st => st.ResubmitCount) : 0,
@@ -1072,6 +1143,48 @@ public sealed class ReconcileController : ControllerBase
     }
 
     /// <summary>
+    /// Reprint destinations for Printed Tags / Reconcile chooser, with a short TCP reachability probe.
+    /// Mill 1: WIP, FG, PAS Room. Other mills: mill printer + PAS Room.
+    /// </summary>
+    [HttpGet("reprint-printers")]
+    public async Task<IActionResult> GetReprintPrinters(
+        [FromQuery] int millNo = 1,
+        CancellationToken cancellationToken = default)
+    {
+        if (millNo is < 1 or > 4)
+            return BadRequest(new { Message = "millNo must be 1–4." });
+
+        var targets = millNo == 1
+            ? new[] { ReprintPrinterTarget.Wip, ReprintPrinterTarget.Fg, ReprintPrinterTarget.Pas }
+            : new[] { ReprintPrinterTarget.Mill, ReprintPrinterTarget.Pas };
+
+        var printers = new List<object>(targets.Length);
+        foreach (var target in targets)
+        {
+            var resolved = _millPrinters.ResolveReprintTarget(millNo, target);
+            var reachable = false;
+            if (resolved.Configured)
+            {
+                reachable = await TcpProbeAsync(resolved.Address, resolved.Port, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            printers.Add(new
+            {
+                printerTarget = target,
+                displayName = resolved.DisplayName,
+                address = resolved.Address,
+                port = resolved.Port,
+                configured = resolved.Configured,
+                reachable,
+                status = !resolved.Configured ? "NotConfigured" : reachable ? "Ready" : "Unreachable"
+            });
+        }
+
+        return Ok(new { millNo, printers });
+    }
+
+    /// <summary>
     /// Print the selected bundle with its current (reconciled) NDT pipe count as a ZPL tag (with "Reprint" on the label).
     /// </summary>
     [HttpPost("print-bundle")]
@@ -1085,15 +1198,27 @@ public sealed class ReconcileController : ControllerBase
         if (bundle is null)
             return NotFound(new { Message = $"Bundle {batchNo} not found." });
 
-        var printResult = await _reconcileTagService.ReprintAsync(bundle, cancellationToken).ConfigureAwait(false);
+        var printResult = await _reconcileTagService
+            .ReprintAsync(bundle, cancellationToken, request.PrinterTarget)
+            .ConfigureAwait(false);
         if (printResult.Success)
-            return Ok(new { Message = printResult.Message, NdtBatchNo = batchNo, NdtPcs = bundle.TotalNdtPcs });
+        {
+            return Ok(new
+            {
+                Message = printResult.Message,
+                NdtBatchNo = batchNo,
+                NdtPcs = bundle.TotalNdtPcs,
+                PrinterTarget = ReprintPrinterTarget.Normalize(request.PrinterTarget)
+            });
+        }
+
         return StatusCode(500, new
         {
             Message = printResult.Message,
             Detail = printResult.ErrorDetail,
             NdtBatchNo = batchNo,
-            NdtPcs = bundle.TotalNdtPcs
+            NdtPcs = bundle.TotalNdtPcs,
+            PrinterTarget = ReprintPrinterTarget.Normalize(request.PrinterTarget)
         });
     }
 
@@ -1165,6 +1290,16 @@ public sealed class ReconcileController : ControllerBase
         public int CorrectedTotal { get; set; }
         public string Reason { get; set; } = string.Empty;
         public string ReconciledBy { get; set; } = string.Empty;
+
+        /// <summary>
+        /// When true or omitted, reprint the tag after reconcile. Set false to update SQL/CSV only.
+        /// </summary>
+        public bool? Reprint { get; set; }
+
+        /// <summary>
+        /// Reprint destination when <see cref="Reprint"/> is true: <c>wip</c>, <c>fg</c>, <c>pas</c>, or <c>mill</c>.
+        /// </summary>
+        public string? PrinterTarget { get; set; }
     }
 
     public sealed class ReconcileRequest
@@ -1176,6 +1311,12 @@ public sealed class ReconcileController : ControllerBase
     public sealed class PrintBundleRequest
     {
         public string NdtBatchNo { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Reprint destination: <c>wip</c> (Mill-1 WIP), <c>fg</c> (Mill-1 FG), <c>pas</c> (PAS room),
+        /// or <c>mill</c>/omit (default mill close-tag printer).
+        /// </summary>
+        public string? PrinterTarget { get; set; }
     }
 
     public sealed class ReconcileSlitRequest
@@ -1183,6 +1324,22 @@ public sealed class ReconcileController : ControllerBase
         public string NdtBatchNo { get; set; } = string.Empty;
         public string SlitNo { get; set; } = string.Empty;
         public int NewNdtPipes { get; set; }
+    }
+
+    private static async Task<bool> TcpProbeAsync(string host, int port, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var tcp = new TcpClient();
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            linked.CancelAfter(2000);
+            await tcp.ConnectAsync(host, port, linked.Token).ConfigureAwait(false);
+            return tcp.Connected;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public sealed class ClearPpcCorrectionRequest

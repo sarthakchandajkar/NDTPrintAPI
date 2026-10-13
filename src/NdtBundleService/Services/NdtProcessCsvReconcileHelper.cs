@@ -139,14 +139,36 @@ internal static class NdtProcessCsvReconcileHelper
         NdtBundleOptions options,
         string ndtBatchNo)
     {
+        var batch = ndtBatchNo.Trim();
         var folder = (options.NdtProcessOutputFolder ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+        if (!string.IsNullOrWhiteSpace(folder) && Directory.Exists(folder))
+        {
+            var path = FindLatestNdtProcessFileForBatch(folder, batch);
+            var fromBundle = path is null ? null : TryReadMetricsFromPath(path, batch);
+            if (fromBundle is not null)
+                return fromBundle;
+        }
+
+        var accepted = (options.NdtProcessAcceptedFolder ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(accepted) && Directory.Exists(accepted))
+        {
+            var acceptedPath = FindLatestNdtProcessFileForBatch(accepted, batch);
+            if (acceptedPath is not null)
+                return TryReadMetricsFromPath(acceptedPath, batch);
+        }
+
+        return null;
+    }
+
+    /// <summary>Reads metrics from a specific NDT process CSV path for the batch.</summary>
+    public static (int Ok, int VisualReject, int HydroReject, int RevisualReject, int NdtPcs, string? Po)? TryReadMetricsFromPath(
+        string path,
+        string ndtBatchNo)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
             return null;
 
-        var path = FindLatestNdtProcessFileForBatch(folder, ndtBatchNo.Trim());
-        if (path is null)
-            return null;
-
+        var batch = ndtBatchNo.Trim();
         try
         {
             var lines = File.ReadAllLines(path);
@@ -155,7 +177,7 @@ internal static class NdtProcessCsvReconcileHelper
                 if (string.IsNullOrWhiteSpace(lines[i]))
                     continue;
                 var cols = ReconcileCsvParsing.SplitCsvLine(lines[i]);
-                if (cols.Count < MinColumns || !cols[ColBatch].Trim().Equals(ndtBatchNo.Trim(), StringComparison.OrdinalIgnoreCase))
+                if (cols.Count < MinColumns || !cols[ColBatch].Trim().Equals(batch, StringComparison.OrdinalIgnoreCase))
                     continue;
 
                 static int ParseAt(List<string> c, int index) =>

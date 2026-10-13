@@ -34,12 +34,17 @@ public sealed class ReconcileCsvParsingTests
     [Fact]
     public void ResolveOutputCsvColumns_uses_header_positions()
     {
-        var header = "PO Number,Slit No,NDT Pipes,Rejected P,Slit Start Time,Slit Finish Time,Mill No,NDT Short Length Pipe,Rejected Short Length Pipe,NDT Batch No";
+        var header = "PO Number,Slit No,NDT Pipes,Rejected Pipes,Slit Start Time,Slit Finish Time,Mill No,NDT Short Length Pipe,Rejected Short Length Pipe,NDT Batch No";
         var cols = ReconcileCsvParsing.ResolveOutputCsvColumns(header);
 
         Assert.Equal(0, cols.PoNumber);
         Assert.Equal(1, cols.SlitNo);
         Assert.Equal(2, cols.NdtPipes);
+        Assert.Equal(3, cols.RejectedP);
+        Assert.Equal(4, cols.SlitStartTime);
+        Assert.Equal(5, cols.SlitFinishTime);
+        Assert.Equal(7, cols.NdtShortLengthPipe);
+        Assert.Equal(8, cols.RejectedShortLengthPipe);
         Assert.Equal(9, cols.NdtBatchNo);
     }
 

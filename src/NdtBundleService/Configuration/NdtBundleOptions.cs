@@ -52,6 +52,13 @@ public class NdtBundleOptions
     /// </summary>
     public string NdtProcessOutputFolder { get; set; } = @"Z:\To SAP\TM\NDT\NDT Final Output\Bundle";
 
+    /// <summary>
+    /// Archive after SAP picks up NDT process CSVs from <see cref="NdtProcessOutputFolder"/>.
+    /// When a batch file is here, Revisual reconcile must not write a new Bundle file (duplicate SAP risk);
+    /// operators should mail SAP the corrected counts instead.
+    /// </summary>
+    public string NdtProcessAcceptedFolder { get; set; } = @"Z:\To SAP\TM\NDT\NDT Final Output\Bundle Accepted";
+
     /// <summary>Folder where PO Plan (WIP) CSV files are dropped from SAP (e.g. D:\NDT\From SAP\TM). When set, one file is used as current PO plan; advance to next file only on PO End. If empty, single-file paths below are used.</summary>
     public string PoPlanFolder { get; set; } = string.Empty;
 
@@ -99,7 +106,7 @@ public class NdtBundleOptions
     /// <summary>Optional per-mill tag length override (keys <c>"1"</c>–<c>"4"</c>). Width uses <see cref="NdtTagLabelWidthMm"/>.</summary>
     public Dictionary<string, int> NdtTagLabelLengthMmByMill { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>When true, the service sends tags to NdtTagPrinterAddress. When false, only CSV outputs are produced (slit CSV, manual station CSV); no network print. Disk ZPL previews are controlled separately by <see cref="EnableBundleZplPreviewFiles"/>.</summary>
+    /// <summary>When true, the service sends tags to NdtTagPrinterAddress. When false, only CSV outputs are produced (slit CSV, manual station CSV); no network print. Disk ZPL previews are controlled separately by <see cref="EnableBundleZplPreviewFiles"/> / <see cref="EnableStationZplPreviewFiles"/>.</summary>
     public bool EnableNdtTagZplAndPrint { get; set; }
 
     /// <summary>When true, manual station state is persisted as JSON files under OutputBundleFolder\ManualStationState. When false, state is kept in memory only and no files are generated in that folder.</summary>
@@ -124,6 +131,13 @@ public class NdtBundleOptions
     public bool EnableBundleZplPreviewFiles { get; set; }
 
     /// <summary>
+    /// When true, writes station tag <c>{Station}_NDTTag_{batchNo}_{timestamp}.zpl</c> preview files to
+    /// <see cref="NdtProcessOutputFolder"/> on Visual / Hydro / Revisual print. Off by default — that folder is a SAP
+    /// pickup and must stay CSV-only; tags still go to the printer when <see cref="EnableNdtTagZplAndPrint"/> is true.
+    /// </summary>
+    public bool EnableStationZplPreviewFiles { get; set; }
+
+    /// <summary>
     /// Optional folder for completed bundle artifacts: <c>NDT_Bundle_{batchNo}.csv</c> and <c>NDT_Bundle_{batchNo}.zpl</c>.
     /// Production example: <c>Z:\To SAP\TM\NDT\NDT Bundles</c>. Per-slit input-slit CSVs stay in <see cref="OutputBundleFolder"/>.
     /// Kept so existing files can still be scanned; new files are written only when the flags above are true.
@@ -132,10 +146,16 @@ public class NdtBundleOptions
     public string BundleSummaryOutputFolder { get; set; } = string.Empty;
 
     /// <summary>
-    /// Folder where per-batch <c>UploadNdtBundle__PO__…</c> CSV files are written after Revisual completes.
+    /// Folder where per-batch <c>ndt-{ddMMyy}1607000.csv</c> files are written after Revisual completes.
     /// Production example: <c>Z:\To SAP\TM\NDT\MES PAS NDT\Bundle</c>.
     /// </summary>
     public string UploadNdtBundleFilesFolder { get; set; } = @"Z:\To SAP\TM\NDT\MES PAS NDT\Bundle";
+
+    /// <summary>
+    /// Optional archive for MES PAS upload CSVs after internal consumption (not the SAP Final Output Accepted path).
+    /// When set and a prior upload for the batch is here, regenerate is blocked so counts are corrected by mail/process instead.
+    /// </summary>
+    public string UploadNdtBundleAcceptedFolder { get; set; } = string.Empty;
 
     /// <summary>Folder where slitting accepted CSVs are read for Slit Width on upload bundle files. Production: <c>Z:\To SAP\TM\Slitting\Slit Accepted</c> (not Input Slit Accepted).</summary>
     public string SlitAcceptedFolder { get; set; } = @"Z:\To SAP\TM\Slitting\Slit Accepted";
@@ -151,6 +171,12 @@ public class NdtBundleOptions
     /// even while <see cref="WaitForWipBundleAfterPoEnd"/> is active. File mills keep the historical hard-stop.
     /// </summary>
     public bool BundleSlitRowsWithFilePoDuringWipWait { get; set; } = true;
+
+    /// <summary>
+    /// When true (default), detect linked-PO cutovers (dual Input Slit files / <c>_91</c> slit marker) on
+    /// <c>PoEndSource=Plc</c> or <c>TcpOpen</c> mills and run PO-end without waiting for a PLC trigger.
+    /// </summary>
+    public bool EnableLinkedPoCutover { get; set; } = true;
 
     /// <summary>
     /// When true (default), WIP bundle running-PO ordering uses the filename-embedded <c>yyMMdd_HHmmss</c>
@@ -396,8 +422,9 @@ public class NdtBundleOptions
     public string? FgBundleImportMinLastWriteUtc { get; set; } = "2026-06-01T00:00:00Z";
 
     /// <summary>
-    /// When true, upload CSV generation prefers <c>Slit_Accepted_Row</c> / <c>Fg_Bundle_Row</c> over live folder scans
-    /// (CSV fallback when SQL misses).
+    /// When true (default), upload CSV generation reads lookup columns only from SQL
+    /// (<c>PO_Plan_WIP</c>, <c>Slit_Accepted_Row</c>, <c>Fg_Bundle_Row</c>, prior <c>Upload_Bundle_Row</c>).
+    /// Folder CSVs are not scanned on the request path — Shared background import keeps SQL populated.
     /// </summary>
     public bool PreferSqlForUploadLookups { get; set; } = true;
 
